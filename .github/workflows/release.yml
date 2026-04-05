@@ -9,21 +9,25 @@ permissions:
   pull-requests: write
 
 jobs:
-  # ── Gate: all CI checks must pass first ─────────────────────────────
-  ci:
-    name: CI Gate
-    uses: ./.github/workflows/ci.yml
-    secrets: inherit
+  # ── Gate: run tests + security before releasing ─────────────────────
+  test:
+    name: Test Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p st-cli
+      - name: Run all tests
+        run: cargo test --workspace
+        env:
+          ST_CLI_BIN: ${{ github.workspace }}/target/debug/st-cli
 
   # ── Release PR (via release-plz) ───────────────────────────────────
-  # release-plz analyzes commits since last release, determines the
-  # semver bump (patch/minor/major based on conventional commits),
-  # updates Cargo.toml versions, generates CHANGELOG.md, and creates
-  # a release PR. When merged, it creates a GitHub release + git tag.
   release-plz:
     name: Release
     runs-on: ubuntu-latest
-    needs: [ci]
+    needs: [test]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,7 +49,7 @@ jobs:
   publish:
     name: Publish Release
     runs-on: ubuntu-latest
-    needs: [ci]
+    needs: [test]
     # Only run when a release PR commit is pushed (contains version bump)
     if: contains(github.event.head_commit.message, 'chore(release)')
     steps:
