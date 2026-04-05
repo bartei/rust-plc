@@ -15,24 +15,43 @@ pub fn run_dap<R: Read, W: Write>(input: R, output: W, source_path: &str) {
     let mut server = Server::new(BufReader::new(input), BufWriter::new(output));
     let mut session = DapSession::new(source_path);
 
+    // Log to stderr for development debugging
+    eprintln!("[DAP] Server started for: {source_path}");
+
     loop {
         let req = match server.poll_request() {
             Ok(Some(req)) => req,
-            Ok(None) | Err(_) => break,
+            Ok(None) => {
+                eprintln!("[DAP] Client disconnected (EOF)");
+                break;
+            }
+            Err(e) => {
+                eprintln!("[DAP] Read error: {e}");
+                break;
+            }
         };
 
+        eprintln!("[DAP] Request: {:?}", req.command);
+
         let response = session.handle_request(&req);
+
+        eprintln!("[DAP] Response: success={}", response.success);
+
         if server.respond(response).is_err() {
+            eprintln!("[DAP] Failed to send response");
             break;
         }
 
         for event in session.pending_events.drain(..) {
+            eprintln!("[DAP] Event: {event:?}");
             if server.send_event(event).is_err() {
+                eprintln!("[DAP] Failed to send event");
                 break;
             }
         }
 
         if session.should_exit {
+            eprintln!("[DAP] Session exit requested");
             break;
         }
     }
@@ -60,6 +79,15 @@ fn err(seq: i64, msg: &str) -> Response {
         body: None,
         error: None,
     }
+}
+
+/// Helper to create a console output event (shows in VSCode Debug Console)
+fn console_output(msg: &str) -> Event {
+    Event::Output(OutputEventBody {
+        category: Some(OutputEventCategory::Console),
+        output: format!("{msg}\n"),
+        ..Default::default()
+    })
 }
 
 struct DapSession {
@@ -143,6 +171,10 @@ impl DapSession {
     }
 
     fn handle_launch(&mut self, seq: i64) -> Response {
+        self.pending_events.push(console_output(&format!(
+            "Loading: {}", self.source_path
+        )));
+
         self.source = match std::fs::read_to_string(&self.source_path) {
             Ok(s) => s,
             Err(e) => return err(seq, &format!("Cannot read '{}': {e}", self.source_path)),
@@ -150,13 +182,21 @@ impl DapSession {
 
         let parse_result = st_syntax::parse(&self.source);
         if !parse_result.errors.is_empty() {
-            return err(seq, "Parse errors in source file");
+            let msg = format!("{} parse error(s) found", parse_result.errors.len());
+            self.pending_events.push(console_output(&msg));
+            return err(seq, &msg);
         }
 
         let module = match st_compiler::compile(&parse_result.source_file) {
             Ok(m) => m,
             Err(e) => return err(seq, &format!("Compilation error: {e}")),
         };
+
+        let func_count = module.functions.len();
+        let instr_count: usize = module.functions.iter().map(|f| f.instructions.len()).sum();
+        self.pending_events.push(console_output(&format!(
+            "Compiled: {func_count} POU(s), {instr_count} instructions"
+        )));
 
         if !module.functions.iter().any(|f| f.kind == PouKind::Program) {
             return err(seq, "No PROGRAM found in source file");
@@ -332,19 +372,22 @@ impl DapSession {
     }
 
     fn resume_execution(&mut self, mode: StepMode) {
-        let Some(ref mut vm) = self.vm else { return };
+        let Some(ref mut vm) = self.vm else {
+            eprintln!("[DAP] resume_execution: no VM");
+            return;
+        };
 
         let depth = vm.call_depth();
-        // Get current source offset so stepping knows when we've moved to a new line
         let current_source_offset = vm.stack_frames()
             .first()
             .map(|f| f.source_offset)
             .unwrap_or(0);
+
+        eprintln!("[DAP] resume: mode={mode:?} depth={depth} source_offset={current_source_offset}");
         vm.debug_mut().resume_with_source(mode, depth, current_source_offset);
 
-        // If the VM already has call frames (paused mid-execution), continue.
-        // Otherwise, start a new run.
         let result = if vm.call_depth() > 0 {
+            eprintln!("[DAP] continuing execution (call_depth={})", vm.call_depth());
             vm.continue_execution()
         } else {
             let program_name = vm
@@ -354,21 +397,39 @@ impl DapSession {
                 .find(|f| f.kind == PouKind::Program)
                 .map(|f| f.name.clone())
                 .unwrap_or_default();
+            eprintln!("[DAP] starting new run: {program_name}");
             vm.run(&program_name)
         };
 
         match result {
             Err(VmError::Halt) => {
-                let reason = match vm.debug_state().pause_reason {
+                let pause_reason = vm.debug_state().pause_reason;
+                let frames = vm.stack_frames();
+                let frame_desc = frames.first()
+                    .map(|f| format!("{} line {}", f.func_name, {
+                        let mut line = 1usize;
+                        for (i, b) in self.source.bytes().enumerate() {
+                            if i >= f.source_offset { break; }
+                            if b == b'\n' { line += 1; }
+                        }
+                        line
+                    }))
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                eprintln!("[DAP] Halted: reason={pause_reason:?} at {frame_desc}");
+
+                let reason = match pause_reason {
                     PauseReason::Breakpoint => StoppedEventReason::Breakpoint,
                     PauseReason::Step => StoppedEventReason::Step,
                     PauseReason::PauseRequest => StoppedEventReason::Pause,
                     PauseReason::Entry => StoppedEventReason::Entry,
                     PauseReason::None => StoppedEventReason::Step,
                 };
+                self.pending_events.push(console_output(&format!(
+                    "Stopped: {pause_reason:?} at {frame_desc}"
+                )));
                 self.pending_events.push(Event::Stopped(StoppedEventBody {
                     reason,
-                    description: None,
+                    description: Some(format!("Stopped at {frame_desc}")),
                     thread_id: Some(1),
                     preserve_focus_hint: None,
                     text: None,
@@ -377,9 +438,12 @@ impl DapSession {
                 }));
             }
             Ok(_) => {
+                eprintln!("[DAP] Program completed normally");
+                self.pending_events.push(console_output("Program completed"));
                 self.pending_events.push(Event::Terminated(None));
             }
             Err(e) => {
+                eprintln!("[DAP] Runtime error: {e}");
                 self.pending_events.push(Event::Output(OutputEventBody {
                     category: Some(OutputEventCategory::Stderr),
                     output: format!("Runtime error: {e}\n"),
