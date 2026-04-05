@@ -19,6 +19,7 @@
 - [Functions](./language/functions.md)
 - [Function Blocks](./language/function-blocks.md)
 - [User-Defined Types](./language/user-defined-types.md)
+- [Standard Library](./language/standard-library.md)
 
 # CLI Reference
 
