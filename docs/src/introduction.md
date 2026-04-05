@@ -5,7 +5,10 @@
 - **Compiler** — Parses Structured Text source code, performs semantic analysis with 30+ diagnostic checks, and compiles to register-based bytecode
 - **Runtime** — A bytecode VM that executes compiled programs in a PLC-style scan cycle loop
 - **LSP Server** — Full Language Server Protocol integration for real-time diagnostics, hover information, go-to-definition, code completion, and syntax highlighting in VSCode
-- **CLI Tool** — `st-cli` provides check, compile, and run commands for the terminal
+- **DAP Debugger** — Full Debug Adapter Protocol support with breakpoints, stepping, variable inspection, and scan-cycle-aware continue
+- **Online Change** — Hot-reload compiled programs without stopping the runtime, with automatic variable migration
+- **Monitor Server** — WebSocket-based live variable dashboard for real-time trend recording
+- **CLI Tool** — `st-cli` provides check, compile, run, and debug commands for the terminal
 
 ## What is Structured Text?
 
@@ -36,8 +39,9 @@ END_PROGRAM
 | VSCode extension with syntax highlighting | ✅ |
 | Bytecode compiler | ✅ |
 | Runtime VM with scan cycle engine | ✅ |
-| Debugger (DAP) | 🔜 |
-| Online change (hot reload) | 🔜 |
+| Debugger (DAP) | ✅ |
+| Online change (hot reload) | ✅ |
+| Monitor server (WebSocket live dashboard) | ✅ |
 | LLVM native compilation | 🔜 |
 
 ## Quick Example

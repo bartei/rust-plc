@@ -97,6 +97,48 @@ The server communicates over **stdin/stdout** using the JSON-RPC protocol. This 
 - `textDocument/documentSymbol`
 - `textDocument/semanticTokens/full`
 
+## `st-cli debug`
+
+Start a Debug Adapter Protocol (DAP) session for a Structured Text file.
+
+```bash
+st-cli debug <file>
+```
+
+The debug command compiles the source file and launches the DAP server over stdin/stdout. This is typically invoked by the VSCode extension when you press F5, not called directly by users.
+
+**Example:**
+```bash
+$ st-cli debug my_program.st
+```
+
+**DAP capabilities supported:**
+
+| Capability | Description |
+|-----------|-------------|
+| Breakpoints | Set/clear breakpoints on executable lines |
+| Step In | Step into function/FB calls (`F11`) |
+| Step Over | Step over one statement (`F10`) |
+| Step Out | Run until current function returns (`Shift+F11`) |
+| Continue | Run across scan cycles until a breakpoint is hit (`F5`) |
+| Stack Trace | View the full call stack including nested POU calls |
+| Scopes | Inspect Locals and Globals scopes |
+| Variables | View all variables with types and current values |
+| Evaluate | Evaluate variable names in the current scope |
+
+**Key behaviors:**
+
+- **Continue runs across scan cycles.** When you press Continue (F5), execution proceeds through the remainder of the current scan cycle and into subsequent cycles until a breakpoint is hit. This matches the expected PLC debugging experience where the program loops continuously.
+- **PROGRAM locals are retained across scan cycles.** The VM uses `body_start_pc` to skip variable initialization on subsequent cycles, preserving local variable state just like a real PLC.
+- **Variable names that conflict with ST keywords** (e.g., a variable named `dt` conflicting with the `DT` date-time keyword) are handled correctly by the debugger's evaluate command.
+
+**Pipeline:**
+1. Parse the source file
+2. Run semantic analysis -- abort if errors
+3. Compile to bytecode with source map entries
+4. Launch DAP server, awaiting `initialize` and `launch` requests
+5. Execute in the VM under debugger control
+
 ## `st-cli help`
 
 Show usage information.
@@ -111,5 +153,6 @@ Commands:
   serve [--stdio]   Start the LSP server (default: stdio)
   check <file>      Parse and analyze a file, report diagnostics
   run <file> [-n N] Compile and execute a program (N cycles, default 1)
+  debug <file>      Start a DAP debug session over stdio
   help              Show this help message
 ```

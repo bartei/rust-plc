@@ -337,6 +337,47 @@ Click on `BottleFiller` in the call stack to view the caller's local variables a
 
 ---
 
+## Step 6: PLC Monitor Panel
+
+The Monitor Panel provides a live dashboard for observing and controlling PLC variables in real time while the program runs.
+
+### Open the Monitor Panel
+
+1. Open the **Command Palette**: `Ctrl+Shift+P` (or `Cmd+Shift+P` on macOS)
+2. Type and select: **"ST: Open PLC Monitor"**
+3. A webview panel opens showing all variables with live values
+
+The monitor connects to the runtime via a WebSocket server that streams variable state after each scan cycle.
+
+### Monitor Features
+
+| Feature | Description |
+|---------|-------------|
+| Live variables | All global and program-local variables update in real time |
+| Force variable | Right-click a variable to override its value (useful for testing) |
+| Unforce variable | Remove the override and let the program control the value again |
+| Trend recording | Watch how variable values change over time |
+
+### Forcing Variables
+
+Forcing is essential during commissioning and testing. When a variable is forced:
+
+- The forced value is written at the start of each scan cycle, overriding program logic
+- A visual indicator shows which variables are currently forced
+- Use "Unforce" to release the variable back to normal program control
+
+### Online Change via the Monitor
+
+The monitor server's WebSocket API also supports **online change** (hot-reload). When you modify and recompile a source file, you can push the new module to the running engine without stopping it:
+
+- Compatible changes (e.g., modified logic, same variable layout) are applied instantly
+- Variable values are automatically migrated to the new module
+- Incompatible changes (e.g., added/removed variables, changed types) require a full restart
+
+This enables an iterative development workflow where you can edit program logic and see the effects immediately in the monitor panel, without losing runtime state.
+
+---
+
 ## Troubleshooting
 
 ### "Failed to start ST language server"
@@ -380,3 +421,5 @@ Click on `BottleFiller` in the call stack to view the caller's local variables a
 | Code completion | Start typing or Ctrl+Space |
 | Document outline | View → Outline |
 | Problems panel | View → Problems |
+| Open PLC Monitor | Ctrl+Shift+P → "ST: Open PLC Monitor" |
+| Force variable | Right-click variable in Monitor panel |

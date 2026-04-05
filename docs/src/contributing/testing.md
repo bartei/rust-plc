@@ -5,7 +5,7 @@ them, and how to add new tests.
 
 ## Overview
 
-The workspace contains **381 tests** across all crates. Every crate with
+The workspace contains **455 tests** across all crates. Every crate with
 non-trivial logic has its own test suite. Tests range from unit tests
 (individual functions) to integration tests (full parse-analyze-compile-run
 round trips).
@@ -34,6 +34,12 @@ cargo test --workspace
 | **st-lsp** | `tests/unit_tests.rs` | 41 | In-process tests for completion, semantic tokens, document sync |
 | **st-compiler** | `tests/compile_tests.rs` | 35 | AST-to-IR compilation for all statement/expression types |
 | **st-runtime** | `tests/vm_tests.rs` | 31 | VM execution: arithmetic, control flow, calls, limits, cycles |
+| **st-dap** | `tests/dap_integration.rs` | 18 | DAP protocol: breakpoints, stepping, continue across cycles, variables, evaluate |
+| **st-monitor** | `tests/ws_tests.rs` | 19 | WebSocket protocol: connect, subscribe, variable streaming, force/unforce |
+| **st-monitor** | `tests/serialization_tests.rs` | 4 | JSON-RPC message serialization and deserialization |
+| **st-monitor** | `tests/handle_tests.rs` | 3 | MonitorHandle thread-safety, publish/receive round-trip |
+| **st-compiler** | `tests/online_change_tests.rs` | 20 | analyze_change compatibility, migrate_locals state preservation |
+| **st-runtime** | `tests/online_change_integration.rs` | 10 | apply_online_change atomic swap, engine continuity |
 
 ## Test Patterns
 
@@ -149,6 +155,18 @@ cargo test -p st-compiler
 
 # VM tests
 cargo test -p st-runtime
+
+# DAP debugger integration tests
+cargo test -p st-dap
+
+# Monitor server tests
+cargo test -p st-monitor
+
+# Online change tests (unit)
+cargo test -p st-compiler --test online_change_tests
+
+# Online change tests (integration)
+cargo test -p st-runtime --test online_change_integration
 ```
 
 ## Code Coverage
@@ -187,6 +205,8 @@ achieving higher:
 | st-runtime (engine.rs) | ~85% |
 | st-lsp | ~78% |
 | st-cli | ~65% |
+| st-dap | ~82% |
+| st-monitor | ~80% |
 
 The `coverage_gaps.rs` files in `st-syntax` and `st-semantics` were added
 specifically to close coverage holes on edge cases and error paths.
@@ -238,5 +258,5 @@ All tests run on every push. The CI pipeline:
 
 1. `cargo fmt --check` -- formatting.
 2. `cargo clippy --workspace` -- lints.
-3. `cargo test --workspace` -- all 381 tests.
+3. `cargo test --workspace` -- all 455 tests.
 4. `cargo llvm-cov --workspace` -- coverage report (optional).

@@ -76,6 +76,57 @@ All intelligence (diagnostics, completions, semantic tokens) is implemented in
 the Rust LSP crate, not in TypeScript. This keeps the extension simple and
 allows the same analysis to power both the CLI and the editor.
 
+## DAP Server (st-dap)
+
+The Debug Adapter Protocol server enables interactive debugging of ST programs
+in VSCode. It sits between the editor and the VM, translating DAP requests
+(setBreakpoints, stepIn, continue, etc.) into VM control operations.
+
+Key design decisions:
+
+- **Scan-cycle-aware continue**: When the user presses Continue, execution does
+  not stop at the end of the current scan cycle. Instead, it runs across
+  multiple cycles until a breakpoint is hit. This matches PLC debugging
+  expectations.
+- **PROGRAM local retention**: The VM skips variable initialization on
+  subsequent scan cycles (using `body_start_pc`) so that local variables retain
+  their values, just like a real PLC.
+- **Source mapping**: The compiler emits `SourceLocation` entries for every
+  instruction, allowing the DAP server to map bytecode PCs back to source lines.
+
+## Online Change Manager
+
+The online change system allows hot-reloading a modified program into a running
+engine without restarting. The pipeline is:
+
+1. **`analyze_change(old_module, new_module)`** -- Compares two compiled modules
+   and determines whether the change is compatible (same variable layout) or
+   incompatible (structural changes requiring a full restart).
+2. **`migrate_locals(old_vm, new_module)`** -- For compatible changes, copies
+   local variable values from the old VM state into the new module's memory
+   layout, preserving runtime state.
+3. **`apply_online_change(engine, new_module)`** -- Performs an atomic swap of
+   the running module, replacing bytecode while the engine is between scan
+   cycles.
+
+See [Online Change](./online-change.md) for full details.
+
+## Monitor Server (st-monitor)
+
+The monitor server exposes a WebSocket interface for live variable observation
+and control. It runs alongside the scan-cycle engine and provides:
+
+- **Real-time variable streaming** -- Connected clients receive variable values
+  after each scan cycle.
+- **Force/unforce variables** -- Override variable values from the dashboard,
+  useful for testing and commissioning.
+- **JSON-RPC protocol** -- All communication uses a simple JSON request/response
+  format over WebSocket.
+- **MonitorHandle API** -- A thread-safe handle that the engine uses to publish
+  state and receive force commands without blocking the scan loop.
+
+See [Monitor Server](./monitor-server.md) for the full protocol reference.
+
 ## Dependency Graph
 
 ```
@@ -86,10 +137,17 @@ st-cli
   |     |     |     |-- st-grammar
   |     |     |-- st-syntax (ast types)
   |     |-- st-grammar (incremental re-parse)
+  |-- st-dap
+  |     |-- st-runtime
+  |     |-- st-compiler
+  |     |-- st-ir
   |-- st-compiler
   |     |-- st-ir
   |     |-- st-syntax (ast types)
   |-- st-runtime
+  |     |-- st-ir
+  |-- st-monitor
+  |     |-- st-runtime
   |     |-- st-ir
   |-- st-semantics
   |-- st-syntax
