@@ -10,6 +10,7 @@ fn print_usage() {
     eprintln!("  serve [--stdio]   Start the LSP server (default: stdio)");
     eprintln!("  check <file>      Parse and analyze a file, report diagnostics");
     eprintln!("  run <file> [-n N] Compile and execute a program (N cycles, default 1)");
+    eprintln!("  debug <file>      Start DAP debug server (stdin/stdout)");
     eprintln!("  help              Show this help message");
 }
 
@@ -165,6 +166,14 @@ fn main() {
                     process::exit(1);
                 }
             }
+        }
+        "debug" => {
+            if args.len() < 3 {
+                eprintln!("Usage: st-cli debug <file>");
+                process::exit(1);
+            }
+            let path = &args[2];
+            st_dap::run_dap(std::io::stdin(), std::io::stdout(), path);
         }
         "help" | "--help" | "-h" => {
             print_usage();

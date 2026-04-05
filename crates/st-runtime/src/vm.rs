@@ -1,5 +1,6 @@
 //! Bytecode VM: fetch-decode-execute interpreter for the register-based IR.
 
+use crate::debug::{self, DebugState, FrameInfo, PauseReason, VariableInfo};
 use st_ir::*;
 
 /// Runtime error during VM execution.
@@ -59,6 +60,8 @@ pub struct Vm {
     call_stack: Vec<CallFrame>,
     /// Total instructions executed (for limit checking).
     instruction_count: u64,
+    /// Debug state (breakpoints, stepping, etc.).
+    debug: DebugState,
 }
 
 impl Vm {
@@ -76,6 +79,7 @@ impl Vm {
             globals,
             call_stack: Vec::new(),
             instruction_count: 0,
+            debug: DebugState::new(),
         }
     }
 
@@ -102,6 +106,15 @@ impl Vm {
             return_reg: None,
         });
 
+        self.execute()
+    }
+
+    /// Continue execution from a halted state (after a debug pause).
+    /// Returns when the VM halts again or the function completes.
+    pub fn continue_execution(&mut self) -> Result<Value, VmError> {
+        if self.call_stack.is_empty() {
+            return Ok(Value::Void);
+        }
         self.execute()
     }
 
@@ -136,6 +149,94 @@ impl Vm {
         self.instruction_count = 0;
     }
 
+    /// Get a mutable reference to the debug state.
+    pub fn debug_mut(&mut self) -> &mut DebugState {
+        &mut self.debug
+    }
+
+    /// Get the debug state.
+    pub fn debug_state(&self) -> &DebugState {
+        &self.debug
+    }
+
+    /// Get the module reference.
+    pub fn module(&self) -> &Module {
+        &self.module
+    }
+
+    /// Get the call stack as frame info for the debugger.
+    pub fn stack_frames(&self) -> Vec<FrameInfo> {
+        self.call_stack
+            .iter()
+            .rev()
+            .map(|frame| {
+                let func = &self.module.functions[frame.func_index as usize];
+                let (source_offset, source_end) = func
+                    .source_map
+                    .get(frame.pc.saturating_sub(1))
+                    .map(|sm| (sm.byte_offset, sm.byte_end))
+                    .unwrap_or((0, 0));
+                FrameInfo {
+                    func_index: frame.func_index,
+                    func_name: func.name.clone(),
+                    pc: frame.pc,
+                    source_offset,
+                    source_end,
+                }
+            })
+            .collect()
+    }
+
+    /// Get local variables for the current (topmost) frame.
+    pub fn current_locals(&self) -> Vec<VariableInfo> {
+        let Some(frame) = self.call_stack.last() else {
+            return Vec::new();
+        };
+        let func = &self.module.functions[frame.func_index as usize];
+        func.locals
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(i, slot)| {
+                let value = frame
+                    .locals
+                    .get(i)
+                    .cloned()
+                    .unwrap_or(Value::Void);
+                VariableInfo {
+                    name: slot.name.clone(),
+                    value: debug::format_value(&value),
+                    ty: debug::format_var_type(slot.ty).to_string(),
+                    var_ref: 0,
+                }
+            })
+            .collect()
+    }
+
+    /// Get global variables.
+    pub fn global_variables(&self) -> Vec<VariableInfo> {
+        self.module
+            .globals
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(i, slot)| {
+                let value = self.globals.get(i).cloned().unwrap_or(Value::Void);
+                VariableInfo {
+                    name: slot.name.clone(),
+                    value: debug::format_value(&value),
+                    ty: debug::format_var_type(slot.ty).to_string(),
+                    var_ref: 0,
+                }
+            })
+            .collect()
+    }
+
+    /// Call depth (for stepping logic).
+    pub fn call_depth(&self) -> usize {
+        self.call_stack.len()
+    }
+
     // =========================================================================
     // Core execution loop
     // =========================================================================
@@ -161,6 +262,14 @@ impl Vm {
                     }
                 }
                 continue;
+            }
+
+            // Debug: check if we should pause before this instruction
+            let source_map = &func.source_map;
+            let call_depth = self.call_stack.len();
+            if let Some(reason) = self.debug.should_pause(func_index, pc, call_depth, source_map) {
+                self.debug.mark_paused(reason);
+                return Err(VmError::Halt);
             }
 
             let instr = func.instructions[pc].clone();

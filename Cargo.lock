@@ -701,9 +701,10 @@ version = "0.1.0"
 dependencies = [
  "dap",
  "serde_json",
+ "st-compiler",
  "st-ir",
  "st-runtime",
- "tokio",
+ "st-syntax",
  "tracing",
 ]
 

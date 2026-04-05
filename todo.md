@@ -194,27 +194,36 @@ Ship a working LSP loop early to prove the VSCode integration.
 
 ## Phase 8: DAP Server — Online Debugging (`st-dap`)
 
-- [ ] Implement DAP protocol over TCP using `dap` crate
-- [ ] **Core DAP requests:**
-  - [ ] `initialize`, `launch` / `attach` (attach to running runtime)
-  - [ ] `setBreakpoints` — map source lines → bytecode addresses via source map
-  - [ ] `continue`, `next` (step over), `stepIn`, `stepOut`
-  - [ ] `stackTrace` — show current POU call stack
-  - [ ] `scopes` — expose `VAR`, `VAR_INPUT`, `VAR_OUTPUT`, `VAR_TEMP` as separate scopes
-  - [ ] `variables` — read variable values from runtime memory, format per IEC type
-  - [ ] `evaluate` — evaluate watch expressions (parse & interpret on the fly)
-  - [ ] `pause` — halt at next safe point (end of instruction)
-  - [ ] `disconnect` / `terminate`
-- [ ] **PLC-specific DAP extensions (custom events/requests):**
-  - [ ] `plc/scanCycleInfo` — expose current cycle count, cycle time, jitter
-  - [ ] `plc/forceVariable` — force output/input to a specific value (override runtime)
-  - [ ] `plc/unforceVariable` — release forced value
-  - [ ] `plc/onlineChange` — trigger hot-reload (see Phase 9)
-- [ ] **VSCode extension DAP integration:**
-  - [ ] `launch.json` configuration for attaching to the PLC runtime
-  - [ ] Custom debug toolbar buttons (force, unforce, online change)
-  - [ ] Variable watch panel showing IEC-formatted values (TIME as `T#5s`, etc.)
-- [ ] Tests: set breakpoint, hit it, inspect variables, step, continue
+- [x] **VM debug hooks** (`debug.rs`):
+  - [x] `DebugState`: breakpoints (source-level + instruction-level), step modes, pause state
+  - [x] `StepMode`: Continue, StepIn, StepOver, StepOut, Paused
+  - [x] `should_pause()` — pre-instruction check for breakpoints and step completion
+  - [x] Source-line-to-bytecode breakpoint mapping via source map
+  - [x] `continue_execution()` — resume VM from halted debug state
+  - [x] Frame inspection: `stack_frames()`, `current_locals()`, `global_variables()`
+  - [x] Value formatting for debugger display (IEC format: TIME as `T#5ms`, BOOL as TRUE/FALSE)
+- [x] **DAP server** (`server.rs`):
+  - [x] `initialize` — capabilities advertisement
+  - [x] `launch` — compile source, start VM paused on entry
+  - [x] `setBreakpoints` — map source lines to bytecode via source map
+  - [x] `continue`, `next` (step over), `stepIn`, `stepOut`
+  - [x] `stackTrace` — POU call stack with source locations
+  - [x] `scopes` — Locals and Globals scopes
+  - [x] `variables` — read variable values formatted per IEC type
+  - [x] `evaluate` — look up variable by name in locals/globals
+  - [x] `pause` — halt at next instruction
+  - [x] `disconnect` / `configurationDone` / `threads`
+  - [x] Stopped/Terminated/Output events
+- [x] **CLI**: `st-cli debug <file>` starts DAP server on stdin/stdout
+- [x] **VSCode extension**: debugger contribution with `st` type, launch configuration
+- [x] **Tests** (16 DAP integration + 9 debug unit = 25 tests):
+  - Initialize, launch with stop-on-entry, threads, stack trace, scopes+variables
+  - StepIn, StepOver, StepOut, Continue to completion
+  - Set breakpoints, Evaluate expressions, Pause, Disconnect
+  - Full debug session (multi-step with stack trace)
+  - Debug state unit tests: breakpoints, step modes, pause/resume, value formatting
+- [ ] PLC-specific extensions (force/unforce, scan cycle info) — future
+- [ ] VSCode custom debug toolbar — future
 
 ---
 

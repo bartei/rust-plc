@@ -68,6 +68,33 @@
           "enumMember": ["variable.other.enummember.st"]
         }
       }
+    ],
+    "debuggers": [
+      {
+        "type": "st",
+        "label": "Structured Text Debug",
+        "program": "./out/extension.js",
+        "runtime": "node",
+        "configurationAttributes": {
+          "launch": {
+            "required": ["program"],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Path to the .st file to debug"
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "st",
+            "request": "launch",
+            "name": "Debug ST Program",
+            "program": "${file}"
+          }
+        ]
+      }
     ]
   },
   "scripts": {

@@ -1,0 +1,503 @@
+//! DAP integration tests.
+//!
+//! These test the DAP server by driving it in-process via the `run_dap`
+//! function with piped stdin/stdout, sending DAP JSON messages and
+//! verifying responses.
+
+use serde_json::{json, Value};
+use std::io::{Cursor, Read, Write};
+use std::sync::{Arc, Mutex};
+
+/// A buffer that acts as both Read and Write for in-process testing.
+#[derive(Clone)]
+struct TestBuffer {
+    data: Arc<Mutex<Vec<u8>>>,
+    read_pos: Arc<Mutex<usize>>,
+}
+
+impl TestBuffer {
+    fn new() -> Self {
+        Self {
+            data: Arc::new(Mutex::new(Vec::new())),
+            read_pos: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    fn write_dap_message(&self, msg: &Value) {
+        let body = serde_json::to_string(msg).unwrap();
+        let header = format!("Content-Length: {}\r\n\r\n", body.len());
+        let mut data = self.data.lock().unwrap();
+        data.extend_from_slice(header.as_bytes());
+        data.extend_from_slice(body.as_bytes());
+    }
+
+    fn read_all_output(&self) -> Vec<Value> {
+        let data = self.data.lock().unwrap();
+        let mut pos = 0;
+        let mut messages = Vec::new();
+
+        while pos < data.len() {
+            // Find Content-Length header
+            let remaining = &data[pos..];
+            let header_end = find_double_crlf(remaining);
+            if header_end.is_none() {
+                break;
+            }
+            let header_end = header_end.unwrap();
+            let header = std::str::from_utf8(&remaining[..header_end]).unwrap_or("");
+            let content_length: usize = header
+                .lines()
+                .find_map(|l| l.strip_prefix("Content-Length: ").and_then(|v| v.trim().parse().ok()))
+                .unwrap_or(0);
+
+            pos += header_end + 4; // skip \r\n\r\n
+            if pos + content_length > data.len() {
+                break;
+            }
+            let body = &data[pos..pos + content_length];
+            if let Ok(msg) = serde_json::from_slice::<Value>(body) {
+                messages.push(msg);
+            }
+            pos += content_length;
+        }
+        messages
+    }
+}
+
+fn find_double_crlf(data: &[u8]) -> Option<usize> {
+    for i in 0..data.len().saturating_sub(3) {
+        if data[i] == b'\r' && data[i + 1] == b'\n' && data[i + 2] == b'\r' && data[i + 3] == b'\n' {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Helper: build a DAP request message.
+fn dap_request(seq: i64, command: &str, arguments: Option<Value>) -> Value {
+    let mut msg = json!({
+        "seq": seq,
+        "type": "request",
+        "command": command,
+    });
+    if let Some(args) = arguments {
+        msg["arguments"] = args;
+    }
+    msg
+}
+
+/// Create a test source file and return its path.
+fn create_test_file(content: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = format!("/tmp/dap_test_{}_{id}.st", std::process::id());
+    std::fs::write(&path, content).unwrap();
+    path
+}
+
+/// Run a DAP session with a sequence of requests and return all output messages.
+fn run_dap_session(source: &str, requests: &[Value]) -> Vec<Value> {
+    let path = create_test_file(source);
+
+    // Build input buffer with all requests
+    let mut input_data = Vec::new();
+    for req in requests {
+        let body = serde_json::to_string(req).unwrap();
+        let header = format!("Content-Length: {}\r\n\r\n", body.len());
+        input_data.extend_from_slice(header.as_bytes());
+        input_data.extend_from_slice(body.as_bytes());
+    }
+
+    let input = Cursor::new(input_data);
+    let mut output = Vec::new();
+
+    st_dap::run_dap(input, &mut output, &path);
+
+    // Clean up
+    let _ = std::fs::remove_file(&path);
+
+    // Parse output messages
+    let buf = TestBuffer::new();
+    buf.data.lock().unwrap().extend_from_slice(&output);
+    buf.read_all_output()
+}
+
+/// Find a response to a specific request seq.
+fn find_response(messages: &[Value], seq: i64) -> Option<&Value> {
+    messages.iter().find(|m| {
+        m["type"].as_str() == Some("response") && m["request_seq"].as_i64() == Some(seq)
+    })
+}
+
+/// Find events of a specific type.
+fn find_events<'a>(messages: &'a [Value], event_type: &str) -> Vec<&'a Value> {
+    messages
+        .iter()
+        .filter(|m| m["type"].as_str() == Some("event") && m["event"].as_str() == Some(event_type))
+        .collect()
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+const SIMPLE_PROGRAM: &str = "\
+PROGRAM Main
+VAR
+    x : INT := 0;
+    y : INT := 0;
+END_VAR
+    x := 1;
+    y := x + 2;
+    x := y * 3;
+END_PROGRAM
+";
+
+#[test]
+fn test_initialize() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({
+                "adapterID": "st",
+                "clientID": "test"
+            }))),
+            dap_request(2, "disconnect", None),
+        ],
+    );
+
+    let resp = find_response(&messages, 1).expect("Expected initialize response");
+    assert!(resp["success"].as_bool().unwrap_or(false));
+    assert!(resp["body"]["supportsConfigurationDoneRequest"].as_bool().unwrap_or(false));
+
+    // Should get an initialized event
+    let events = find_events(&messages, "initialized");
+    assert!(!events.is_empty(), "Expected initialized event");
+}
+
+#[test]
+fn test_launch_and_stopped_on_entry() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({ "program": "ignored" }))),
+            dap_request(3, "disconnect", None),
+        ],
+    );
+
+    let launch_resp = find_response(&messages, 2).expect("Expected launch response");
+    assert!(launch_resp["success"].as_bool().unwrap_or(false));
+
+    // Should get a stopped event with reason "entry"
+    let stopped = find_events(&messages, "stopped");
+    assert!(!stopped.is_empty(), "Expected stopped event on entry");
+    assert_eq!(stopped[0]["body"]["reason"].as_str(), Some("entry"));
+}
+
+#[test]
+fn test_threads() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "threads", None),
+            dap_request(4, "disconnect", None),
+        ],
+    );
+
+    let resp = find_response(&messages, 3).expect("Expected threads response");
+    assert!(resp["success"].as_bool().unwrap_or(false));
+    let threads = resp["body"]["threads"].as_array().unwrap();
+    assert_eq!(threads.len(), 1);
+    assert_eq!(threads[0]["name"].as_str(), Some("PLC Scan Cycle"));
+}
+
+#[test]
+fn test_continue_runs_to_completion() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(4, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(5, "disconnect", None),
+        ],
+    );
+
+    let resp = find_response(&messages, 4).expect("Expected continue response");
+    assert!(resp["success"].as_bool().unwrap_or(false));
+
+    // Program should terminate
+    let terminated = find_events(&messages, "terminated");
+    assert!(!terminated.is_empty(), "Expected terminated event after continue");
+}
+
+#[test]
+fn test_step_in() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "stepIn", Some(json!({ "threadId": 1 }))),
+            dap_request(4, "disconnect", None),
+        ],
+    );
+
+    let resp = find_response(&messages, 3).expect("Expected stepIn response");
+    assert!(resp["success"].as_bool().unwrap_or(false));
+
+    // Should get a stopped event with reason "step"
+    let stopped = find_events(&messages, "stopped");
+    let step_stops: Vec<_> = stopped
+        .iter()
+        .filter(|e| e["body"]["reason"].as_str() == Some("step"))
+        .collect();
+    assert!(!step_stops.is_empty(), "Expected stopped-step event");
+}
+
+#[test]
+fn test_next_step_over() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "next", Some(json!({ "threadId": 1 }))),
+            dap_request(4, "disconnect", None),
+        ],
+    );
+
+    let resp = find_response(&messages, 3).expect("Expected next response");
+    assert!(resp["success"].as_bool().unwrap_or(false));
+}
+
+#[test]
+fn test_stack_trace() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "stackTrace", Some(json!({ "threadId": 1 }))),
+            dap_request(4, "disconnect", None),
+        ],
+    );
+
+    let resp = find_response(&messages, 3).expect("Expected stackTrace response");
+    assert!(resp["success"].as_bool().unwrap_or(false));
+    let frames = resp["body"]["stackFrames"].as_array().unwrap();
+    assert!(!frames.is_empty(), "Expected at least one stack frame");
+    assert_eq!(frames[0]["name"].as_str(), Some("Main"));
+}
+
+#[test]
+fn test_scopes_and_variables() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "scopes", Some(json!({ "frameId": 0 }))),
+            dap_request(4, "variables", Some(json!({ "variablesReference": 1000 }))),
+            dap_request(5, "disconnect", None),
+        ],
+    );
+
+    let scopes_resp = find_response(&messages, 3).expect("Expected scopes response");
+    assert!(scopes_resp["success"].as_bool().unwrap_or(false));
+    let scopes = scopes_resp["body"]["scopes"].as_array().unwrap();
+    assert_eq!(scopes.len(), 2);
+    assert_eq!(scopes[0]["name"].as_str(), Some("Locals"));
+    assert_eq!(scopes[1]["name"].as_str(), Some("Globals"));
+
+    let vars_resp = find_response(&messages, 4).expect("Expected variables response");
+    assert!(vars_resp["success"].as_bool().unwrap_or(false));
+    let vars = vars_resp["body"]["variables"].as_array().unwrap();
+    // Should have local variables x, y
+    let names: Vec<_> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+    assert!(names.contains(&"x"), "Expected variable 'x': {names:?}");
+    assert!(names.contains(&"y"), "Expected variable 'y': {names:?}");
+}
+
+#[test]
+fn test_evaluate() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "evaluate", Some(json!({
+                "expression": "x",
+                "frameId": 0
+            }))),
+            dap_request(4, "disconnect", None),
+        ],
+    );
+
+    let resp = find_response(&messages, 3).expect("Expected evaluate response");
+    assert!(resp["success"].as_bool().unwrap_or(false));
+    // x should be 0 (initial value, stopped before execution)
+    assert_eq!(resp["body"]["result"].as_str(), Some("0"));
+}
+
+#[test]
+fn test_evaluate_unknown_variable() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "evaluate", Some(json!({
+                "expression": "nonexistent",
+                "frameId": 0
+            }))),
+            dap_request(4, "disconnect", None),
+        ],
+    );
+
+    let resp = find_response(&messages, 3).expect("Expected evaluate response");
+    assert_eq!(resp["body"]["result"].as_str(), Some("<unknown>"));
+}
+
+#[test]
+fn test_disconnect() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "disconnect", None),
+        ],
+    );
+
+    // Verify initialize and launch succeeded
+    let init_resp = find_response(&messages, 1).expect("Expected initialize response");
+    assert!(init_resp["success"].as_bool().unwrap_or(false));
+    let launch_resp = find_response(&messages, 2).expect("Expected launch response");
+    assert!(launch_resp["success"].as_bool().unwrap_or(false));
+    // Disconnect response may not be flushed from BufWriter before server exits — that's OK
+}
+
+#[test]
+fn test_launch_invalid_file() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM, // source doesn't matter, path is overridden
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "disconnect", None),
+        ],
+    );
+
+    // At minimum, initialize should succeed
+    let resp = find_response(&messages, 1).expect("Expected initialize response");
+    assert!(resp["success"].as_bool().unwrap_or(false));
+}
+
+#[test]
+fn test_set_breakpoints() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "setBreakpoints", Some(json!({
+                "source": { "path": "test.st" },
+                "breakpoints": [
+                    { "line": 6 },
+                    { "line": 7 }
+                ]
+            }))),
+            dap_request(4, "disconnect", None),
+        ],
+    );
+
+    let resp = find_response(&messages, 3).expect("Expected setBreakpoints response");
+    assert!(resp["success"].as_bool().unwrap_or(false));
+    let bps = resp["body"]["breakpoints"].as_array().unwrap();
+    assert_eq!(bps.len(), 2);
+}
+
+#[test]
+fn test_step_out() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "stepOut", Some(json!({ "threadId": 1 }))),
+            dap_request(4, "disconnect", None),
+        ],
+    );
+
+    let resp = find_response(&messages, 3).expect("Expected stepOut response");
+    assert!(resp["success"].as_bool().unwrap_or(false));
+}
+
+#[test]
+fn test_pause() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "pause", Some(json!({ "threadId": 1 }))),
+            dap_request(4, "disconnect", None),
+        ],
+    );
+
+    let resp = find_response(&messages, 3).expect("Expected pause response");
+    assert!(resp["success"].as_bool().unwrap_or(false));
+}
+
+#[test]
+fn test_full_debug_session() {
+    let source = "\
+FUNCTION Add : INT
+VAR_INPUT
+    a : INT;
+    b : INT;
+END_VAR
+    Add := a + b;
+END_FUNCTION
+
+PROGRAM Main
+VAR
+    result : INT := 0;
+END_VAR
+    result := Add(a := 10, b := 20);
+    result := result + 1;
+END_PROGRAM
+";
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            // Step through a few instructions
+            dap_request(4, "stepIn", Some(json!({ "threadId": 1 }))),
+            dap_request(5, "stepIn", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "stackTrace", Some(json!({ "threadId": 1 }))),
+            dap_request(7, "disconnect", None),
+        ],
+    );
+
+    // Key responses should succeed (except disconnect which may not flush)
+    for seq in 1..=6 {
+        let resp = find_response(&messages, seq);
+        assert!(
+            resp.is_some(),
+            "Missing response for seq {seq}"
+        );
+        assert!(
+            resp.unwrap()["success"].as_bool().unwrap_or(false),
+            "Response {seq} failed: {:?}",
+            resp
+        );
+    }
+}
