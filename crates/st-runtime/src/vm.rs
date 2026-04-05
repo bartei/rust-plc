@@ -47,6 +47,8 @@ struct CallFrame {
     pc: usize,
     /// Register to store the return value in the caller's frame.
     return_reg: Option<Reg>,
+    /// For FB instances: the instance slot in the caller's frame (for state persistence).
+    instance_slot: Option<u16>,
 }
 
 /// The virtual machine state.
@@ -66,6 +68,8 @@ pub struct Vm {
     retained_locals: std::collections::HashMap<u16, Vec<Value>>,
     /// Forced variables: name → forced value. Overrides runtime values.
     forced_variables: std::collections::HashMap<String, Value>,
+    /// FB instance storage: (caller_func_index, instance_slot) → locals.
+    fb_instances: std::collections::HashMap<(u16, u16), Vec<Value>>,
 }
 
 impl Vm {
@@ -86,6 +90,7 @@ impl Vm {
             debug: DebugState::new(),
             retained_locals: std::collections::HashMap::new(),
             forced_variables: std::collections::HashMap::new(),
+            fb_instances: std::collections::HashMap::new(),
         }
     }
 
@@ -117,6 +122,7 @@ impl Vm {
             locals,
             pc: start_pc,
             return_reg: None,
+            instance_slot: None,
         });
 
         self.execute()
@@ -512,11 +518,11 @@ impl Vm {
                     self.call_function(func_index, Some(dst), &args)?;
                 }
                 Instruction::CallFb {
-                    instance_slot: _,
+                    instance_slot,
                     func_index,
                     args,
                 } => {
-                    self.call_function(func_index, None, &args)?;
+                    self.call_fb(func_index, instance_slot, &args)?;
                 }
                 Instruction::Ret(reg) => {
                     let ret_val = self.reg_get(reg).clone();
@@ -549,8 +555,16 @@ impl Vm {
                 Instruction::StoreArray(_slot, _idx, _val) => {
                     // TODO: implement array storage
                 }
-                Instruction::LoadField(dst, _slot, _offset) => {
-                    self.reg_set(dst, Value::Int(0)); // TODO: implement struct storage
+                Instruction::LoadField(dst, instance_slot, field_idx) => {
+                    // Read a field from an FB instance's retained state
+                    let caller_func = func_index;
+                    let instance_key = (caller_func, instance_slot);
+                    let val = self.fb_instances
+                        .get(&instance_key)
+                        .and_then(|locals| locals.get(field_idx as usize))
+                        .cloned()
+                        .unwrap_or(Value::Int(0));
+                    self.reg_set(dst, val);
                 }
                 Instruction::StoreField(_slot, _offset, _val) => {
                     // TODO: implement struct storage
@@ -583,11 +597,81 @@ impl Vm {
     fn save_retained_locals(&mut self) {
         if let Some(frame) = self.call_stack.last() {
             let func = &self.module.functions[frame.func_index as usize];
-            if func.kind == st_ir::PouKind::Program {
-                self.retained_locals
-                    .insert(frame.func_index, frame.locals.clone());
+            match func.kind {
+                st_ir::PouKind::Program => {
+                    self.retained_locals
+                        .insert(frame.func_index, frame.locals.clone());
+                }
+                st_ir::PouKind::FunctionBlock => {
+                    // Save FB instance state keyed by (caller, instance_slot)
+                    if let Some(slot) = frame.instance_slot {
+                        if self.call_stack.len() >= 2 {
+                            let caller_idx = self.call_stack[self.call_stack.len() - 2].func_index;
+                            self.fb_instances
+                                .insert((caller_idx, slot), frame.locals.clone());
+                        }
+                    }
+                }
+                st_ir::PouKind::Function => {
+                    // Functions don't retain state
+                }
             }
         }
+    }
+
+    /// Call a function block instance, loading/saving its persistent state.
+    fn call_fb(
+        &mut self,
+        func_index: u16,
+        instance_slot: u16,
+        args: &[(u16, Reg)],
+    ) -> Result<(), VmError> {
+        if self.call_stack.len() >= self.config.max_call_depth {
+            return Err(VmError::StackOverflow(self.config.max_call_depth));
+        }
+
+        let caller_func_index = self.call_stack.last().map(|f| f.func_index).unwrap_or(0);
+        let instance_key = (caller_func_index, instance_slot);
+
+        let func = self
+            .module
+            .functions
+            .get(func_index as usize)
+            .ok_or(VmError::InvalidFunction(func_index))?;
+
+        let register_count = func.register_count as usize;
+
+        // Load retained instance locals, or create fresh ones
+        let mut locals: Vec<Value> = self
+            .fb_instances
+            .get(&instance_key)
+            .cloned()
+            .unwrap_or_else(|| {
+                func.locals
+                    .slots
+                    .iter()
+                    .map(|s| Value::default_for_type(s.ty))
+                    .collect()
+            });
+
+        // Apply input arguments on top of retained state
+        for &(param_slot, arg_reg) in args {
+            let val = self.reg_get(arg_reg).clone();
+            if (param_slot as usize) < locals.len() {
+                locals[param_slot as usize] = val;
+            }
+        }
+
+        self.call_stack.push(CallFrame {
+            func_index,
+            registers: vec![Value::default(); register_count.max(1)],
+            locals,
+            pc: func.body_start_pc, // skip init code for FB instances too
+            return_reg: None,
+            instance_slot: Some(instance_slot),
+        });
+
+        Ok(())
     }
 
     fn jump_to(&mut self, label: Label) -> Result<(), VmError> {
@@ -646,6 +730,7 @@ impl Vm {
             locals,
             pc: 0,
             return_reg: None,
+            instance_slot: None,
         });
 
         Ok(())

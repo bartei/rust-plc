@@ -130,7 +130,10 @@ impl Engine {
     /// Apply an online change from new source code.
     /// Call this between scan cycles (not during execution).
     pub fn online_change(&mut self, new_source: &str) -> Result<crate::online_change::ChangeAnalysis, String> {
-        let parse_result = st_syntax::parse(new_source);
+        let stdlib = st_syntax::multi_file::builtin_stdlib();
+        let mut all: Vec<&str> = stdlib;
+        all.push(new_source);
+        let parse_result = st_syntax::multi_file::parse_multi(&all);
         if !parse_result.errors.is_empty() {
             return Err("Parse errors in new source".to_string());
         }

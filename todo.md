@@ -187,7 +187,12 @@ Ship a working LSP loop early to prove the VSCode integration.
   - [x] VM access for variable inspection/manipulation
 - [x] **CLI integration**: `st-cli run <file> [-n <cycles>]` — full pipeline from source to execution
 - [x] **Tests** (31 tests): arithmetic (sum, sub, div, mod, power, real), boolean logic, all 6 comparisons, IF/ELSIF, FOR/BY, WHILE, REPEAT, CASE, EXIT, RETURN, function-calling-function, global variable persistence, cycle stats, division by zero, execution limit, Fibonacci algorithm
-- [ ] Standard library (TON, CTU, R_TRIG, etc.) — future
+- [x] **Standard library** (modular ST in `stdlib/`, auto-included via `builtin_stdlib()`):
+  - [x] Counters: CTU, CTD, CTUD | Edge detection: R_TRIG, F_TRIG
+  - [x] Timers: TON, TOF, TP | Math: MAX/MIN/LIMIT/ABS (INT+REAL), SEL
+  - [x] Conversions: BOOL_TO_INT, INT_TO_BOOL
+  - [x] Multi-file compilation, FB instance persistence, FB field access
+  - [x] 16 integration tests + 2 playground examples (07_stdlib_demo, 08_custom_module)
 - [ ] Debug hooks (breakpoints, stepping) — Phase 8
 
 ---

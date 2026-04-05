@@ -1,6 +1,14 @@
 use std::env;
 use std::process;
 
+/// Parse source with the standard library included.
+fn parse_with_stdlib(source: &str) -> st_syntax::lower::LowerResult {
+    let stdlib = st_syntax::multi_file::builtin_stdlib();
+    let mut all_sources: Vec<&str> = stdlib;
+    all_sources.push(source);
+    st_syntax::multi_file::parse_multi(&all_sources)
+}
+
 fn print_usage() {
     eprintln!("st-cli: IEC 61131-3 Structured Text toolchain");
     eprintln!();
@@ -49,7 +57,15 @@ fn main() {
                 }
             };
 
-            let result = st_semantics::check(&source);
+            let parse_result = parse_with_stdlib(&source);
+            let mut result = st_semantics::analyze::analyze(&parse_result.source_file);
+            // Add parse errors as diagnostics
+            for err in &parse_result.errors {
+                result.diagnostics.insert(0, st_semantics::diagnostic::Diagnostic::error(
+                    st_semantics::diagnostic::DiagnosticCode::UndeclaredVariable,
+                    err.message.clone(), err.range,
+                ));
+            }
             let mut has_errors = false;
             for d in &result.diagnostics {
                 let severity = match d.severity {
@@ -100,7 +116,7 @@ fn main() {
             }
 
             // Parse
-            let parse_result = st_syntax::parse(&source);
+            let parse_result = parse_with_stdlib(&source);
             if !parse_result.errors.is_empty() {
                 for err in &parse_result.errors {
                     let (line, col) = byte_offset_to_line_col(&source, err.range.start);

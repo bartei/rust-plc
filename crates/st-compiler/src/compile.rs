@@ -200,6 +200,8 @@ struct FunctionCompiler<'a> {
     loop_exit_labels: Vec<Label>,
     /// Source range to attach to next emitted instruction.
     pending_source: Option<TextRange>,
+    /// Maps local slot index → FB type name (for resolving FB instance calls).
+    fb_type_names: std::collections::HashMap<u16, String>,
 }
 
 impl<'a> FunctionCompiler<'a> {
@@ -215,6 +217,7 @@ impl<'a> FunctionCompiler<'a> {
             globals,
             loop_exit_labels: Vec::new(),
             pending_source: None,
+            fb_type_names: std::collections::HashMap::new(),
         }
     }
 
@@ -317,8 +320,17 @@ impl<'a> FunctionCompiler<'a> {
         for vb in var_blocks {
             for decl in &vb.declarations {
                 let ty = ModuleCompiler::var_type_from_ast(&decl.ty);
+                // Track FB type names for user-defined types
+                let fb_type_name = match &decl.ty {
+                    DataType::UserDefined(qn) => Some(qn.as_str()),
+                    _ => None,
+                };
                 for name in &decl.names {
                     let slot = self.add_local(&name.name, ty);
+                    // Remember the FB type name so we can resolve calls later
+                    if let Some(ref type_name) = fb_type_name {
+                        self.fb_type_names.insert(slot, type_name.clone());
+                    }
                     // Emit initializer if present
                     if let Some(init_expr) = &decl.initial_value {
                         let reg = self.compile_expression(init_expr);
@@ -556,6 +568,28 @@ impl<'a> FunctionCompiler<'a> {
                 reg
             }
             Expression::Variable(va) => {
+                if va.parts.len() >= 2 {
+                    // Multi-part access: fb_instance.field
+                    if let (Some(AccessPart::Identifier(obj)), Some(AccessPart::Identifier(field))) =
+                        (va.parts.first(), va.parts.get(1))
+                    {
+                        if let Some(slot) = self.find_local(&obj.name) {
+                            if self.fb_type_names.contains_key(&slot) {
+                                // FB field access: emit LoadField(dst, instance_slot, field_index)
+                                let fb_type = self.fb_type_names.get(&slot).unwrap().clone();
+                                let field_idx = self.module_functions
+                                    .iter()
+                                    .find(|f| f.name.eq_ignore_ascii_case(&fb_type))
+                                    .and_then(|f| f.locals.find_slot(&field.name))
+                                    .map(|(i, _)| i)
+                                    .unwrap_or(0);
+                                let dst = self.alloc_reg();
+                                self.emit(Instruction::LoadField(dst, slot, field_idx));
+                                return dst;
+                            }
+                        }
+                    }
+                }
                 if let Some(AccessPart::Identifier(id)) = va.parts.first() {
                     self.compile_load_variable(&id.name)
                 } else {
@@ -624,11 +658,13 @@ impl<'a> FunctionCompiler<'a> {
         let name = fc.name.as_str();
         let dst = self.alloc_reg();
 
-        // Check if it's an FB instance call
+        // Check if it's an FB instance call (local variable whose type is a known FB)
         if let Some(slot) = self.find_local(&name) {
+            // Look up the FB TYPE name for this local slot
+            let fb_type = self.fb_type_names.get(&slot).cloned().unwrap_or(name.clone());
             let func_idx = self.module_functions
                 .iter()
-                .position(|f| f.name.eq_ignore_ascii_case(&name))
+                .position(|f| f.name.eq_ignore_ascii_case(&fb_type))
                 .unwrap_or(0) as u16;
             let args = self.compile_call_args(&fc.arguments);
             self.emit(Instruction::CallFb {
