@@ -575,13 +575,52 @@ impl DapSession {
                     break;
                 }
                 Ok(_) => {
-                    // Cycle completed without breakpoint — start next cycle
+                    // Cycle completed — start next cycle
                     cycles += 1;
-                    if cycles >= max_cycles {
-                        eprintln!("[DAP] Reached max cycles ({max_cycles}) without breakpoint");
-                        self.pending_events.push(console_output(&format!(
-                            "Ran {cycles} cycles without hitting a breakpoint"
-                        )));
+
+                    if mode != StepMode::Continue && cycles >= max_cycles {
+                        // Step mode reached end of cycle — start next cycle
+                        // and stop at the first statement (like a wrap-around)
+                        eprintln!("[DAP] Step wrapped to next cycle");
+                        vm.debug_mut().resume_with_source(StepMode::StepIn, 0, 0);
+                        match vm.run(&program_name) {
+                            Err(VmError::Halt) => {
+                                let pause_reason = vm.debug_state().pause_reason;
+                                let frame_desc = vm.stack_frames()
+                                    .first()
+                                    .map(|f| {
+                                        let mut line = 1usize;
+                                        for (i, b) in self.source.bytes().enumerate() {
+                                            if i >= f.source_offset { break; }
+                                            if b == b'\n' { line += 1; }
+                                        }
+                                        format!("{} line {line}", f.func_name)
+                                    })
+                                    .unwrap_or_else(|| "<unknown>".to_string());
+                                eprintln!("[DAP] Next cycle stopped at {frame_desc}");
+                                self.pending_events.push(console_output(&format!(
+                                    "Stopped: {pause_reason:?} at {frame_desc}"
+                                )));
+                                self.pending_events.push(Event::Stopped(StoppedEventBody {
+                                    reason: StoppedEventReason::Step,
+                                    description: Some(format!("Stopped at {frame_desc}")),
+                                    thread_id: Some(1),
+                                    preserve_focus_hint: None,
+                                    text: None,
+                                    all_threads_stopped: Some(true),
+                                    hit_breakpoint_ids: None,
+                                }));
+                            }
+                            _ => {
+                                self.pending_events.push(Event::Terminated(None));
+                            }
+                        }
+                        break;
+                    }
+
+                    if cycles >= 100_000 {
+                        eprintln!("[DAP] Reached max cycles without breakpoint");
+                        self.pending_events.push(console_output("Reached max cycles without breakpoint"));
                         self.pending_events.push(Event::Terminated(None));
                         break;
                     }
