@@ -1,20 +1,11 @@
-# cargo-deny configuration
+# cargo-deny v2 configuration
 # https://embarkstudios.github.io/cargo-deny/
 
 [advisories]
-# The lint level for security vulnerabilities
-vulnerability = "deny"
-# The lint level for unmaintained crates
-unmaintained = "warn"
-# The lint level for crates with unsound code
-unsound = "deny"
-# The lint level for crates that have been yanked
-yanked = "warn"
-# Ignore specific advisories (if needed)
+# Check all crates for known vulnerabilities
 ignore = []
 
 [licenses]
-# List of allowed licenses
 allow = [
     "MIT",
     "Apache-2.0",
@@ -26,19 +17,13 @@ allow = [
     "Zlib",
     "BSL-1.0",
 ]
-# Confidence threshold for license detection
 confidence-threshold = 0.8
 
 [bans]
-# Lint level for multiple versions of the same crate
 multiple-versions = "warn"
-# Crates to deny entirely
 deny = []
 
 [sources]
-# Lint level for crates from unknown registries
 unknown-registry = "deny"
-# Lint level for crates from git repos
 unknown-git = "warn"
-# Allowed registries
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
