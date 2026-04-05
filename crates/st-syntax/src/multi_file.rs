@@ -13,10 +13,15 @@ pub fn parse_multi(sources: &[&str]) -> LowerResult {
     let mut all_errors = Vec::new();
     let mut total_range = TextRange::new(0, 0);
 
-    for source in sources {
+    for (i, source) in sources.iter().enumerate() {
         let result = crate::parse(source);
         all_items.extend(result.source_file.items);
-        all_errors.extend(result.errors);
+        // Only report errors from the user's source (last one),
+        // not from the stdlib files which are known-good
+        let is_user_source = i == sources.len() - 1;
+        if is_user_source {
+            all_errors.extend(result.errors);
+        }
         if result.source_file.range.end > total_range.end {
             total_range = result.source_file.range;
         }

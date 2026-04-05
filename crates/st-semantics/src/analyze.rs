@@ -58,32 +58,63 @@ impl Analyzer {
     /// recognizes them as valid function calls.
     fn register_intrinsics(&mut self) {
         let global = self.symbols.global_scope_id();
+        let int_ty = Ty::Elementary(ElementaryType::Int);
         let real_ty = Ty::Elementary(ElementaryType::Real);
-        let real_param = ParamDef {
-            name: "IN1".to_string(),
-            ty: real_ty.clone(),
-            var_kind: VarKind::VarInput,
-        };
+        let bool_ty = Ty::Elementary(ElementaryType::Bool);
 
-        let intrinsics = [
-            "SQRT", "SIN", "COS", "TAN", "ASIN", "ACOS", "ATAN", "LN", "LOG", "EXP",
-        ];
-
-        for name in intrinsics {
+        // Helper to register a single-arg intrinsic function
+        let mut reg = |name: &str, param_ty: &Ty, ret_ty: &Ty| {
             self.symbols.define(
                 global,
                 Symbol {
                     name: name.to_string(),
-                    ty: real_ty.clone(),
+                    ty: ret_ty.clone(),
                     kind: SymbolKind::Function {
-                        return_type: real_ty.clone(),
-                        params: vec![real_param.clone()],
+                        return_type: ret_ty.clone(),
+                        params: vec![ParamDef {
+                            name: "IN1".to_string(),
+                            ty: param_ty.clone(),
+                            var_kind: VarKind::VarInput,
+                        }],
                     },
                     range: TextRange::new(0, 0),
-                    used: true, // don't warn about unused
+                    used: true,
                     assigned: true,
                 },
             );
+        };
+
+        // Math intrinsics (REAL → REAL)
+        for name in ["SQRT", "SIN", "COS", "TAN", "ASIN", "ACOS", "ATAN", "LN", "LOG", "EXP"] {
+            reg(name, &real_ty, &real_ty);
+        }
+
+        // Type conversion intrinsics: *_TO_REAL / *_TO_LREAL
+        for name in [
+            "INT_TO_REAL", "SINT_TO_REAL", "DINT_TO_REAL", "LINT_TO_REAL",
+            "UINT_TO_REAL", "USINT_TO_REAL", "UDINT_TO_REAL", "ULINT_TO_REAL",
+            "BOOL_TO_REAL",
+            "INT_TO_LREAL", "SINT_TO_LREAL", "DINT_TO_LREAL", "LINT_TO_LREAL",
+            "REAL_TO_LREAL",
+        ] {
+            reg(name, &int_ty, &real_ty);
+        }
+
+        // *_TO_INT / *_TO_DINT / *_TO_LINT / *_TO_SINT
+        for name in [
+            "REAL_TO_INT", "LREAL_TO_INT", "REAL_TO_DINT", "LREAL_TO_DINT",
+            "REAL_TO_LINT", "LREAL_TO_LINT", "REAL_TO_SINT", "LREAL_TO_SINT",
+            "BOOL_TO_INT", "BOOL_TO_DINT", "BOOL_TO_LINT",
+            "UINT_TO_INT", "UDINT_TO_DINT", "ULINT_TO_LINT",
+            "INT_TO_DINT", "INT_TO_LINT", "DINT_TO_LINT",
+            "SINT_TO_INT", "SINT_TO_DINT", "SINT_TO_LINT",
+        ] {
+            reg(name, &real_ty, &int_ty);
+        }
+
+        // *_TO_BOOL
+        for name in ["INT_TO_BOOL", "REAL_TO_BOOL", "DINT_TO_BOOL", "LINT_TO_BOOL"] {
+            reg(name, &int_ty, &bool_ty);
         }
     }
 
