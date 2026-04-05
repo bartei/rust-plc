@@ -246,17 +246,30 @@ Ship a working LSP loop early to prove the VSCode integration.
 
 ## Phase 10: Monitor Server & Custom VSCode UI (`st-monitor`)
 
-- [ ] **WebSocket-based online monitoring server:**
-  - [ ] Subscribe to variable value streams (push updates every scan cycle)
-  - [ ] Configurable update rate (every N cycles or time-based throttle)
-  - [ ] Bulk variable read for dashboard-style views
-- [ ] **VSCode extension custom panels:**
-  - [ ] Online monitor panel: live variable table with current values, updated in real-time
-  - [ ] Cross-reference view: click a variable → see everywhere it's read/written
-  - [ ] POU call tree visualization
-  - [ ] Scan cycle timing graph (cycle time over time)
-  - [ ] Force table: list all currently forced variables with their forced values
-- [ ] Trend recording: log variable values over time, display as time-series chart
+- [x] **WebSocket monitor server** (`server.rs`):
+  - [x] JSON-RPC protocol over WebSocket (subscribe, unsubscribe, read, write, force, unforce, getCycleInfo, onlineChange)
+  - [x] `MonitorHandle` for engine integration (push variable updates, forced vars, online change)
+  - [x] `MonitorState` shared between server and engine (variables, cycle info, forced vars)
+  - [x] Multi-client support (each client has independent subscriptions)
+  - [x] Invalid message handling with error responses
+- [x] **Monitor protocol** (`protocol.rs`):
+  - [x] 8 request types: Subscribe, Unsubscribe, Read, Write, Force, Unforce, GetCycleInfo, OnlineChange
+  - [x] 4 message types: Response, VariableUpdate, CycleInfo, Error
+  - [x] Full serde serialization/deserialization
+- [x] **VSCode extension panels:**
+  - [x] `MonitorPanel` webview — live variable table with values, types, force/unforce buttons
+  - [x] Scan cycle statistics display (cycle count, last/min/max/avg cycle time)
+  - [x] Force table with forced variable highlighting
+  - [x] VSCode-native theming (uses CSS variables for colors)
+  - [x] Command palette: "ST: Open PLC Monitor"
+  - [x] Editor title menu button for quick access
+- [x] **Tests** (19 WebSocket integration + 4 protocol serialization + 3 handle unit = 26 tests):
+  - Subscribe/unsubscribe, read variables, read nonexistent, force/unforce, get cycle info
+  - Online change request, invalid JSON handling, multiple clients
+  - Protocol round-trip serialization for all request/message types
+  - MonitorHandle update, forced vars, online change pending/consume
+- [ ] Trend recording / time-series chart — future
+- [ ] Cross-reference view — future
 
 ---
 

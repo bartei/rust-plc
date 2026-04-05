@@ -80,6 +80,14 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.debug.registerDebugAdapterDescriptorFactory("st", debugAdapterFactory)
   );
 
+  // ── Monitor Panel ─────────────────────────────────────────────────
+  context.subscriptions.push(
+    vscode.commands.registerCommand("structured-text.openMonitor", () => {
+      const { MonitorPanel } = require("./monitorPanel");
+      MonitorPanel.createOrShow(context.extensionUri);
+    })
+  );
+
   // ── Cleanup ──────────────────────────────────────────────────────
   context.subscriptions.push({
     dispose: () => {

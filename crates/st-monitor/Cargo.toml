@@ -6,9 +6,16 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[dev-dependencies]
+st-syntax.workspace = true
+st-compiler.workspace = true
+
 [dependencies]
 st-runtime.workspace = true
+st-ir.workspace = true
 tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true

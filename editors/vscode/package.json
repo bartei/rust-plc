@@ -120,7 +120,23 @@
           }
         ]
       }
-    ]
+    ],
+    "commands": [
+      {
+        "command": "structured-text.openMonitor",
+        "title": "ST: Open PLC Monitor",
+        "category": "Structured Text"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "structured-text.openMonitor",
+          "when": "resourceLangId == structured-text",
+          "group": "navigation"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
