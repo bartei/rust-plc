@@ -229,29 +229,18 @@ Ship a working LSP loop early to prove the VSCode integration.
 
 ## Phase 9: Online Change Manager
 
-The most architecturally critical feature. Requires careful design.
-
-- [ ] **Type compatibility checker:**
-  - [ ] Compare old and new POU signatures (variable count, types, order)
-  - [ ] Classify changes: compatible (new code, same data layout) vs incompatible (data layout changed)
-  - [ ] Reject incompatible changes with clear diagnostic messages
-- [ ] **Retain variable preservation:**
-  - [ ] Map old instance memory → new instance memory for compatible changes
-  - [ ] Initialize new variables to defaults, preserve existing ones
-  - [ ] Handle struct field additions/removals (when explicitly allowed)
-- [ ] **Atomic swap mechanism:**
-  - [ ] Runtime holds `Arc<RwLock<Program>>` — read lock during scan execution
-  - [ ] Compiler produces new `Program` and acquires write lock at end-of-scan boundary
-  - [ ] Swap is atomic: either fully applied or fully rolled back
-  - [ ] No scan cycle is ever interrupted mid-execution
-- [ ] **Online change workflow:**
-  1. User edits source → LSP re-compiles in background
-  2. User triggers "Online Change" via DAP custom request or toolbar button
-  3. Compiler diff: compare new bytecode + data layout against running version
-  4. If compatible → prepare new Program + memory migration plan
-  5. At end of current scan → acquire write lock, swap, migrate memory, release
-  6. DAP sends confirmation event to VSCode
-- [ ] Tests: change logic while running, verify variables retained; attempt incompatible change, verify rejection
+- [x] **Type compatibility checker** (`online_change.rs`):
+  - [x] Compare old/new POU signatures: `Unchanged`, `CodeOnly`, `VarsAdded`, `LayoutChanged`, `New`, `Removed`
+  - [x] Track preserved, new, and removed variables per POU
+  - [x] Reject incompatible: type changes, function removal, global type changes
+- [x] **Retain variable preservation:**
+  - [x] `migrate_locals()` — name+type based mapping, handles reordering
+  - [x] New vars get defaults, removed vars dropped, preserved vars kept
+- [x] **Atomic swap:**
+  - [x] `vm.swap_module()` — replaces module + globals + retained locals atomically between cycles
+  - [x] `engine.online_change(source)` — full pipeline: parse → compile → analyze → migrate → swap
+- [x] **Tests** (20 unit + 10 integration = 30 tests): compatibility analysis, variable migration, end-to-end hot-reload with counter preservation, multiple sequential changes, incompatible rejection
+- [ ] DAP custom request + VSCode toolbar — future
 
 ---
 

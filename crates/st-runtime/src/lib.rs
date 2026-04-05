@@ -5,6 +5,7 @@
 
 pub mod debug;
 pub mod engine;
+pub mod online_change;
 pub mod vm;
 
 pub use engine::{Engine, EngineConfig, CycleStats};

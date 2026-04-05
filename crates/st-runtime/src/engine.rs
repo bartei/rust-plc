@@ -126,4 +126,36 @@ impl Engine {
     pub fn vm_mut(&mut self) -> &mut Vm {
         &mut self.vm
     }
+
+    /// Apply an online change from new source code.
+    /// Call this between scan cycles (not during execution).
+    pub fn online_change(&mut self, new_source: &str) -> Result<crate::online_change::ChangeAnalysis, String> {
+        let parse_result = st_syntax::parse(new_source);
+        if !parse_result.errors.is_empty() {
+            return Err("Parse errors in new source".to_string());
+        }
+
+        let new_module = st_compiler::compile(&parse_result.source_file)
+            .map_err(|e| format!("Compilation error: {e}"))?;
+
+        let old_module = self.vm.module().clone();
+        let analysis = crate::online_change::analyze_change(&old_module, &new_module);
+
+        if !analysis.compatible {
+            return Err(format!(
+                "Incompatible change: {}",
+                analysis.incompatible_reasons.join("; ")
+            ));
+        }
+
+        // Update program name if it changed
+        if let Some(new_prog) = new_module.functions.iter().find(|f| f.kind == st_ir::PouKind::Program) {
+            self.program_name = new_prog.name.clone();
+        }
+
+        crate::online_change::apply_online_change(&mut self.vm, new_module, &analysis)
+            .map_err(|e| format!("Apply error: {e}"))?;
+
+        Ok(analysis)
+    }
 }

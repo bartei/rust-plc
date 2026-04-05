@@ -12,6 +12,8 @@ st-compiler.workspace = true
 
 [dependencies]
 st-ir.workspace = true
+st-syntax.workspace = true
+st-compiler.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true

@@ -154,6 +154,26 @@ impl Vm {
         self.instruction_count
     }
 
+    /// Get retained locals for a function by name.
+    pub fn get_retained_locals(&self, func_name: &str) -> Option<Vec<Value>> {
+        let (idx, _) = self.module.find_function(func_name)?;
+        self.retained_locals.get(&idx).cloned()
+    }
+
+    /// Atomically swap the module and restore migrated state.
+    /// Must be called when the VM is not executing (between scan cycles).
+    pub fn swap_module(
+        &mut self,
+        new_module: Module,
+        migrated_locals: std::collections::HashMap<u16, Vec<Value>>,
+        new_globals: Vec<Value>,
+    ) {
+        self.module = new_module;
+        self.globals = new_globals;
+        self.retained_locals = migrated_locals;
+        self.call_stack.clear();
+    }
+
     /// Reset instruction counter.
     pub fn reset_instruction_count(&mut self) {
         self.instruction_count = 0;
