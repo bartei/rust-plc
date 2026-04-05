@@ -8,7 +8,6 @@ export class MonitorPanel {
   public static currentPanel: MonitorPanel | undefined;
   private readonly panel: vscode.WebviewPanel;
   private disposables: vscode.Disposable[] = [];
-  private ws: import("ws") | undefined;
   private variables: Map<string, { value: string; type: string }> = new Map();
   private forcedVars: Set<string> = new Set();
   private cycleInfo = { cycle_count: 0, last_cycle_us: 0, min_cycle_us: 0, max_cycle_us: 0, avg_cycle_us: 0 };
