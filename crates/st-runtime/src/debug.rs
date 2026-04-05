@@ -16,6 +16,8 @@ pub struct DebugState {
     pub step_start_depth: usize,
     /// Source offset when stepping started (to detect line changes).
     pub step_start_source_offset: usize,
+    /// Source offset of the last breakpoint hit (to avoid re-triggering on same statement).
+    pub last_breakpoint_offset: usize,
     /// Whether the VM is currently paused.
     pub paused: bool,
     /// Reason for the last pause.
@@ -60,6 +62,7 @@ impl DebugState {
             step_mode: StepMode::Continue,
             step_start_depth: 0,
             step_start_source_offset: 0,
+            last_breakpoint_offset: 0,
             paused: false,
             pause_reason: PauseReason::None,
         }
@@ -95,9 +98,11 @@ impl DebugState {
         lines
             .iter()
             .map(|&line| {
-                let line_start = line_offsets.get(line as usize).copied()?;
+                // DAP lines are 1-indexed, line_offsets is 0-indexed
+                let line_idx = (line as usize).saturating_sub(1);
+                let line_start = line_offsets.get(line_idx).copied()?;
                 let line_end = line_offsets
-                    .get(line as usize + 1)
+                    .get(line_idx + 1)
                     .copied()
                     .unwrap_or(source.len());
 
@@ -121,7 +126,7 @@ impl DebugState {
     /// Check if the current instruction should cause a pause.
     /// Called before each instruction in the VM.
     pub fn should_pause(
-        &self,
+        &mut self,
         func_index: u16,
         pc: usize,
         call_depth: usize,
@@ -132,6 +137,11 @@ impl DebugState {
             .get(pc)
             .map(|sm| sm.byte_offset)
             .unwrap_or(0);
+
+        // Clear breakpoint suppression when we move to a different source location
+        if current_source > 0 && current_source != self.last_breakpoint_offset {
+            self.last_breakpoint_offset = 0;
+        }
 
         match self.step_mode {
             StepMode::Paused => Some(PauseReason::PauseRequest),
@@ -169,7 +179,7 @@ impl DebugState {
     }
 
     fn check_breakpoint(
-        &self,
+        &mut self,
         func_index: u16,
         pc: usize,
         source_map: &[SourceLocation],
@@ -180,7 +190,11 @@ impl DebugState {
         }
         // Check source-level breakpoints
         if let Some(sm) = source_map.get(pc) {
-            if sm.byte_offset > 0 && self.source_breakpoints.contains(&sm.byte_offset) {
+            if sm.byte_offset > 0
+                && self.source_breakpoints.contains(&sm.byte_offset)
+                && sm.byte_offset != self.last_breakpoint_offset
+            {
+                self.last_breakpoint_offset = sm.byte_offset;
                 return Some(PauseReason::Breakpoint);
             }
         }
@@ -207,6 +221,9 @@ impl DebugState {
         self.step_mode = mode;
         self.step_start_depth = current_depth;
         self.step_start_source_offset = source_offset;
+        // Don't clear last_breakpoint_offset here — it prevents re-triggering
+        // at the same instruction. It gets cleared naturally when the VM
+        // advances past the breakpoint's source offset.
         self.paused = false;
         self.pause_reason = PauseReason::None;
     }
@@ -418,10 +435,11 @@ mod tests {
         let source = "PROGRAM Main\n    x := 1;\n    x := 2;\nEND_PROGRAM\n";
 
         let mut ds = DebugState::new();
-        let results = ds.set_line_breakpoints(&module, source, &[1, 2, 99]);
-        // Line 1 should map, line 2 should map, line 99 should not
-        assert!(results[0].is_some());
-        assert!(results[1].is_some());
-        assert!(results[2].is_none());
+        // DAP uses 1-indexed lines: line 2 = "    x := 1;", line 3 = "    x := 2;"
+        let results = ds.set_line_breakpoints(&module, source, &[2, 3, 99]);
+        // Line 2 should map, line 3 should map, line 99 should not
+        assert!(results[0].is_some(), "Line 2 should map to an instruction");
+        assert!(results[1].is_some(), "Line 3 should map to an instruction");
+        assert!(results[2].is_none(), "Line 99 should not map");
     }
 }

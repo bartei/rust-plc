@@ -397,7 +397,10 @@ impl DapSession {
                 .find(|f| f.kind == PouKind::Program)
                 .map(|f| f.name.clone())
                 .unwrap_or_default();
-            eprintln!("[DAP] starting new run: {program_name}");
+            eprintln!("[DAP] starting new scan cycle: {program_name}");
+            // Reset step state for new cycle — the previous cycle's source
+            // offset shouldn't cause a spurious step stop
+            vm.debug_mut().resume_with_source(mode, 0, 0);
             vm.run(&program_name)
         };
 
@@ -438,9 +441,70 @@ impl DapSession {
                 }));
             }
             Ok(_) => {
-                eprintln!("[DAP] Program completed normally");
-                self.pending_events.push(console_output("Program completed"));
-                self.pending_events.push(Event::Terminated(None));
+                eprintln!("[DAP] Scan cycle completed, starting next cycle");
+                // PLC programs run in a continuous loop — don't terminate,
+                // start the next scan cycle automatically
+                let program_name = vm
+                    .module()
+                    .functions
+                    .iter()
+                    .find(|f| f.kind == PouKind::Program)
+                    .map(|f| f.name.clone())
+                    .unwrap_or_default();
+                vm.debug_mut().resume_with_source(mode, 0, 0);
+                match vm.run(&program_name) {
+                    Err(VmError::Halt) => {
+                        let pause_reason = vm.debug_state().pause_reason;
+                        let frames = vm.stack_frames();
+                        let frame_desc = frames.first()
+                            .map(|f| format!("{} line {}", f.func_name, {
+                                let mut line = 1usize;
+                                for (i, b) in self.source.bytes().enumerate() {
+                                    if i >= f.source_offset { break; }
+                                    if b == b'\n' { line += 1; }
+                                }
+                                line
+                            }))
+                            .unwrap_or_else(|| "<unknown>".to_string());
+                        eprintln!("[DAP] Next cycle halted: reason={pause_reason:?} at {frame_desc}");
+
+                        let reason = match pause_reason {
+                            PauseReason::Breakpoint => StoppedEventReason::Breakpoint,
+                            PauseReason::Step => StoppedEventReason::Step,
+                            PauseReason::PauseRequest => StoppedEventReason::Pause,
+                            PauseReason::Entry => StoppedEventReason::Entry,
+                            PauseReason::None => StoppedEventReason::Step,
+                        };
+                        self.pending_events.push(console_output(&format!(
+                            "Stopped: {pause_reason:?} at {frame_desc}"
+                        )));
+                        self.pending_events.push(Event::Stopped(StoppedEventBody {
+                            reason,
+                            description: Some(format!("Stopped at {frame_desc}")),
+                            thread_id: Some(1),
+                            preserve_focus_hint: None,
+                            text: None,
+                            all_threads_stopped: Some(true),
+                            hit_breakpoint_ids: None,
+                        }));
+                    }
+                    Ok(_) => {
+                        // Program completed without hitting anything — keep going
+                        // For now, just report completion
+                        eprintln!("[DAP] Program completed without breakpoints");
+                        self.pending_events.push(console_output("Program completed (no breakpoints hit)"));
+                        self.pending_events.push(Event::Terminated(None));
+                    }
+                    Err(e) => {
+                        eprintln!("[DAP] Runtime error in next cycle: {e}");
+                        self.pending_events.push(Event::Output(OutputEventBody {
+                            category: Some(OutputEventCategory::Stderr),
+                            output: format!("Runtime error: {e}\n"),
+                            ..Default::default()
+                        }));
+                        self.pending_events.push(Event::Terminated(None));
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("[DAP] Runtime error: {e}");

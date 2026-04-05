@@ -181,9 +181,13 @@ impl Vm {
             .rev()
             .map(|frame| {
                 let func = &self.module.functions[frame.func_index as usize];
+                // When halted by debugger, PC points to the next instruction to execute.
+                // Use PC directly (not PC-1) to get the source location of where we stopped.
+                // If PC is past the end, use the last instruction.
+                let sm_pc = frame.pc.min(func.source_map.len().saturating_sub(1));
                 let (source_offset, source_end) = func
                     .source_map
-                    .get(frame.pc.saturating_sub(1))
+                    .get(sm_pc)
                     .map(|sm| (sm.byte_offset, sm.byte_end))
                     .unwrap_or((0, 0));
                 FrameInfo {
@@ -522,6 +526,7 @@ impl Vm {
         if let Some(frame) = self.call_stack.last() {
             let func = &self.module.functions[frame.func_index as usize];
             if func.kind == st_ir::PouKind::Program {
+                eprintln!("[VM] Saving retained locals for '{}': {:?}", func.name, frame.locals);
                 self.retained_locals
                     .insert(frame.func_index, frame.locals.clone());
             }
