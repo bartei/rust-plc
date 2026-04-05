@@ -53,6 +53,7 @@ impl ModuleCompiler {
                     label_positions: Vec::new(),
                     locals: MemoryLayout::default(),
                     source_map: Vec::new(),
+                    body_start_pc: 0,
                 });
             }
             TopLevelItem::Function(f) => {
@@ -64,6 +65,7 @@ impl ModuleCompiler {
                     label_positions: Vec::new(),
                     locals: MemoryLayout::default(),
                     source_map: Vec::new(),
+                    body_start_pc: 0,
                 });
             }
             TopLevelItem::FunctionBlock(fb) => {
@@ -75,6 +77,7 @@ impl ModuleCompiler {
                     label_positions: Vec::new(),
                     locals: MemoryLayout::default(),
                     source_map: Vec::new(),
+                    body_start_pc: 0,
                 });
             }
             TopLevelItem::GlobalVarDeclaration(vb) => {
@@ -105,39 +108,43 @@ impl ModuleCompiler {
                 let func_idx = self.find_func(&p.name.name)?;
                 let mut fc = FunctionCompiler::new(&self.functions, &self.globals);
                 fc.compile_var_blocks(&p.var_blocks);
+                let body_start_pc = fc.current_pc();
                 fc.compile_statements(&p.body)?;
                 fc.emit(Instruction::RetVoid);
                 self.functions[func_idx] = fc.finish(
                     p.name.name.clone(),
                     PouKind::Program,
+                    body_start_pc,
                 );
             }
             TopLevelItem::Function(f) => {
                 let func_idx = self.find_func(&f.name.name)?;
                 let mut fc = FunctionCompiler::new(&self.functions, &self.globals);
                 fc.compile_var_blocks(&f.var_blocks);
-                // Add return variable (function name = return value)
                 let ret_ty = Self::var_type_from_ast(&f.return_type);
                 let ret_slot = fc.add_local(&f.name.name, ret_ty);
+                let body_start_pc = fc.current_pc();
                 fc.compile_statements(&f.body)?;
-                // Load return value and return
                 let ret_reg = fc.alloc_reg();
                 fc.emit(Instruction::LoadLocal(ret_reg, ret_slot));
                 fc.emit(Instruction::Ret(ret_reg));
                 self.functions[func_idx] = fc.finish(
                     f.name.name.clone(),
                     PouKind::Function,
+                    body_start_pc,
                 );
             }
             TopLevelItem::FunctionBlock(fb) => {
                 let func_idx = self.find_func(&fb.name.name)?;
                 let mut fc = FunctionCompiler::new(&self.functions, &self.globals);
                 fc.compile_var_blocks(&fb.var_blocks);
+                let body_start_pc = fc.current_pc();
                 fc.compile_statements(&fb.body)?;
                 fc.emit(Instruction::RetVoid);
                 self.functions[func_idx] = fc.finish(
                     fb.name.name.clone(),
                     PouKind::FunctionBlock,
+                    body_start_pc,
                 );
             }
             _ => {}
@@ -209,6 +216,10 @@ impl<'a> FunctionCompiler<'a> {
             loop_exit_labels: Vec::new(),
             pending_source: None,
         }
+    }
+
+    fn current_pc(&self) -> usize {
+        self.instructions.len()
     }
 
     fn alloc_reg(&mut self) -> Reg {
@@ -285,7 +296,7 @@ impl<'a> FunctionCompiler<'a> {
         self.globals.find_slot(name).map(|(i, _)| i)
     }
 
-    fn finish(self, name: String, kind: PouKind) -> Function {
+    fn finish(self, name: String, kind: PouKind, body_start_pc: usize) -> Function {
         Function {
             name,
             kind,
@@ -294,6 +305,7 @@ impl<'a> FunctionCompiler<'a> {
             label_positions: self.label_positions,
             locals: self.locals,
             source_map: self.source_map,
+            body_start_pc,
         }
     }
 

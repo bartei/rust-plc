@@ -38,6 +38,9 @@ pub struct Function {
     pub locals: MemoryLayout,
     /// Source map: instruction index → source byte offset.
     pub source_map: Vec<SourceLocation>,
+    /// PC where the body starts (after VAR initialization code).
+    /// Used to skip init when re-running with retained locals.
+    pub body_start_pc: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -62,6 +62,8 @@ pub struct Vm {
     instruction_count: u64,
     /// Debug state (breakpoints, stepping, etc.).
     debug: DebugState,
+    /// Retained local variables for PROGRAM POUs (persists across scan cycles).
+    retained_locals: std::collections::HashMap<u16, Vec<Value>>,
 }
 
 impl Vm {
@@ -80,10 +82,12 @@ impl Vm {
             call_stack: Vec::new(),
             instruction_count: 0,
             debug: DebugState::new(),
+            retained_locals: std::collections::HashMap::new(),
         }
     }
 
     /// Run a function by name. Returns the return value (or Void for programs).
+    /// For PROGRAM POUs, local variables are retained across calls (PLC behavior).
     pub fn run(&mut self, func_name: &str) -> Result<Value, VmError> {
         let (func_index, func) = self
             .module
@@ -91,18 +95,24 @@ impl Vm {
             .ok_or(VmError::InvalidFunction(0))?;
 
         let register_count = func.register_count as usize;
-        let locals: Vec<Value> = func
-            .locals
-            .slots
-            .iter()
-            .map(|s| Value::default_for_type(s.ty))
-            .collect();
+        let is_program = func.kind == st_ir::PouKind::Program;
+
+        // For PROGRAM POUs, reuse retained locals and skip init code
+        let (locals, start_pc) = if is_program {
+            if let Some(retained) = self.retained_locals.get(&func_index) {
+                (retained.clone(), func.body_start_pc)
+            } else {
+                (func.locals.slots.iter().map(|s| Value::default_for_type(s.ty)).collect(), 0)
+            }
+        } else {
+            (func.locals.slots.iter().map(|s| Value::default_for_type(s.ty)).collect(), 0)
+        };
 
         self.call_stack.push(CallFrame {
             func_index,
             registers: vec![Value::default(); register_count.max(1)],
             locals,
-            pc: 0,
+            pc: start_pc,
             return_reg: None,
         });
 
@@ -255,6 +265,7 @@ impl Vm {
             if pc >= func.instructions.len() {
                 // Fell off the end — implicit return
                 let ret_val = Value::Void;
+                self.save_retained_locals();
                 self.call_stack.pop();
                 if let Some(caller) = self.call_stack.last_mut() {
                     if let Some(ret_reg) = caller.return_reg.take() {
@@ -447,6 +458,7 @@ impl Vm {
                 }
                 Instruction::Ret(reg) => {
                     let ret_val = self.reg_get(reg).clone();
+                    self.save_retained_locals();
                     self.call_stack.pop();
                     if let Some(caller) = self.call_stack.last_mut() {
                         if let Some(ret_reg) = caller.return_reg.take() {
@@ -458,6 +470,7 @@ impl Vm {
                     }
                 }
                 Instruction::RetVoid => {
+                    self.save_retained_locals();
                     self.call_stack.pop();
                     if self.call_stack.is_empty() {
                         return Ok(Value::Void);
@@ -502,6 +515,17 @@ impl Vm {
 
     fn local_set(&mut self, slot: u16, val: Value) {
         self.call_stack.last_mut().unwrap().locals[slot as usize] = val;
+    }
+
+    /// Save local variables of the current frame if it's a PROGRAM POU.
+    fn save_retained_locals(&mut self) {
+        if let Some(frame) = self.call_stack.last() {
+            let func = &self.module.functions[frame.func_index as usize];
+            if func.kind == st_ir::PouKind::Program {
+                self.retained_locals
+                    .insert(frame.func_index, frame.locals.clone());
+            }
+        }
     }
 
     fn jump_to(&mut self, label: Label) -> Result<(), VmError> {

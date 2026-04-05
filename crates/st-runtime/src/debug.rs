@@ -410,6 +410,7 @@ mod tests {
                     SourceLocation { byte_offset: 14, byte_end: 20 },   // line 1
                     SourceLocation { byte_offset: 28, byte_end: 35 },   // line 2
                 ],
+                body_start_pc: 0,
             }],
             globals: MemoryLayout::default(),
             type_defs: vec![],
