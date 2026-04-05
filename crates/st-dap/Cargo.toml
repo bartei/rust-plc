@@ -1,0 +1,15 @@
+[package]
+name = "st-dap"
+description = "Debug Adapter Protocol server for PLC online debugging"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+st-runtime.workspace = true
+st-ir.workspace = true
+dap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde_json.workspace = true

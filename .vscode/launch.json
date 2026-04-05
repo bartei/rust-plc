@@ -1,0 +1,33 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Launch Extension (playground)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/editors/vscode",
+        "${workspaceFolder}/playground"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/editors/vscode/out/**/*.js"
+      ],
+      "preLaunchTask": "Build all (st-cli + extension)",
+      "env": {
+        "RUST_LOG": "info"
+      }
+    },
+    {
+      "name": "Launch Extension (empty folder)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/editors/vscode"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/editors/vscode/out/**/*.js"
+      ],
+      "preLaunchTask": "Build all (st-cli + extension)"
+    }
+  ]
+}

@@ -1,0 +1,58 @@
+[workspace]
+members = [
+    "crates/st-grammar",
+    "crates/st-syntax",
+    "crates/st-semantics",
+    "crates/st-ir",
+    "crates/st-compiler",
+    "crates/st-runtime",
+    "crates/st-lsp",
+    "crates/st-dap",
+    "crates/st-monitor",
+    "crates/st-cli",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# LSP
+tower-lsp = "0.20"
+lsp-types = "0.97"
+
+# DAP
+dap = "0.4.1-alpha1"
+
+# Parsing
+tree-sitter = "0.26"
+
+# Internal crates
+st-grammar = { path = "crates/st-grammar" }
+st-syntax = { path = "crates/st-syntax" }
+st-semantics = { path = "crates/st-semantics" }
+st-ir = { path = "crates/st-ir" }
+st-compiler = { path = "crates/st-compiler" }
+st-runtime = { path = "crates/st-runtime" }
+st-lsp = { path = "crates/st-lsp" }
+st-dap = { path = "crates/st-dap" }
+st-monitor = { path = "crates/st-monitor" }
+st-cli = { path = "crates/st-cli" }

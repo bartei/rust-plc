@@ -1,0 +1,10 @@
+[package]
+name = "st-ir"
+description = "Intermediate representation and bytecode definitions for the PLC VM"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true

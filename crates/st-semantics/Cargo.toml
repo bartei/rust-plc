@@ -1,0 +1,11 @@
+[package]
+name = "st-semantics"
+description = "Semantic analysis, type checking, and symbol tables for Structured Text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+st-syntax.workspace = true
+thiserror.workspace = true

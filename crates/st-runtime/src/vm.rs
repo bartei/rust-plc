@@ -1,0 +1,492 @@
+//! Bytecode VM: fetch-decode-execute interpreter for the register-based IR.
+
+use st_ir::*;
+
+/// Runtime error during VM execution.
+#[derive(Debug, thiserror::Error)]
+pub enum VmError {
+    #[error("division by zero")]
+    DivisionByZero,
+    #[error("stack overflow (max depth {0})")]
+    StackOverflow(usize),
+    #[error("invalid function index {0}")]
+    InvalidFunction(u16),
+    #[error("invalid label {0}")]
+    InvalidLabel(u32),
+    #[error("execution limit exceeded ({0} instructions)")]
+    ExecutionLimit(u64),
+    #[error("halt")]
+    Halt,
+}
+
+/// Configuration for the VM.
+#[derive(Debug, Clone)]
+pub struct VmConfig {
+    /// Maximum call stack depth.
+    pub max_call_depth: usize,
+    /// Maximum instructions per execution (0 = unlimited).
+    pub max_instructions: u64,
+}
+
+impl Default for VmConfig {
+    fn default() -> Self {
+        Self {
+            max_call_depth: 256,
+            max_instructions: 10_000_000,
+        }
+    }
+}
+
+/// A stack frame for function calls.
+#[derive(Debug)]
+struct CallFrame {
+    func_index: u16,
+    registers: Vec<Value>,
+    locals: Vec<Value>,
+    pc: usize,
+    /// Register to store the return value in the caller's frame.
+    return_reg: Option<Reg>,
+}
+
+/// The virtual machine state.
+pub struct Vm {
+    config: VmConfig,
+    /// The compiled module.
+    module: Module,
+    /// Global variable storage.
+    globals: Vec<Value>,
+    /// Call stack.
+    call_stack: Vec<CallFrame>,
+    /// Total instructions executed (for limit checking).
+    instruction_count: u64,
+}
+
+impl Vm {
+    /// Create a new VM with the given module.
+    pub fn new(module: Module, config: VmConfig) -> Self {
+        let globals = module
+            .globals
+            .slots
+            .iter()
+            .map(|s| Value::default_for_type(s.ty))
+            .collect();
+        Self {
+            config,
+            module,
+            globals,
+            call_stack: Vec::new(),
+            instruction_count: 0,
+        }
+    }
+
+    /// Run a function by name. Returns the return value (or Void for programs).
+    pub fn run(&mut self, func_name: &str) -> Result<Value, VmError> {
+        let (func_index, func) = self
+            .module
+            .find_function(func_name)
+            .ok_or(VmError::InvalidFunction(0))?;
+
+        let register_count = func.register_count as usize;
+        let locals: Vec<Value> = func
+            .locals
+            .slots
+            .iter()
+            .map(|s| Value::default_for_type(s.ty))
+            .collect();
+
+        self.call_stack.push(CallFrame {
+            func_index,
+            registers: vec![Value::default(); register_count.max(1)],
+            locals,
+            pc: 0,
+            return_reg: None,
+        });
+
+        self.execute()
+    }
+
+    /// Run a single scan cycle: execute the named program once.
+    pub fn scan_cycle(&mut self, program_name: &str) -> Result<(), VmError> {
+        self.run(program_name)?;
+        Ok(())
+    }
+
+    /// Get a global variable value by name.
+    pub fn get_global(&self, name: &str) -> Option<&Value> {
+        self.module
+            .globals
+            .find_slot(name)
+            .map(|(i, _)| &self.globals[i as usize])
+    }
+
+    /// Set a global variable value by name.
+    pub fn set_global(&mut self, name: &str, value: Value) {
+        if let Some((i, _)) = self.module.globals.find_slot(name) {
+            self.globals[i as usize] = value;
+        }
+    }
+
+    /// Get total instructions executed.
+    pub fn instruction_count(&self) -> u64 {
+        self.instruction_count
+    }
+
+    /// Reset instruction counter.
+    pub fn reset_instruction_count(&mut self) {
+        self.instruction_count = 0;
+    }
+
+    // =========================================================================
+    // Core execution loop
+    // =========================================================================
+
+    fn execute(&mut self) -> Result<Value, VmError> {
+        loop {
+            if self.call_stack.is_empty() {
+                return Ok(Value::Void);
+            }
+
+            let frame = self.call_stack.last().unwrap();
+            let func_index = frame.func_index;
+            let pc = frame.pc;
+
+            let func = &self.module.functions[func_index as usize];
+            if pc >= func.instructions.len() {
+                // Fell off the end — implicit return
+                let ret_val = Value::Void;
+                self.call_stack.pop();
+                if let Some(caller) = self.call_stack.last_mut() {
+                    if let Some(ret_reg) = caller.return_reg.take() {
+                        caller.registers[ret_reg as usize] = ret_val;
+                    }
+                }
+                continue;
+            }
+
+            let instr = func.instructions[pc].clone();
+            // Advance PC before executing (so jumps can override)
+            self.call_stack.last_mut().unwrap().pc += 1;
+
+            // Instruction limit
+            self.instruction_count += 1;
+            if self.config.max_instructions > 0
+                && self.instruction_count > self.config.max_instructions
+            {
+                return Err(VmError::ExecutionLimit(self.config.max_instructions));
+            }
+
+            match instr {
+                Instruction::Nop => {}
+
+                Instruction::LoadConst(dst, val) => {
+                    self.reg_set(dst, val);
+                }
+                Instruction::Move(dst, src) => {
+                    let val = self.reg_get(src).clone();
+                    self.reg_set(dst, val);
+                }
+
+                Instruction::LoadLocal(dst, slot) => {
+                    let val = self.local_get(slot).clone();
+                    self.reg_set(dst, val);
+                }
+                Instruction::StoreLocal(slot, src) => {
+                    let val = self.reg_get(src).clone();
+                    self.local_set(slot, val);
+                }
+                Instruction::LoadGlobal(dst, slot) => {
+                    let val = self.globals[slot as usize].clone();
+                    self.reg_set(dst, val);
+                }
+                Instruction::StoreGlobal(slot, src) => {
+                    let val = self.reg_get(src).clone();
+                    self.globals[slot as usize] = val;
+                }
+
+                // Arithmetic
+                Instruction::Add(dst, l, r) => {
+                    let result = self.arith_op(l, r, |a, b| a + b, |a, b| a + b);
+                    self.reg_set(dst, result);
+                }
+                Instruction::Sub(dst, l, r) => {
+                    let result = self.arith_op(l, r, |a, b| a - b, |a, b| a - b);
+                    self.reg_set(dst, result);
+                }
+                Instruction::Mul(dst, l, r) => {
+                    let result = self.arith_op(l, r, |a, b| a * b, |a, b| a * b);
+                    self.reg_set(dst, result);
+                }
+                Instruction::Div(dst, l, r) => {
+                    let rv = self.reg_get(r);
+                    if rv.as_int() == 0 && matches!(rv, Value::Int(_) | Value::UInt(_)) {
+                        return Err(VmError::DivisionByZero);
+                    }
+                    let result = self.arith_op(l, r, |a, b| a / b, |a, b| a / b);
+                    self.reg_set(dst, result);
+                }
+                Instruction::Mod(dst, l, r) => {
+                    let rv = self.reg_get(r);
+                    if rv.as_int() == 0 {
+                        return Err(VmError::DivisionByZero);
+                    }
+                    let result = Value::Int(self.reg_get(l).as_int() % self.reg_get(r).as_int());
+                    self.reg_set(dst, result);
+                }
+                Instruction::Pow(dst, l, r) => {
+                    let result = Value::Real(
+                        self.reg_get(l).as_real().powf(self.reg_get(r).as_real()),
+                    );
+                    self.reg_set(dst, result);
+                }
+                Instruction::Neg(dst, src) => {
+                    let val = self.reg_get(src);
+                    let result = match val {
+                        Value::Int(i) => Value::Int(-i),
+                        Value::Real(r) => Value::Real(-r),
+                        _ => Value::Int(-val.as_int()),
+                    };
+                    self.reg_set(dst, result);
+                }
+
+                // Comparison
+                Instruction::CmpEq(dst, l, r) => {
+                    let result = self.cmp_op(l, r, |a, b| a == b, |a, b| a == b);
+                    self.reg_set(dst, Value::Bool(result));
+                }
+                Instruction::CmpNe(dst, l, r) => {
+                    let result = self.cmp_op(l, r, |a, b| a != b, |a, b| a != b);
+                    self.reg_set(dst, Value::Bool(result));
+                }
+                Instruction::CmpLt(dst, l, r) => {
+                    let result = self.cmp_op(l, r, |a, b| a < b, |a, b| a < b);
+                    self.reg_set(dst, Value::Bool(result));
+                }
+                Instruction::CmpGt(dst, l, r) => {
+                    let result = self.cmp_op(l, r, |a, b| a > b, |a, b| a > b);
+                    self.reg_set(dst, Value::Bool(result));
+                }
+                Instruction::CmpLe(dst, l, r) => {
+                    let result = self.cmp_op(l, r, |a, b| a <= b, |a, b| a <= b);
+                    self.reg_set(dst, Value::Bool(result));
+                }
+                Instruction::CmpGe(dst, l, r) => {
+                    let result = self.cmp_op(l, r, |a, b| a >= b, |a, b| a >= b);
+                    self.reg_set(dst, Value::Bool(result));
+                }
+
+                // Logic
+                Instruction::And(dst, l, r) => {
+                    let result = self.reg_get(l).as_bool() && self.reg_get(r).as_bool();
+                    self.reg_set(dst, Value::Bool(result));
+                }
+                Instruction::Or(dst, l, r) => {
+                    let result = self.reg_get(l).as_bool() || self.reg_get(r).as_bool();
+                    self.reg_set(dst, Value::Bool(result));
+                }
+                Instruction::Xor(dst, l, r) => {
+                    let result = self.reg_get(l).as_bool() ^ self.reg_get(r).as_bool();
+                    self.reg_set(dst, Value::Bool(result));
+                }
+                Instruction::Not(dst, src) => {
+                    let result = !self.reg_get(src).as_bool();
+                    self.reg_set(dst, Value::Bool(result));
+                }
+
+                // Conversion
+                Instruction::ToInt(dst, src) => {
+                    let val = Value::Int(self.reg_get(src).as_int());
+                    self.reg_set(dst, val);
+                }
+                Instruction::ToReal(dst, src) => {
+                    let val = Value::Real(self.reg_get(src).as_real());
+                    self.reg_set(dst, val);
+                }
+                Instruction::ToBool(dst, src) => {
+                    let val = Value::Bool(self.reg_get(src).as_bool());
+                    self.reg_set(dst, val);
+                }
+
+                // Control flow
+                Instruction::Jump(label) => {
+                    self.jump_to(label)?;
+                }
+                Instruction::JumpIf(reg, label) => {
+                    if self.reg_get(reg).as_bool() {
+                        self.jump_to(label)?;
+                    }
+                }
+                Instruction::JumpIfNot(reg, label) => {
+                    if !self.reg_get(reg).as_bool() {
+                        self.jump_to(label)?;
+                    }
+                }
+
+                // Function calls
+                Instruction::Call {
+                    func_index,
+                    dst,
+                    args,
+                } => {
+                    self.call_function(func_index, Some(dst), &args)?;
+                }
+                Instruction::CallFb {
+                    instance_slot: _,
+                    func_index,
+                    args,
+                } => {
+                    self.call_function(func_index, None, &args)?;
+                }
+                Instruction::Ret(reg) => {
+                    let ret_val = self.reg_get(reg).clone();
+                    self.call_stack.pop();
+                    if let Some(caller) = self.call_stack.last_mut() {
+                        if let Some(ret_reg) = caller.return_reg.take() {
+                            caller.registers[ret_reg as usize] = ret_val.clone();
+                        }
+                    }
+                    if self.call_stack.is_empty() {
+                        return Ok(ret_val);
+                    }
+                }
+                Instruction::RetVoid => {
+                    self.call_stack.pop();
+                    if self.call_stack.is_empty() {
+                        return Ok(Value::Void);
+                    }
+                    if let Some(caller) = self.call_stack.last_mut() {
+                        caller.return_reg.take();
+                    }
+                }
+
+                // Array/struct access (simplified)
+                Instruction::LoadArray(dst, _slot, _idx) => {
+                    self.reg_set(dst, Value::Int(0)); // TODO: implement array storage
+                }
+                Instruction::StoreArray(_slot, _idx, _val) => {
+                    // TODO: implement array storage
+                }
+                Instruction::LoadField(dst, _slot, _offset) => {
+                    self.reg_set(dst, Value::Int(0)); // TODO: implement struct storage
+                }
+                Instruction::StoreField(_slot, _offset, _val) => {
+                    // TODO: implement struct storage
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // Helpers
+    // =========================================================================
+
+    fn reg_get(&self, reg: Reg) -> &Value {
+        &self.call_stack.last().unwrap().registers[reg as usize]
+    }
+
+    fn reg_set(&mut self, reg: Reg, val: Value) {
+        self.call_stack.last_mut().unwrap().registers[reg as usize] = val;
+    }
+
+    fn local_get(&self, slot: u16) -> &Value {
+        &self.call_stack.last().unwrap().locals[slot as usize]
+    }
+
+    fn local_set(&mut self, slot: u16, val: Value) {
+        self.call_stack.last_mut().unwrap().locals[slot as usize] = val;
+    }
+
+    fn jump_to(&mut self, label: Label) -> Result<(), VmError> {
+        let frame = self.call_stack.last_mut().unwrap();
+        let func = &self.module.functions[frame.func_index as usize];
+        let target = *func
+            .label_positions
+            .get(label as usize)
+            .ok_or(VmError::InvalidLabel(label))?;
+        frame.pc = target;
+        Ok(())
+    }
+
+    fn call_function(
+        &mut self,
+        func_index: u16,
+        return_reg: Option<Reg>,
+        args: &[(u16, Reg)],
+    ) -> Result<(), VmError> {
+        if self.call_stack.len() >= self.config.max_call_depth {
+            return Err(VmError::StackOverflow(self.config.max_call_depth));
+        }
+
+        let func = self
+            .module
+            .functions
+            .get(func_index as usize)
+            .ok_or(VmError::InvalidFunction(func_index))?;
+
+        let register_count = func.register_count as usize;
+        let mut locals: Vec<Value> = func
+            .locals
+            .slots
+            .iter()
+            .map(|s| Value::default_for_type(s.ty))
+            .collect();
+
+        // Pass arguments: store arg values into callee's local slots
+        for &(param_slot, arg_reg) in args {
+            let val = self.reg_get(arg_reg).clone();
+            if (param_slot as usize) < locals.len() {
+                locals[param_slot as usize] = val;
+            }
+        }
+
+        // Set return_reg on the CALLER frame
+        if let Some(ret_reg) = return_reg {
+            if let Some(caller) = self.call_stack.last_mut() {
+                caller.return_reg = Some(ret_reg);
+            }
+        }
+
+        self.call_stack.push(CallFrame {
+            func_index,
+            registers: vec![Value::default(); register_count.max(1)],
+            locals,
+            pc: 0,
+            return_reg: None,
+        });
+
+        Ok(())
+    }
+
+    fn arith_op(
+        &self,
+        l: Reg,
+        r: Reg,
+        int_op: impl Fn(i64, i64) -> i64,
+        real_op: impl Fn(f64, f64) -> f64,
+    ) -> Value {
+        let lv = self.reg_get(l);
+        let rv = self.reg_get(r);
+        match (lv, rv) {
+            (Value::Real(_), _) | (_, Value::Real(_)) => {
+                Value::Real(real_op(lv.as_real(), rv.as_real()))
+            }
+            _ => Value::Int(int_op(lv.as_int(), rv.as_int())),
+        }
+    }
+
+    fn cmp_op(
+        &self,
+        l: Reg,
+        r: Reg,
+        int_cmp: impl Fn(i64, i64) -> bool,
+        real_cmp: impl Fn(f64, f64) -> bool,
+    ) -> bool {
+        let lv = self.reg_get(l);
+        let rv = self.reg_get(r);
+        match (lv, rv) {
+            (Value::Real(_), _) | (_, Value::Real(_)) => {
+                real_cmp(lv.as_real(), rv.as_real())
+            }
+            _ => int_cmp(lv.as_int(), rv.as_int()),
+        }
+    }
+}

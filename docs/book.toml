@@ -1,0 +1,15 @@
+[book]
+title = "IEC 61131-3 Structured Text Compiler"
+authors = ["Stefano Bertelli"]
+language = "en"
+src = "src"
+description = "Documentation for the rust-plc IEC 61131-3 Structured Text compiler, LSP server, and runtime"
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/user/rust-plc"
+additional-css = ["custom.css"]

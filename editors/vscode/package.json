@@ -1,0 +1,91 @@
+{
+  "name": "iec61131-st",
+  "displayName": "IEC 61131-3 Structured Text",
+  "description": "Language support for IEC 61131-3 Structured Text with LSP and online debugging",
+  "version": "0.1.0",
+  "publisher": "rust-plc",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/user/rust-plc"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Debuggers"
+  ],
+  "activationEvents": [
+    "onLanguage:structured-text"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "structured-text",
+        "aliases": [
+          "Structured Text",
+          "ST",
+          "SCL"
+        ],
+        "extensions": [
+          ".st",
+          ".scl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "structured-text",
+        "scopeName": "source.st",
+        "path": "./syntaxes/structured-text.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Structured Text",
+      "properties": {
+        "structured-text.serverPath": {
+          "type": "string",
+          "default": "st-cli",
+          "description": "Path to the st-cli binary"
+        }
+      }
+    },
+    "semanticTokenScopes": [
+      {
+        "language": "structured-text",
+        "scopes": {
+          "keyword": ["keyword.control.st"],
+          "type": ["support.type.st"],
+          "variable": ["variable.other.st"],
+          "function": ["entity.name.function.st"],
+          "parameter": ["variable.parameter.st"],
+          "number": ["constant.numeric.st"],
+          "string": ["string.quoted.st"],
+          "comment": ["comment.st"],
+          "enumMember": ["variable.other.enummember.st"]
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "node ./out/test/runTest.js"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "@types/mocha": "^10.0.0",
+    "@vscode/test-electron": "^2.3.0",
+    "glob": "^10.0.0",
+    "mocha": "^10.2.0",
+    "typescript": "^5.3.0"
+  }
+}

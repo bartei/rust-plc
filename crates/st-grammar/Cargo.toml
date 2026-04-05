@@ -1,0 +1,13 @@
+[package]
+name = "st-grammar"
+description = "Tree-sitter grammar for IEC 61131-3 Structured Text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tree-sitter.workspace = true
+
+[build-dependencies]
+cc = "1"

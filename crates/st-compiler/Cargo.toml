@@ -1,0 +1,13 @@
+[package]
+name = "st-compiler"
+description = "AST to IR lowering for Structured Text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+st-syntax.workspace = true
+st-semantics.workspace = true
+st-ir.workspace = true
+thiserror.workspace = true

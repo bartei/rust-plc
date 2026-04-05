@@ -1,0 +1,14 @@
+[package]
+name = "st-monitor"
+description = "WebSocket-based online monitoring server for PLC runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+st-runtime.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true

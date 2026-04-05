@@ -1,0 +1,22 @@
+[package]
+name = "st-cli"
+description = "CLI entry point for the IEC 61131-3 compiler toolchain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+st-grammar.workspace = true
+st-syntax.workspace = true
+st-semantics.workspace = true
+st-compiler.workspace = true
+st-ir.workspace = true
+st-runtime.workspace = true
+st-lsp.workspace = true
+st-dap.workspace = true
+st-monitor.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true

@@ -1,0 +1,34 @@
+/* Syntax highlighting for ST code blocks */
+code.language-st,
+code.language-iec61131 {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+}
+
+/* Architecture diagram styling */
+.architecture-diagram {
+    background: var(--bg);
+    border: 1px solid var(--table-border-color);
+    border-radius: 4px;
+    padding: 1em;
+    overflow-x: auto;
+    font-family: monospace;
+    white-space: pre;
+    line-height: 1.4;
+}
+
+/* Tip/warning boxes */
+.tip {
+    background: #e8f5e9;
+    border-left: 4px solid #4caf50;
+    padding: 0.5em 1em;
+    margin: 1em 0;
+    border-radius: 0 4px 4px 0;
+}
+
+.warning {
+    background: #fff3e0;
+    border-left: 4px solid #ff9800;
+    padding: 0.5em 1em;
+    margin: 1em 0;
+    border-radius: 0 4px 4px 0;
+}

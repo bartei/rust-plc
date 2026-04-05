@@ -1,0 +1,23 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Node / VSCode extension
+editors/vscode/node_modules/
+editors/vscode/out/
+editors/vscode/*.vsix
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tree-sitter build artifacts
+crates/st-grammar/build/
+
+# mdBook output
+docs/book/

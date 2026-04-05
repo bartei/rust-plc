@@ -1,0 +1,15 @@
+{
+  "grammars": [
+    {
+      "name": "structured_text",
+      "camelCase": false,
+      "scope": "source.st",
+      "file-types": ["st", "scl"],
+      "path": "."
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT"
+  }
+}

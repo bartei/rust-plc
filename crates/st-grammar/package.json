@@ -1,0 +1,19 @@
+{
+  "name": "tree-sitter-structured-text",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for IEC 61131-3 Structured Text",
+  "main": "bindings/node",
+  "tree-sitter": [
+    {
+      "scope": "source.st",
+      "file-types": ["st", "scl"],
+      "highlights": "queries/highlights.scm"
+    }
+  ],
+  "dependencies": {
+    "tree-sitter": "^0.22.0"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "^0.26.0"
+  }
+}

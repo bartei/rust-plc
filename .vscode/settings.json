@@ -1,0 +1,16 @@
+{
+  "structured-text.serverPath": "${workspaceFolder}/target/debug/st-cli",
+  "editor.semanticHighlighting.enabled": true,
+  "files.associations": {
+    "*.st": "structured-text",
+    "*.scl": "structured-text"
+  },
+  "rust-analyzer.cargo.features": "all",
+  "search.exclude": {
+    "**/target": true,
+    "**/node_modules": true,
+    "crates/st-grammar/src/parser.c": true,
+    "crates/st-grammar/src/grammar.json": true,
+    "crates/st-grammar/src/node-types.json": true
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "comments": {
+    "lineComment": "//",
+    "blockComment": ["(*", "*)"]
+  },
+  "brackets": [
+    ["(", ")"],
+    ["[", "]"]
+  ],
+  "autoClosingPairs": [
+    { "open": "(", "close": ")" },
+    { "open": "[", "close": "]" },
+    { "open": "(*", "close": "*)" },
+    { "open": "'", "close": "'", "notIn": ["string"] },
+    { "open": "\"", "close": "\"", "notIn": ["string"] }
+  ],
+  "surroundingPairs": [
+    ["(", ")"],
+    ["[", "]"],
+    ["'", "'"],
+    ["\"", "\""]
+  ],
+  "folding": {
+    "markers": {
+      "start": "^\\s*(PROGRAM|FUNCTION|FUNCTION_BLOCK|IF|FOR|WHILE|REPEAT|CASE|VAR|VAR_INPUT|VAR_OUTPUT|VAR_IN_OUT|VAR_GLOBAL|VAR_TEMP)\\b",
+      "end": "^\\s*(END_PROGRAM|END_FUNCTION|END_FUNCTION_BLOCK|END_IF|END_FOR|END_WHILE|END_REPEAT|END_CASE|END_VAR)\\b"
+    }
+  },
+  "wordPattern": "[a-zA-Z_][a-zA-Z0-9_]*"
+}

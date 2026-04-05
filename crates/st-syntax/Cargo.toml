@@ -1,0 +1,12 @@
+[package]
+name = "st-syntax"
+description = "AST types and tree-sitter CST to AST conversion for Structured Text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+st-grammar.workspace = true
+tree-sitter.workspace = true
+serde.workspace = true
