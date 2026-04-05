@@ -417,3 +417,210 @@ END_FUNCTION
     // Called without args, n=0 so Fib=0
     assert_eq!(val, Value::Int(0));
 }
+
+// =============================================================================
+// Local variable retention across scan cycles (PLC behavior)
+// =============================================================================
+
+#[test]
+fn local_counter_increments_across_cycles() {
+    // This is the core PLC behavior test: local variables in PROGRAM POUs
+    // must retain their values between scan cycles.
+    let source = "\
+VAR_GLOBAL
+    g_result : INT;
+END_VAR
+
+PROGRAM Main
+VAR
+    counter : INT := 0;
+END_VAR
+    counter := counter + 1;
+    g_result := counter;
+END_PROGRAM
+";
+    let engine = run_program(source, 10);
+    let val = engine.vm().get_global("g_result");
+    assert_eq!(
+        val,
+        Some(&Value::Int(10)),
+        "After 10 cycles, counter should be 10 (retained across cycles)"
+    );
+}
+
+#[test]
+fn local_counter_increments_100_cycles() {
+    let source = "\
+VAR_GLOBAL
+    g_result : INT;
+END_VAR
+
+PROGRAM Main
+VAR
+    counter : INT := 0;
+END_VAR
+    counter := counter + 1;
+    g_result := counter;
+END_PROGRAM
+";
+    let engine = run_program(source, 100);
+    let val = engine.vm().get_global("g_result");
+    assert_eq!(val, Some(&Value::Int(100)));
+}
+
+#[test]
+fn local_bool_toggle_across_cycles() {
+    let source = "\
+VAR_GLOBAL
+    g_state : BOOL;
+END_VAR
+
+PROGRAM Main
+VAR
+    toggle : BOOL := FALSE;
+END_VAR
+    toggle := NOT toggle;
+    g_state := toggle;
+END_PROGRAM
+";
+    // After odd number of cycles, toggle should be TRUE
+    let engine = run_program(source, 7);
+    let val = engine.vm().get_global("g_state");
+    assert_eq!(val, Some(&Value::Bool(true)), "After 7 toggles, should be TRUE");
+
+    // After even number of cycles, toggle should be FALSE
+    let engine = run_program(source, 8);
+    let val = engine.vm().get_global("g_state");
+    assert_eq!(val, Some(&Value::Bool(false)), "After 8 toggles, should be FALSE");
+}
+
+#[test]
+fn local_accumulator_across_cycles() {
+    // Test that a running sum accumulates correctly
+    let source = "\
+VAR_GLOBAL
+    g_sum : INT;
+END_VAR
+
+PROGRAM Main
+VAR
+    sum : INT := 0;
+    cycle : INT := 0;
+END_VAR
+    cycle := cycle + 1;
+    sum := sum + cycle;
+    g_sum := sum;
+END_PROGRAM
+";
+    // sum = 1 + 2 + 3 + ... + 10 = 55
+    let engine = run_program(source, 10);
+    let val = engine.vm().get_global("g_sum");
+    assert_eq!(val, Some(&Value::Int(55)), "Sum of 1..10 should be 55");
+}
+
+#[test]
+fn state_machine_across_cycles() {
+    // Test a state machine that progresses through states
+    let source = "\
+VAR_GLOBAL
+    g_state : INT;
+END_VAR
+
+PROGRAM Main
+VAR
+    state : INT := 0;
+END_VAR
+    CASE state OF
+        0:
+            state := 1;
+        1:
+            state := 2;
+        2:
+            state := 3;
+        3:
+            state := 0;
+    END_CASE;
+    g_state := state;
+END_PROGRAM
+";
+    // After 1 cycle: state = 1
+    let engine = run_program(source, 1);
+    assert_eq!(engine.vm().get_global("g_state"), Some(&Value::Int(1)));
+
+    // After 2 cycles: state = 2
+    let engine = run_program(source, 2);
+    assert_eq!(engine.vm().get_global("g_state"), Some(&Value::Int(2)));
+
+    // After 4 cycles: state = 0 (wrapped around)
+    let engine = run_program(source, 4);
+    assert_eq!(engine.vm().get_global("g_state"), Some(&Value::Int(0)));
+
+    // After 5 cycles: state = 1 (second rotation)
+    let engine = run_program(source, 5);
+    assert_eq!(engine.vm().get_global("g_state"), Some(&Value::Int(1)));
+}
+
+#[test]
+fn function_locals_do_not_persist() {
+    // FUNCTION locals should NOT persist — they reset every call
+    let source = "\
+FUNCTION Increment : INT
+VAR_INPUT
+    x : INT;
+END_VAR
+VAR
+    local_counter : INT := 0;
+END_VAR
+    local_counter := local_counter + 1;
+    Increment := local_counter + x;
+END_FUNCTION
+
+VAR_GLOBAL
+    g_result : INT;
+END_VAR
+
+PROGRAM Main
+VAR
+    r : INT := 0;
+END_VAR
+    r := Increment(x := 10);
+    g_result := r;
+END_PROGRAM
+";
+    // Function local_counter resets to 0 every call, so result = 0 + 1 + 10 = 11
+    let engine = run_program(source, 1);
+    assert_eq!(engine.vm().get_global("g_result"), Some(&Value::Int(11)));
+
+    // Even after 10 cycles, function locals reset each call
+    let engine = run_program(source, 10);
+    assert_eq!(engine.vm().get_global("g_result"), Some(&Value::Int(11)));
+}
+
+#[test]
+fn multiple_local_vars_retained() {
+    let source = "\
+VAR_GLOBAL
+    g_a : INT;
+    g_b : INT;
+    g_c : INT;
+END_VAR
+
+PROGRAM Main
+VAR
+    a : INT := 0;
+    b : INT := 100;
+    c : INT := 0;
+END_VAR
+    a := a + 1;
+    b := b - 1;
+    c := a + b;
+    g_a := a;
+    g_b := b;
+    g_c := c;
+END_PROGRAM
+";
+    let engine = run_program(source, 5);
+    assert_eq!(engine.vm().get_global("g_a"), Some(&Value::Int(5)));   // 0+1+1+1+1+1
+    assert_eq!(engine.vm().get_global("g_b"), Some(&Value::Int(95)));  // 100-1-1-1-1-1
+    assert_eq!(engine.vm().get_global("g_c"), Some(&Value::Int(100))); // a+b always = 100
+}
