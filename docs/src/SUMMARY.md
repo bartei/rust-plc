@@ -7,6 +7,7 @@
 - [Installation](./getting-started/installation.md)
 - [Quick Start](./getting-started/quickstart.md)
 - [VSCode Setup](./getting-started/vscode-setup.md)
+- [Editing, Running & Debugging in VSCode](./getting-started/vscode-tutorial.md)
 
 # Language Reference
 

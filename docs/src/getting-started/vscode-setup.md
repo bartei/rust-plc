@@ -85,3 +85,9 @@ The extension automatically activates for files with these extensions:
 ### LSP errors
 - Build st-cli: `cargo build -p st-cli`
 - Check the Output panel for error messages from the language server
+
+## Next Steps
+
+Once the extension is installed and working, see the complete walkthrough:
+
+**[Editing, Running & Debugging in VSCode](./vscode-tutorial.md)** — step-by-step guide covering hover, completion, diagnostics, running programs, setting breakpoints, stepping through code, and inspecting variables.
