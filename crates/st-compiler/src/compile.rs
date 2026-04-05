@@ -658,6 +658,35 @@ impl<'a> FunctionCompiler<'a> {
         let name = fc.name.as_str();
         let dst = self.alloc_reg();
 
+        // Check for math intrinsics (single-argument real functions)
+        let intrinsic: Option<fn(Reg, Reg) -> Instruction> = match name.to_uppercase().as_str() {
+            "SQRT" => Some(Instruction::Sqrt),
+            "SIN"  => Some(Instruction::Sin),
+            "COS"  => Some(Instruction::Cos),
+            "TAN"  => Some(Instruction::Tan),
+            "ASIN" => Some(Instruction::Asin),
+            "ACOS" => Some(Instruction::Acos),
+            "ATAN" => Some(Instruction::Atan),
+            "LN"   => Some(Instruction::Ln),
+            "LOG"  => Some(Instruction::Log),
+            "EXP"  => Some(Instruction::Exp),
+            _ => None,
+        };
+        if let Some(make_instr) = intrinsic {
+            let arg = if let Some(first_arg) = fc.arguments.first() {
+                match first_arg {
+                    Argument::Positional(expr) => self.compile_expression(expr),
+                    Argument::Named { value, .. } => self.compile_expression(value),
+                }
+            } else {
+                let r = self.alloc_reg();
+                self.emit(Instruction::LoadConst(r, Value::Real(0.0)));
+                r
+            };
+            self.emit(make_instr(dst, arg));
+            return dst;
+        }
+
         // Check if it's an FB instance call (local variable whose type is a known FB)
         if let Some(slot) = self.find_local(&name) {
             // Look up the FB TYPE name for this local slot

@@ -200,6 +200,28 @@ pub enum Instruction {
     Xor(Reg, Reg, Reg),
     Not(Reg, Reg),
 
+    // ── Math intrinsics ────────────────────────────────────────────────
+    /// dst = sqrt(src)
+    Sqrt(Reg, Reg),
+    /// dst = sin(src)
+    Sin(Reg, Reg),
+    /// dst = cos(src)
+    Cos(Reg, Reg),
+    /// dst = tan(src)
+    Tan(Reg, Reg),
+    /// dst = asin(src)
+    Asin(Reg, Reg),
+    /// dst = acos(src)
+    Acos(Reg, Reg),
+    /// dst = atan(src)
+    Atan(Reg, Reg),
+    /// dst = ln(src)
+    Ln(Reg, Reg),
+    /// dst = log(src) (base 10)
+    Log(Reg, Reg),
+    /// dst = exp(src)
+    Exp(Reg, Reg),
+
     // ── Type conversion ──────────────────────────────────────────────
     /// Convert register value to int.
     ToInt(Reg, Reg),

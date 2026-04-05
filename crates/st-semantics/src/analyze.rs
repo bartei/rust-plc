@@ -21,6 +21,7 @@ pub fn analyze(source_file: &SourceFile) -> AnalysisResult {
         in_loop: false,
         current_pou_return_type: None,
     };
+    analyzer.register_intrinsics();
     analyzer.analyze_source_file(source_file);
     analyzer.check_unused();
     AnalysisResult {
@@ -52,6 +53,39 @@ impl Analyzer {
     // Pass 1: Register top-level declarations (types, POUs) in global scope
     // Pass 2: Analyze bodies
     // =========================================================================
+
+    /// Register built-in math intrinsic functions so semantic analysis
+    /// recognizes them as valid function calls.
+    fn register_intrinsics(&mut self) {
+        let global = self.symbols.global_scope_id();
+        let real_ty = Ty::Elementary(ElementaryType::Real);
+        let real_param = ParamDef {
+            name: "IN1".to_string(),
+            ty: real_ty.clone(),
+            var_kind: VarKind::VarInput,
+        };
+
+        let intrinsics = [
+            "SQRT", "SIN", "COS", "TAN", "ASIN", "ACOS", "ATAN", "LN", "LOG", "EXP",
+        ];
+
+        for name in intrinsics {
+            self.symbols.define(
+                global,
+                Symbol {
+                    name: name.to_string(),
+                    ty: real_ty.clone(),
+                    kind: SymbolKind::Function {
+                        return_type: real_ty.clone(),
+                        params: vec![real_param.clone()],
+                    },
+                    range: TextRange::new(0, 0),
+                    used: true, // don't warn about unused
+                    assigned: true,
+                },
+            );
+        }
+    }
 
     fn analyze_source_file(&mut self, sf: &SourceFile) {
         // Pass 1: register all top-level names so forward references work

@@ -480,6 +480,38 @@ impl Vm {
                     self.reg_set(dst, Value::Bool(result));
                 }
 
+                // Math intrinsics
+                Instruction::Sqrt(dst, src) => {
+                    self.reg_set(dst, Value::Real(self.reg_get(src).as_real().sqrt()));
+                }
+                Instruction::Sin(dst, src) => {
+                    self.reg_set(dst, Value::Real(self.reg_get(src).as_real().sin()));
+                }
+                Instruction::Cos(dst, src) => {
+                    self.reg_set(dst, Value::Real(self.reg_get(src).as_real().cos()));
+                }
+                Instruction::Tan(dst, src) => {
+                    self.reg_set(dst, Value::Real(self.reg_get(src).as_real().tan()));
+                }
+                Instruction::Asin(dst, src) => {
+                    self.reg_set(dst, Value::Real(self.reg_get(src).as_real().asin()));
+                }
+                Instruction::Acos(dst, src) => {
+                    self.reg_set(dst, Value::Real(self.reg_get(src).as_real().acos()));
+                }
+                Instruction::Atan(dst, src) => {
+                    self.reg_set(dst, Value::Real(self.reg_get(src).as_real().atan()));
+                }
+                Instruction::Ln(dst, src) => {
+                    self.reg_set(dst, Value::Real(self.reg_get(src).as_real().ln()));
+                }
+                Instruction::Log(dst, src) => {
+                    self.reg_set(dst, Value::Real(self.reg_get(src).as_real().log10()));
+                }
+                Instruction::Exp(dst, src) => {
+                    self.reg_set(dst, Value::Real(self.reg_get(src).as_real().exp()));
+                }
+
                 // Conversion
                 Instruction::ToInt(dst, src) => {
                     let val = Value::Int(self.reg_get(src).as_int());
