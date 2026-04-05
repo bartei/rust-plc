@@ -116,6 +116,26 @@ impl Analyzer {
         for name in ["INT_TO_BOOL", "REAL_TO_BOOL", "DINT_TO_BOOL", "LINT_TO_BOOL"] {
             reg(name, &int_ty, &bool_ty);
         }
+
+        // Drop the closure before using self.symbols again
+        drop(reg);
+
+        // System time intrinsic (no args → TIME)
+        let time_ty = Ty::Elementary(ElementaryType::Time);
+        self.symbols.define(
+            global,
+            Symbol {
+                name: "SYSTEM_TIME".to_string(),
+                ty: time_ty.clone(),
+                kind: SymbolKind::Function {
+                    return_type: time_ty,
+                    params: vec![],
+                },
+                range: TextRange::new(0, 0),
+                used: true,
+                assigned: true,
+            },
+        );
     }
 
     fn analyze_source_file(&mut self, sf: &SourceFile) {

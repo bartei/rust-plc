@@ -263,9 +263,29 @@ pub fn format_value(value: &Value) -> String {
         Value::UInt(u) => u.to_string(),
         Value::Real(r) => format!("{r:.6}"),
         Value::String(s) => format!("'{s}'"),
-        Value::Time(ns) => {
-            let ms = *ns / 1_000_000;
-            format!("T#{ms}ms")
+        Value::Time(ms) => {
+            if *ms >= 60_000 {
+                let min = ms / 60_000;
+                let sec = (ms % 60_000) / 1000;
+                let rem_ms = ms % 1000;
+                if rem_ms > 0 {
+                    format!("T#{min}m{sec}s{rem_ms}ms")
+                } else if sec > 0 {
+                    format!("T#{min}m{sec}s")
+                } else {
+                    format!("T#{min}m")
+                }
+            } else if *ms >= 1000 {
+                let sec = ms / 1000;
+                let rem_ms = ms % 1000;
+                if rem_ms > 0 {
+                    format!("T#{sec}s{rem_ms}ms")
+                } else {
+                    format!("T#{sec}s")
+                }
+            } else {
+                format!("T#{ms}ms")
+            }
         }
         Value::Void => "VOID".to_string(),
     }
@@ -394,7 +414,10 @@ mod tests {
         assert_eq!(format_value(&Value::UInt(100)), "100");
         assert_eq!(format_value(&Value::Real(3.14)), "3.140000");
         assert_eq!(format_value(&Value::String("hello".into())), "'hello'");
-        assert_eq!(format_value(&Value::Time(5_000_000)), "T#5ms");
+        assert_eq!(format_value(&Value::Time(5000)), "T#5s");
+        assert_eq!(format_value(&Value::Time(100)), "T#100ms");
+        assert_eq!(format_value(&Value::Time(65000)), "T#1m5s");
+        assert_eq!(format_value(&Value::Time(61500)), "T#1m1s500ms");
         assert_eq!(format_value(&Value::Void), "VOID");
     }
 

@@ -68,6 +68,8 @@ pub struct Vm {
     retained_locals: std::collections::HashMap<u16, Vec<Value>>,
     /// Forced variables: name → forced value. Overrides runtime values.
     forced_variables: std::collections::HashMap<String, Value>,
+    /// Cumulative elapsed time in nanoseconds (updated by engine each cycle).
+    elapsed_time_ms: i64,
     /// FB instance storage: (caller_func_index, instance_slot) → locals.
     fb_instances: std::collections::HashMap<(u16, u16), Vec<Value>>,
 }
@@ -90,6 +92,7 @@ impl Vm {
             debug: DebugState::new(),
             retained_locals: std::collections::HashMap::new(),
             forced_variables: std::collections::HashMap::new(),
+            elapsed_time_ms: 0,
             fb_instances: std::collections::HashMap::new(),
         }
     }
@@ -183,6 +186,16 @@ impl Vm {
     /// Get all currently forced variables.
     pub fn forced_variables(&self) -> &std::collections::HashMap<String, Value> {
         &self.forced_variables
+    }
+
+    /// Set the cumulative elapsed time (called by engine before each scan cycle).
+    pub fn set_elapsed_time_ms(&mut self, ns: i64) {
+        self.elapsed_time_ms = ns;
+    }
+
+    /// Get the cumulative elapsed time in nanoseconds.
+    pub fn elapsed_time_ms(&self) -> i64 {
+        self.elapsed_time_ms
     }
 
     /// Atomically swap the module and restore migrated state.
@@ -502,6 +515,9 @@ impl Vm {
                 Instruction::Atan(dst, src) => {
                     self.reg_set(dst, Value::Real(self.reg_get(src).as_real().atan()));
                 }
+                Instruction::SystemTime(dst) => {
+                    self.reg_set(dst, Value::Time(self.elapsed_time_ms));
+                }
                 Instruction::Ln(dst, src) => {
                     self.reg_set(dst, Value::Real(self.reg_get(src).as_real().ln()));
                 }
@@ -780,6 +796,9 @@ impl Vm {
         match (lv, rv) {
             (Value::Real(_), _) | (_, Value::Real(_)) => {
                 Value::Real(real_op(lv.as_real(), rv.as_real()))
+            }
+            (Value::Time(_), _) | (_, Value::Time(_)) => {
+                Value::Time(int_op(lv.as_int(), rv.as_int()))
             }
             _ => Value::Int(int_op(lv.as_int(), rv.as_int())),
         }

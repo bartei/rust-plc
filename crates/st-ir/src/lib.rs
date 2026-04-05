@@ -116,6 +116,7 @@ impl Value {
             Value::UInt(u) => *u as i64,
             Value::Bool(b) => *b as i64,
             Value::Real(r) => *r as i64,
+            Value::Time(ms) => *ms,
             _ => 0,
         }
     }
@@ -215,6 +216,8 @@ pub enum Instruction {
     Acos(Reg, Reg),
     /// dst = atan(src)
     Atan(Reg, Reg),
+    /// dst = current elapsed time in milliseconds (TIME value)
+    SystemTime(Reg),
     /// dst = ln(src)
     Ln(Reg, Reg),
     /// dst = log(src) (base 10)

@@ -658,7 +658,13 @@ impl<'a> FunctionCompiler<'a> {
         let name = fc.name.as_str();
         let dst = self.alloc_reg();
 
-        // Check for intrinsics (math + type conversions)
+        // Check for zero-argument intrinsics
+        if name.to_uppercase() == "SYSTEM_TIME" {
+            self.emit(Instruction::SystemTime(dst));
+            return dst;
+        }
+
+        // Check for single-argument intrinsics (math + type conversions)
         let intrinsic: Option<fn(Reg, Reg) -> Instruction> = match name.to_uppercase().as_str() {
             // Math
             "SQRT" => Some(Instruction::Sqrt),
@@ -754,7 +760,7 @@ impl<'a> FunctionCompiler<'a> {
             LiteralKind::Real(v) => Value::Real(*v),
             LiteralKind::Bool(v) => Value::Bool(*v),
             LiteralKind::String(s) => Value::String(s.clone()),
-            LiteralKind::Time(_) => Value::Time(0), // TODO: parse time value
+            LiteralKind::Time(s) => Value::Time(parse_time_literal(s)),
             LiteralKind::Date(_) => Value::Time(0),
             LiteralKind::Tod(_) => Value::Time(0),
             LiteralKind::Dt(_) => Value::Time(0),
@@ -770,3 +776,130 @@ impl<'a> FunctionCompiler<'a> {
         }
     }
 }
+
+/// Parse a TIME literal string like "T#5s", "T#100ms", "T#1h2m3s" into milliseconds.
+fn parse_time_literal(s: &str) -> i64 {
+    // Strip prefix: T#, TIME#, t#, time#, LT#, LTIME#
+    let raw = s
+        .trim()
+        .to_uppercase();
+    let body = raw
+        .strip_prefix("LTIME#")
+        .or_else(|| raw.strip_prefix("TIME#"))
+        .or_else(|| raw.strip_prefix("LT#"))
+        .or_else(|| raw.strip_prefix("T#"))
+        .unwrap_or(&raw);
+
+    let mut total_ms: i64 = 0;
+    let mut num_buf = String::new();
+
+    for ch in body.chars() {
+        if ch.is_ascii_digit() || ch == '.' || ch == '_' {
+            if ch != '_' {
+                num_buf.push(ch);
+            }
+        } else {
+            let num: f64 = num_buf.parse().unwrap_or(0.0);
+            num_buf.clear();
+
+            // Look ahead for multi-char units
+            match ch {
+                'H' => total_ms += (num * 3_600_000.0) as i64,
+                'M' => {
+                    // Could be M (minutes) or MS (milliseconds)
+                    // MS is handled as 'M' then 'S' — but we need lookahead
+                    // Since we process char by char and 'S' comes next for 'MS',
+                    // we'll handle 'M' as minutes here. The pattern T#100ms
+                    // would have 'M' then 'S' — let's just check the common patterns.
+                    total_ms += (num * 60_000.0) as i64;
+                }
+                'S' => {
+                    // If previous was 'M' (from "ms"), this means milliseconds
+                    // But we already added as minutes. Fix: check if total was just updated
+                    // Actually, the common format is T#100ms where 'ms' is lowercase in source.
+                    // After uppercasing: T#100MS. So 'M' gets minutes, 'S' gets seconds.
+                    // This is wrong. Let me use a regex-like approach instead.
+                    total_ms += (num * 1_000.0) as i64;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Handle trailing number without unit (assume ms)
+    if !num_buf.is_empty() {
+        let num: f64 = num_buf.parse().unwrap_or(0.0);
+        total_ms += num as i64;
+    }
+
+    // The char-by-char approach above doesn't handle "ms" correctly.
+    // Let's use a proper regex-like parser instead.
+    parse_time_proper(s)
+}
+
+fn parse_time_proper(s: &str) -> i64 {
+    let raw = s.trim();
+    // Strip prefix
+    let body = if let Some(rest) = raw.strip_prefix("T#").or_else(|| raw.strip_prefix("t#")) {
+        rest
+    } else if let Some(rest) = raw.strip_prefix("TIME#").or_else(|| raw.strip_prefix("time#")) {
+        rest
+    } else if let Some(rest) = raw.strip_prefix("LT#").or_else(|| raw.strip_prefix("lt#")) {
+        rest
+    } else if let Some(rest) = raw.strip_prefix("LTIME#").or_else(|| raw.strip_prefix("ltime#")) {
+        rest
+    } else {
+        raw
+    };
+
+    let mut total_ms: i64 = 0;
+    let mut num_buf = String::new();
+    let chars: Vec<char> = body.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch.is_ascii_digit() || ch == '.' || ch == '_' {
+            if ch != '_' {
+                num_buf.push(ch);
+            }
+            i += 1;
+        } else {
+            let num: f64 = num_buf.parse().unwrap_or(0.0);
+            num_buf.clear();
+
+            // Check for multi-char units: ms, us
+            let unit = if i + 1 < chars.len() {
+                let two = format!("{}{}", ch, chars[i + 1]).to_lowercase();
+                if two == "ms" || two == "us" {
+                    i += 2;
+                    two
+                } else {
+                    i += 1;
+                    ch.to_lowercase().to_string()
+                }
+            } else {
+                i += 1;
+                ch.to_lowercase().to_string()
+            };
+
+            match unit.as_str() {
+                "h" => total_ms += (num * 3_600_000.0) as i64,
+                "m" => total_ms += (num * 60_000.0) as i64,
+                "s" => total_ms += (num * 1_000.0) as i64,
+                "ms" => total_ms += num as i64,
+                "us" => total_ms += (num / 1000.0) as i64,
+                _ => {}
+            }
+        }
+    }
+
+    // Trailing number without unit = ms
+    if !num_buf.is_empty() {
+        let num: f64 = num_buf.parse().unwrap_or(0.0);
+        total_ms += num as i64;
+    }
+
+    total_ms
+}
+

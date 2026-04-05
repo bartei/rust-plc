@@ -7,6 +7,12 @@ use st_runtime::*;
 
 /// Parse with stdlib, compile, and run N cycles.
 fn run_with_stdlib(source: &str, cycles: u64) -> Engine {
+    run_with_stdlib_timed(source, cycles, 0)
+}
+
+/// Run with stdlib and simulate a specific cycle time (ms per cycle).
+/// If cycle_time_ms is 0, uses real wall clock time.
+fn run_with_stdlib_timed(source: &str, cycles: u64, cycle_time_ms: i64) -> Engine {
     let stdlib = st_syntax::multi_file::builtin_stdlib();
     let mut all: Vec<&str> = stdlib;
     all.push(source);
@@ -20,9 +26,15 @@ fn run_with_stdlib(source: &str, cycles: u64) -> Engine {
         .expect("No PROGRAM")
         .name
         .clone();
-    let mut engine = Engine::new(module, program_name, EngineConfig::default());
-    for _ in 0..cycles {
-        engine.run_one_cycle().unwrap();
+    let mut engine = Engine::new(module, program_name.clone(), EngineConfig::default());
+    for i in 0..cycles {
+        if cycle_time_ms > 0 {
+            // Set simulated time BEFORE execution
+            engine.vm_mut().set_elapsed_time_ms((i as i64 + 1) * cycle_time_ms);
+            engine.vm_mut().scan_cycle(&program_name).unwrap();
+        } else {
+            engine.run_one_cycle().unwrap();
+        }
     }
     engine
 }
@@ -186,23 +198,21 @@ fn ton_delays_output() {
     let source = r#"
 VAR_GLOBAL
     g_q : INT;
-    g_et : INT;
 END_VAR
 PROGRAM Main
 VAR
     timer : TON;
 END_VAR
-    timer(IN1 := TRUE, PT := 10);
+    timer(IN1 := TRUE, PT := T#100ms);
     g_q := BOOL_TO_INT(IN1 := timer.Q);
-    g_et := timer.ET;
 END_PROGRAM
 "#;
-    // After 5 cycles, ET=5, Q=FALSE
-    let engine = run_with_stdlib(source, 5);
+    // Each cycle = 10ms. After 5 cycles (50ms), Q=FALSE (not reached 100ms yet)
+    let engine = run_with_stdlib_timed(source, 5, 10);
     assert_eq!(engine.vm().get_global("g_q"), Some(&Value::Int(0)));
 
-    // After 10 cycles, ET=10, Q=TRUE
-    let engine = run_with_stdlib(source, 10);
+    // After 12 cycles (120ms), Q=TRUE (exceeded 100ms)
+    let engine = run_with_stdlib_timed(source, 12, 10);
     assert_eq!(engine.vm().get_global("g_q"), Some(&Value::Int(1)));
 }
 
@@ -210,7 +220,7 @@ END_PROGRAM
 fn ton_resets_on_false_input() {
     let source = r#"
 VAR_GLOBAL
-    g_et : INT;
+    g_q : INT;
 END_VAR
 PROGRAM Main
 VAR
@@ -220,13 +230,13 @@ VAR
 END_VAR
     cycle := cycle + 1;
     enable := cycle <= 5;
-    timer(IN1 := enable, PT := 10);
-    g_et := timer.ET;
+    timer(IN1 := enable, PT := T#100ms);
+    g_q := BOOL_TO_INT(IN1 := timer.Q);
 END_PROGRAM
 "#;
-    // Enable for 5 cycles then disable — ET should reset
-    let engine = run_with_stdlib(source, 8);
-    assert_eq!(engine.vm().get_global("g_et"), Some(&Value::Int(0)));
+    // Enable for 5 cycles (50ms) then disable — Q should be FALSE and reset
+    let engine = run_with_stdlib_timed(source, 8, 10);
+    assert_eq!(engine.vm().get_global("g_q"), Some(&Value::Int(0)));
 }
 
 // =============================================================================
@@ -395,7 +405,6 @@ fn tp_generates_pulse() {
     let source = r#"
 VAR_GLOBAL
     g_q : INT;
-    g_et : INT;
 END_VAR
 PROGRAM Main
 VAR
@@ -405,16 +414,17 @@ VAR
 END_VAR
     cycle := cycle + 1;
     trigger := cycle = 2;
-    timer(IN1 := trigger, PT := 5);
+    timer(IN1 := trigger, PT := T#50ms);
     g_q := BOOL_TO_INT(IN1 := timer.Q);
-    g_et := timer.ET;
 END_PROGRAM
 "#;
-    // Trigger at cycle 2, pulse lasts 5 cycles (2-6), then off
-    let engine = run_with_stdlib(source, 4);
-    assert_eq!(engine.vm().get_global("g_q"), Some(&Value::Int(1))); // mid-pulse
+    // Each cycle = 10ms. Trigger at cycle 2 (20ms), pulse lasts 50ms (until 70ms)
+    // At cycle 4 (40ms) — mid-pulse, Q=TRUE
+    let engine = run_with_stdlib_timed(source, 4, 10);
+    assert_eq!(engine.vm().get_global("g_q"), Some(&Value::Int(1)));
 
-    let engine = run_with_stdlib(source, 8);
+    // At cycle 8 (80ms) — pulse ended (20+50=70ms), Q=FALSE
+    let engine = run_with_stdlib_timed(source, 8, 10);
     assert_eq!(engine.vm().get_global("g_q"), Some(&Value::Int(0))); // pulse ended
 }
 

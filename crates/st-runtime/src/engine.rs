@@ -86,6 +86,10 @@ impl Engine {
     pub fn run_one_cycle(&mut self) -> Result<Duration, VmError> {
         let start = Instant::now();
 
+        // Update elapsed time for timer FBs (milliseconds since engine start)
+        let elapsed_ms = self.stats.total_time.as_millis() as i64;
+        self.vm.set_elapsed_time_ms(elapsed_ms);
+
         self.vm.reset_instruction_count();
         self.vm.scan_cycle(&self.program_name)?;
 
