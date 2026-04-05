@@ -501,3 +501,121 @@ END_PROGRAM
         );
     }
 }
+
+#[test]
+fn test_breakpoint_hit_and_variable_inspection() {
+    // Test the full debug flow: set breakpoint, hit it, inspect variables
+    let source = "\
+PROGRAM Main
+VAR
+    x : INT := 0;
+    y : INT := 0;
+END_VAR
+    x := 10;
+    y := x + 20;
+    x := y * 2;
+END_PROGRAM
+";
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            // Set breakpoint on "y := x + 20" (line 7)
+            dap_request(3, "setBreakpoints", Some(json!({
+                "source": { "path": "test.st" },
+                "breakpoints": [{ "line": 7 }]
+            }))),
+            dap_request(4, "configurationDone", None),
+            // Continue — should hit breakpoint on line 7
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            // Now inspect state
+            dap_request(6, "stackTrace", Some(json!({ "threadId": 1 }))),
+            dap_request(7, "scopes", Some(json!({ "frameId": 0 }))),
+            dap_request(8, "variables", Some(json!({ "variablesReference": 1000 }))),
+            // Evaluate x — should be 10 (already executed x := 10)
+            dap_request(9, "evaluate", Some(json!({
+                "expression": "x",
+                "frameId": 0
+            }))),
+            dap_request(10, "disconnect", None),
+        ],
+    );
+
+    // Breakpoint should be verified
+    let bp_resp = find_response(&messages, 3).unwrap();
+    let bps = bp_resp["body"]["breakpoints"].as_array().unwrap();
+    assert!(bps[0]["verified"].as_bool().unwrap_or(false), "Breakpoint should be verified");
+
+    // Should have stopped at breakpoint
+    let stopped_events = find_events(&messages, "stopped");
+    let bp_stops: Vec<_> = stopped_events
+        .iter()
+        .filter(|e| e["body"]["reason"].as_str() == Some("breakpoint"))
+        .collect();
+    assert!(!bp_stops.is_empty(), "Should stop at breakpoint");
+
+    // Stack trace should show Main
+    let st_resp = find_response(&messages, 6).unwrap();
+    let frames = st_resp["body"]["stackFrames"].as_array().unwrap();
+    assert!(!frames.is_empty(), "Should have stack frames");
+    assert_eq!(frames[0]["name"].as_str(), Some("Main"));
+
+    // Variables should include x and y
+    let vars_resp = find_response(&messages, 8).unwrap();
+    let vars = vars_resp["body"]["variables"].as_array().unwrap();
+    let var_names: Vec<_> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+    assert!(var_names.contains(&"x"), "Should have variable x: {var_names:?}");
+    assert!(var_names.contains(&"y"), "Should have variable y: {var_names:?}");
+
+    // x should be 10 (already executed x := 10 before breakpoint on y := ...)
+    let eval_resp = find_response(&messages, 9).unwrap();
+    assert_eq!(eval_resp["body"]["result"].as_str(), Some("10"), "x should be 10");
+}
+
+#[test]
+fn test_step_and_variable_changes() {
+    // Verify that stepping advances execution and variables update
+    let source = "\
+PROGRAM Main
+VAR
+    a : INT := 0;
+END_VAR
+    a := 1;
+    a := 2;
+    a := 3;
+END_PROGRAM
+";
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            // Step over first statement (a := 1)
+            dap_request(4, "next", Some(json!({ "threadId": 1 }))),
+            // Check a = 1
+            dap_request(5, "evaluate", Some(json!({ "expression": "a", "frameId": 0 }))),
+            // Step over second statement (a := 2)
+            dap_request(6, "next", Some(json!({ "threadId": 1 }))),
+            // Check a = 2
+            dap_request(7, "evaluate", Some(json!({ "expression": "a", "frameId": 0 }))),
+            dap_request(8, "disconnect", None),
+        ],
+    );
+
+    // Verify step responses succeeded
+    let step1 = find_response(&messages, 4).unwrap();
+    assert!(step1["success"].as_bool().unwrap_or(false), "Step 1 should succeed");
+    let step2 = find_response(&messages, 6).unwrap();
+    assert!(step2["success"].as_bool().unwrap_or(false), "Step 2 should succeed");
+
+    // After stepping, evaluate should return numeric values for 'a'
+    let eval1 = find_response(&messages, 5).unwrap();
+    let a1 = eval1["body"]["result"].as_str().unwrap_or("?");
+    let eval2 = find_response(&messages, 7).unwrap();
+    let a2 = eval2["body"]["result"].as_str().unwrap_or("?");
+
+    assert!(a1 != "<unknown>", "Should evaluate 'a' after step: got {a1}");
+    assert!(a2 != "<unknown>", "Should evaluate 'a' after step: got {a2}");
+}

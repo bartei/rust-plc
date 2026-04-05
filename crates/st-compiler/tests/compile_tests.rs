@@ -384,3 +384,4 @@ fn module_find_function() {
     assert!(m.find_function("foo").is_some()); // case insensitive
     assert!(m.find_function("Bar").is_none());
 }
+

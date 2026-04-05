@@ -1,6 +1,6 @@
 //! Bytecode VM: fetch-decode-execute interpreter for the register-based IR.
 
-use crate::debug::{self, DebugState, FrameInfo, PauseReason, VariableInfo};
+use crate::debug::{self, DebugState, FrameInfo, VariableInfo};
 use st_ir::*;
 
 /// Runtime error during VM execution.

@@ -335,7 +335,12 @@ impl DapSession {
         let Some(ref mut vm) = self.vm else { return };
 
         let depth = vm.call_depth();
-        vm.debug_mut().resume(mode, depth);
+        // Get current source offset so stepping knows when we've moved to a new line
+        let current_source_offset = vm.stack_frames()
+            .first()
+            .map(|f| f.source_offset)
+            .unwrap_or(0);
+        vm.debug_mut().resume_with_source(mode, depth, current_source_offset);
 
         // If the VM already has call frames (paused mid-execution), continue.
         // Otherwise, start a new run.

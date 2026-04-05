@@ -14,6 +14,8 @@ pub struct DebugState {
     pub step_mode: StepMode,
     /// Call depth when step-over/step-out was initiated.
     pub step_start_depth: usize,
+    /// Source offset when stepping started (to detect line changes).
+    pub step_start_source_offset: usize,
     /// Whether the VM is currently paused.
     pub paused: bool,
     /// Reason for the last pause.
@@ -57,6 +59,7 @@ impl DebugState {
             source_breakpoints: HashSet::new(),
             step_mode: StepMode::Continue,
             step_start_depth: 0,
+            step_start_source_offset: 0,
             paused: false,
             pause_reason: PauseReason::None,
         }
@@ -124,14 +127,33 @@ impl DebugState {
         call_depth: usize,
         source_map: &[SourceLocation],
     ) -> Option<PauseReason> {
+        // Get current instruction's source offset
+        let current_source = source_map
+            .get(pc)
+            .map(|sm| sm.byte_offset)
+            .unwrap_or(0);
+
         match self.step_mode {
             StepMode::Paused => Some(PauseReason::PauseRequest),
-            StepMode::StepIn => Some(PauseReason::Step),
+            StepMode::StepIn => {
+                // Stop at next instruction with a different source location
+                if current_source > 0 && current_source != self.step_start_source_offset {
+                    Some(PauseReason::Step)
+                } else if current_source == 0 {
+                    // No source info — skip this instruction silently
+                    None
+                } else {
+                    // Same source location — keep going
+                    None
+                }
+            }
             StepMode::StepOver => {
-                if call_depth <= self.step_start_depth {
+                if call_depth <= self.step_start_depth
+                    && current_source > 0
+                    && current_source != self.step_start_source_offset
+                {
                     Some(PauseReason::Step)
                 } else {
-                    // Still check breakpoints even when stepping over
                     self.check_breakpoint(func_index, pc, source_map)
                 }
             }
@@ -176,6 +198,15 @@ impl DebugState {
     pub fn resume(&mut self, mode: StepMode, current_depth: usize) {
         self.step_mode = mode;
         self.step_start_depth = current_depth;
+        self.paused = false;
+        self.pause_reason = PauseReason::None;
+    }
+
+    /// Resume with source offset tracking (for line-based stepping).
+    pub fn resume_with_source(&mut self, mode: StepMode, current_depth: usize, source_offset: usize) {
+        self.step_mode = mode;
+        self.step_start_depth = current_depth;
+        self.step_start_source_offset = source_offset;
         self.paused = false;
         self.pause_reason = PauseReason::None;
     }

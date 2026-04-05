@@ -191,6 +191,8 @@ struct FunctionCompiler<'a> {
     globals: &'a MemoryLayout,
     /// Loop exit label stack (for EXIT statements).
     loop_exit_labels: Vec<Label>,
+    /// Source range to attach to next emitted instruction.
+    pending_source: Option<TextRange>,
 }
 
 impl<'a> FunctionCompiler<'a> {
@@ -205,6 +207,7 @@ impl<'a> FunctionCompiler<'a> {
             module_functions,
             globals,
             loop_exit_labels: Vec::new(),
+            pending_source: None,
         }
     }
 
@@ -235,16 +238,29 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn emit(&mut self, instr: Instruction) {
-        self.source_map.push(SourceLocation::default());
+        if let Some(range) = self.pending_source.take() {
+            self.source_map.push(SourceLocation {
+                byte_offset: range.start,
+                byte_end: range.end,
+            });
+        } else {
+            self.source_map.push(SourceLocation::default());
+        }
         self.instructions.push(instr);
     }
 
     fn emit_sourced(&mut self, instr: Instruction, range: TextRange) {
+        self.pending_source = None; // explicit source overrides pending
         self.source_map.push(SourceLocation {
             byte_offset: range.start,
             byte_end: range.end,
         });
         self.instructions.push(instr);
+    }
+
+    /// Set the source range for the next emitted instruction.
+    fn set_source(&mut self, range: TextRange) {
+        self.pending_source = Some(range);
     }
 
     fn add_local(&mut self, name: &str, ty: VarType) -> u16 {
@@ -313,6 +329,10 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn compile_statement(&mut self, stmt: &Statement) -> Result<(), CompileError> {
+        // Set source range so the first instruction of this statement
+        // gets mapped in the source map (for breakpoints + debugging)
+        self.set_source(stmt.range());
+
         match stmt {
             Statement::Assignment(a) => {
                 let val = self.compile_expression(&a.value);

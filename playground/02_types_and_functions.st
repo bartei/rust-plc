@@ -87,8 +87,12 @@ END_VAR
         count := count + 1;
     END_IF;
 
-    output := sum / count;
+    count := 0;
+    IF count <> 0 THEN
+        count := 254;
+    END_IF;
 
+    output := sum / count;
     output := sum * sum / count;
 
     IF output >= 1000 THEN
