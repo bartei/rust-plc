@@ -222,8 +222,8 @@ Ship a working LSP loop early to prove the VSCode integration.
   - Set breakpoints, Evaluate expressions, Pause, Disconnect
   - Full debug session (multi-step with stack trace)
   - Debug state unit tests: breakpoints, step modes, pause/resume, value formatting
-- [ ] PLC-specific extensions (force/unforce, scan cycle info) — future
-- [ ] VSCode custom debug toolbar — future
+- [x] **PLC-specific DAP extensions** (via evaluate expressions): `force x = 42`, `unforce x`, `listForced`, `scanCycleInfo`
+- [x] **VSCode debug toolbar** — Force/Unforce/ListForced/CycleInfo buttons (only visible during ST debug sessions)
 
 ---
 

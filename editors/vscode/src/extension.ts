@@ -88,6 +88,58 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  // ── PLC Debug Toolbar Commands ───────────────────────────────────
+  context.subscriptions.push(
+    vscode.commands.registerCommand("structured-text.forceVariable", async () => {
+      const session = vscode.debug.activeDebugSession;
+      if (!session || session.type !== "st") return;
+      const input = await vscode.window.showInputBox({
+        prompt: "Force variable (e.g., counter = 42)",
+        placeHolder: "variable_name = value",
+      });
+      if (input) {
+        const result = await session.customRequest("evaluate", {
+          expression: `force ${input}`,
+          context: "repl",
+        });
+        vscode.window.showInformationMessage(result.result);
+      }
+    }),
+    vscode.commands.registerCommand("structured-text.unforceVariable", async () => {
+      const session = vscode.debug.activeDebugSession;
+      if (!session || session.type !== "st") return;
+      const input = await vscode.window.showInputBox({
+        prompt: "Variable name to unforce",
+        placeHolder: "variable_name",
+      });
+      if (input) {
+        const result = await session.customRequest("evaluate", {
+          expression: `unforce ${input}`,
+          context: "repl",
+        });
+        vscode.window.showInformationMessage(result.result);
+      }
+    }),
+    vscode.commands.registerCommand("structured-text.listForced", async () => {
+      const session = vscode.debug.activeDebugSession;
+      if (!session || session.type !== "st") return;
+      const result = await session.customRequest("evaluate", {
+        expression: "listForced",
+        context: "repl",
+      });
+      vscode.window.showInformationMessage(result.result);
+    }),
+    vscode.commands.registerCommand("structured-text.cycleInfo", async () => {
+      const session = vscode.debug.activeDebugSession;
+      if (!session || session.type !== "st") return;
+      const result = await session.customRequest("evaluate", {
+        expression: "scanCycleInfo",
+        context: "repl",
+      });
+      vscode.window.showInformationMessage(result.result);
+    })
+  );
+
   // ── Cleanup ──────────────────────────────────────────────────────
   context.subscriptions.push({
     dispose: () => {

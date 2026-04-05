@@ -624,3 +624,120 @@ END_PROGRAM
     assert_eq!(engine.vm().get_global("g_b"), Some(&Value::Int(95)));  // 100-1-1-1-1-1
     assert_eq!(engine.vm().get_global("g_c"), Some(&Value::Int(100))); // a+b always = 100
 }
+
+// =============================================================================
+// Force/unforce variables
+// =============================================================================
+
+#[test]
+fn force_variable_overrides_runtime() {
+    let source = "\
+VAR_GLOBAL
+    g_result : INT;
+END_VAR
+
+PROGRAM Main
+VAR
+    sensor : INT := 0;
+END_VAR
+    sensor := sensor + 1;
+    g_result := sensor;
+END_PROGRAM
+";
+    let mut engine = run_program(source, 5);
+    assert_eq!(engine.vm().get_global("g_result"), Some(&Value::Int(5)));
+
+    // Force sensor to 999 — every read will return 999
+    engine.vm_mut().force_variable("sensor", Value::Int(999));
+    engine.run_one_cycle().unwrap();
+    // sensor reads as 999, so g_result = 999 + 1 = 1000? No — sensor := sensor + 1
+    // reads sensor as 999 (forced), adds 1, stores 1000. Then g_result := sensor reads 999 (forced again).
+    // So g_result = 999
+    assert_eq!(engine.vm().get_global("g_result"), Some(&Value::Int(999)));
+}
+
+#[test]
+fn unforce_variable_restores_runtime() {
+    let source = "\
+VAR_GLOBAL
+    g_result : INT;
+END_VAR
+
+PROGRAM Main
+VAR
+    counter : INT := 0;
+END_VAR
+    counter := counter + 1;
+    g_result := counter;
+END_PROGRAM
+";
+    let mut engine = run_program(source, 5);
+    assert_eq!(engine.vm().get_global("g_result"), Some(&Value::Int(5)));
+
+    // Force counter to 100
+    engine.vm_mut().force_variable("counter", Value::Int(100));
+    engine.run_one_cycle().unwrap();
+    assert_eq!(engine.vm().get_global("g_result"), Some(&Value::Int(100)));
+
+    // Unforce — counter should resume from stored value
+    engine.vm_mut().unforce_variable("counter");
+    engine.run_one_cycle().unwrap();
+    // After unforce, counter reads the stored value (101 from previous cycle's store)
+    // then adds 1 = 102
+    let g = engine.vm().get_global("g_result").unwrap();
+    assert!(matches!(g, Value::Int(v) if *v > 100), "Counter should resume after unforce: {g:?}");
+}
+
+#[test]
+fn force_global_variable() {
+    let source = "\
+VAR_GLOBAL
+    g_input : INT;
+    g_output : INT;
+END_VAR
+
+PROGRAM Main
+VAR
+    x : INT := 0;
+END_VAR
+    x := g_input * 2;
+    g_output := x;
+END_PROGRAM
+";
+    let mut engine = run_program(source, 1);
+    // g_input defaults to 0, so g_output = 0
+    assert_eq!(engine.vm().get_global("g_output"), Some(&Value::Int(0)));
+
+    // Force g_input to 25
+    engine.vm_mut().force_variable("g_input", Value::Int(25));
+    engine.run_one_cycle().unwrap();
+    assert_eq!(engine.vm().get_global("g_output"), Some(&Value::Int(50)));
+
+    // Force to different value
+    engine.vm_mut().force_variable("g_input", Value::Int(10));
+    engine.run_one_cycle().unwrap();
+    assert_eq!(engine.vm().get_global("g_output"), Some(&Value::Int(20)));
+}
+
+#[test]
+fn list_forced_variables() {
+    let source = "\
+PROGRAM Main
+VAR
+    x : INT := 0;
+END_VAR
+    x := x + 1;
+END_PROGRAM
+";
+    let mut engine = run_program(source, 1);
+
+    assert!(engine.vm().forced_variables().is_empty());
+
+    engine.vm_mut().force_variable("x", Value::Int(42));
+    engine.vm_mut().force_variable("y", Value::Bool(true));
+
+    let forced = engine.vm().forced_variables();
+    assert_eq!(forced.len(), 2);
+    assert_eq!(forced.get("X"), Some(&Value::Int(42)));
+    assert_eq!(forced.get("Y"), Some(&Value::Bool(true)));
+}

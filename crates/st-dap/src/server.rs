@@ -344,7 +344,28 @@ impl DapSession {
         ok(seq, ResponseBody::Variables(dap::responses::VariablesResponse { variables }))
     }
 
-    fn handle_evaluate(&self, seq: i64, args: &dap::requests::EvaluateArguments) -> Response {
+    fn handle_evaluate(&mut self, seq: i64, args: &dap::requests::EvaluateArguments) -> Response {
+        let expr = args.expression.trim();
+
+        // Handle PLC-specific commands via evaluate expressions
+        // force <var> = <value>
+        if let Some(rest) = expr.strip_prefix("force ") {
+            return self.handle_force_command(seq, rest);
+        }
+        // unforce <var>
+        if let Some(var_name) = expr.strip_prefix("unforce ") {
+            return self.handle_unforce_command(seq, var_name.trim());
+        }
+        // scanCycleInfo
+        if expr.eq_ignore_ascii_case("scanCycleInfo") || expr.eq_ignore_ascii_case("cycleinfo") {
+            return self.handle_cycle_info(seq);
+        }
+        // listForced
+        if expr.eq_ignore_ascii_case("listForced") || expr.eq_ignore_ascii_case("forced") {
+            return self.handle_list_forced(seq);
+        }
+
+        // Normal variable lookup
         let mut result_str = "<unknown>".to_string();
 
         if let Some(ref vm) = self.vm {
@@ -354,7 +375,7 @@ impl DapSession {
             if let Some(v) = locals
                 .iter()
                 .chain(globals.iter())
-                .find(|v| v.name.eq_ignore_ascii_case(&args.expression))
+                .find(|v| v.name.eq_ignore_ascii_case(expr))
             {
                 result_str = v.value.clone();
             }
@@ -368,6 +389,114 @@ impl DapSession {
             named_variables: None,
             indexed_variables: None,
             memory_reference: None,
+        }))
+    }
+
+    fn handle_force_command(&mut self, seq: i64, expr: &str) -> Response {
+        // Parse "varname = value"
+        let parts: Vec<&str> = expr.splitn(2, '=').collect();
+        if parts.len() != 2 {
+            return ok(seq, ResponseBody::Evaluate(dap::responses::EvaluateResponse {
+                result: "Usage: force <variable> = <value>".into(),
+                type_field: None, presentation_hint: None,
+                variables_reference: 0, named_variables: None,
+                indexed_variables: None, memory_reference: None,
+            }));
+        }
+        let var_name = parts[0].trim();
+        let value_str = parts[1].trim();
+
+        let value = if value_str.eq_ignore_ascii_case("true") {
+            st_ir::Value::Bool(true)
+        } else if value_str.eq_ignore_ascii_case("false") {
+            st_ir::Value::Bool(false)
+        } else if let Ok(i) = value_str.parse::<i64>() {
+            st_ir::Value::Int(i)
+        } else if let Ok(f) = value_str.parse::<f64>() {
+            st_ir::Value::Real(f)
+        } else {
+            st_ir::Value::String(value_str.to_string())
+        };
+
+        if let Some(ref mut vm) = self.vm {
+            vm.force_variable(var_name, value.clone());
+            let result = format!("Forced {} = {}", var_name, st_runtime::debug::format_value(&value));
+            self.pending_events.push(console_output(&result));
+            ok(seq, ResponseBody::Evaluate(dap::responses::EvaluateResponse {
+                result,
+                type_field: None, presentation_hint: None,
+                variables_reference: 0, named_variables: None,
+                indexed_variables: None, memory_reference: None,
+            }))
+        } else {
+            ok(seq, ResponseBody::Evaluate(dap::responses::EvaluateResponse {
+                result: "No program running".into(),
+                type_field: None, presentation_hint: None,
+                variables_reference: 0, named_variables: None,
+                indexed_variables: None, memory_reference: None,
+            }))
+        }
+    }
+
+    fn handle_unforce_command(&mut self, seq: i64, var_name: &str) -> Response {
+        if let Some(ref mut vm) = self.vm {
+            vm.unforce_variable(var_name);
+            let result = format!("Unforced {}", var_name);
+            self.pending_events.push(console_output(&result));
+            ok(seq, ResponseBody::Evaluate(dap::responses::EvaluateResponse {
+                result,
+                type_field: None, presentation_hint: None,
+                variables_reference: 0, named_variables: None,
+                indexed_variables: None, memory_reference: None,
+            }))
+        } else {
+            ok(seq, ResponseBody::Evaluate(dap::responses::EvaluateResponse {
+                result: "No program running".into(),
+                type_field: None, presentation_hint: None,
+                variables_reference: 0, named_variables: None,
+                indexed_variables: None, memory_reference: None,
+            }))
+        }
+    }
+
+    fn handle_cycle_info(&self, seq: i64) -> Response {
+        let result = if let Some(ref vm) = self.vm {
+            format!("Scan cycles: {} | Instructions: {}",
+                0, // cycle count tracked by engine, not VM directly
+                vm.instruction_count()
+            )
+        } else {
+            "No program running".into()
+        };
+
+        ok(seq, ResponseBody::Evaluate(dap::responses::EvaluateResponse {
+            result,
+            type_field: None, presentation_hint: None,
+            variables_reference: 0, named_variables: None,
+            indexed_variables: None, memory_reference: None,
+        }))
+    }
+
+    fn handle_list_forced(&self, seq: i64) -> Response {
+        let result = if let Some(ref vm) = self.vm {
+            let forced = vm.forced_variables();
+            if forced.is_empty() {
+                "No forced variables".into()
+            } else {
+                forced.iter()
+                    .map(|(name, val)| format!("{} = {}", name, st_runtime::debug::format_value(val)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        } else {
+            "No program running".into()
+        };
+
+        ok(seq, ResponseBody::Evaluate(dap::responses::EvaluateResponse {
+            result,
+            type_field: None, presentation_hint: None,
+            variables_reference: 0, named_variables: None,
+            indexed_variables: None, memory_reference: None,
         }))
     }
 

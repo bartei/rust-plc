@@ -64,6 +64,8 @@ pub struct Vm {
     debug: DebugState,
     /// Retained local variables for PROGRAM POUs (persists across scan cycles).
     retained_locals: std::collections::HashMap<u16, Vec<Value>>,
+    /// Forced variables: name → forced value. Overrides runtime values.
+    forced_variables: std::collections::HashMap<String, Value>,
 }
 
 impl Vm {
@@ -83,6 +85,7 @@ impl Vm {
             instruction_count: 0,
             debug: DebugState::new(),
             retained_locals: std::collections::HashMap::new(),
+            forced_variables: std::collections::HashMap::new(),
         }
     }
 
@@ -158,6 +161,22 @@ impl Vm {
     pub fn get_retained_locals(&self, func_name: &str) -> Option<Vec<Value>> {
         let (idx, _) = self.module.find_function(func_name)?;
         self.retained_locals.get(&idx).cloned()
+    }
+
+    /// Force a variable to a specific value. The forced value overrides
+    /// the runtime value whenever the variable is read.
+    pub fn force_variable(&mut self, name: &str, value: Value) {
+        self.forced_variables.insert(name.to_uppercase(), value);
+    }
+
+    /// Remove a force on a variable.
+    pub fn unforce_variable(&mut self, name: &str) {
+        self.forced_variables.remove(&name.to_uppercase());
+    }
+
+    /// Get all currently forced variables.
+    pub fn forced_variables(&self) -> &std::collections::HashMap<String, Value> {
+        &self.forced_variables
     }
 
     /// Atomically swap the module and restore migrated state.
@@ -331,7 +350,17 @@ impl Vm {
                 }
 
                 Instruction::LoadLocal(dst, slot) => {
-                    let val = self.local_get(slot).clone();
+                    // Check if this variable is forced
+                    let func = &self.module.functions[func_index as usize];
+                    let val = if let Some(name) = func.locals.slots.get(slot as usize).map(|s| &s.name) {
+                        if let Some(forced) = self.forced_variables.get(&name.to_uppercase()) {
+                            forced.clone()
+                        } else {
+                            self.local_get(slot).clone()
+                        }
+                    } else {
+                        self.local_get(slot).clone()
+                    };
                     self.reg_set(dst, val);
                 }
                 Instruction::StoreLocal(slot, src) => {
@@ -339,7 +368,16 @@ impl Vm {
                     self.local_set(slot, val);
                 }
                 Instruction::LoadGlobal(dst, slot) => {
-                    let val = self.globals[slot as usize].clone();
+                    // Check if this global is forced
+                    let val = if let Some(name) = self.module.globals.slots.get(slot as usize).map(|s| &s.name) {
+                        if let Some(forced) = self.forced_variables.get(&name.to_uppercase()) {
+                            forced.clone()
+                        } else {
+                            self.globals[slot as usize].clone()
+                        }
+                    } else {
+                        self.globals[slot as usize].clone()
+                    };
                     self.reg_set(dst, val);
                 }
                 Instruction::StoreGlobal(slot, src) => {

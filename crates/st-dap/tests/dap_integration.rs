@@ -619,3 +619,168 @@ END_PROGRAM
     assert!(a1 != "<unknown>", "Should evaluate 'a' after step: got {a1}");
     assert!(a2 != "<unknown>", "Should evaluate 'a' after step: got {a2}");
 }
+
+// =============================================================================
+// PLC-specific extensions: force/unforce, cycle info
+// =============================================================================
+
+#[test]
+fn test_force_variable() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            // Force x to 999
+            dap_request(4, "evaluate", Some(json!({
+                "expression": "force x = 999",
+                "context": "repl"
+            }))),
+            dap_request(5, "disconnect", None),
+        ],
+    );
+
+    let resp = find_response(&messages, 4).expect("Expected force response");
+    assert!(resp["success"].as_bool().unwrap_or(false));
+    let result = resp["body"]["result"].as_str().unwrap_or("");
+    assert!(result.contains("Forced"), "Expected 'Forced' in result: {result}");
+    assert!(result.contains("999"), "Expected '999' in result: {result}");
+}
+
+#[test]
+fn test_force_then_read() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            // Force x
+            dap_request(4, "evaluate", Some(json!({
+                "expression": "force x = 42",
+                "context": "repl"
+            }))),
+            // Step — x should now read as 42
+            dap_request(5, "next", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "evaluate", Some(json!({
+                "expression": "x",
+                "context": "watch"
+            }))),
+            dap_request(7, "disconnect", None),
+        ],
+    );
+
+    let force_resp = find_response(&messages, 4).unwrap();
+    assert!(force_resp["body"]["result"].as_str().unwrap_or("").contains("Forced"));
+}
+
+#[test]
+fn test_unforce_variable() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            // Force then unforce
+            dap_request(4, "evaluate", Some(json!({ "expression": "force x = 42" }))),
+            dap_request(5, "evaluate", Some(json!({ "expression": "unforce x" }))),
+            dap_request(6, "disconnect", None),
+        ],
+    );
+
+    let unforce_resp = find_response(&messages, 5).unwrap();
+    assert!(unforce_resp["body"]["result"].as_str().unwrap_or("").contains("Unforced"));
+}
+
+#[test]
+fn test_list_forced_empty() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(4, "evaluate", Some(json!({ "expression": "listForced" }))),
+            dap_request(5, "disconnect", None),
+        ],
+    );
+
+    let resp = find_response(&messages, 4).unwrap();
+    assert!(resp["body"]["result"].as_str().unwrap_or("").contains("No forced"));
+}
+
+#[test]
+fn test_list_forced_with_entries() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(4, "evaluate", Some(json!({ "expression": "force x = 100" }))),
+            dap_request(5, "evaluate", Some(json!({ "expression": "force y = 200" }))),
+            dap_request(6, "evaluate", Some(json!({ "expression": "listForced" }))),
+            dap_request(7, "disconnect", None),
+        ],
+    );
+
+    let resp = find_response(&messages, 6).unwrap();
+    let result = resp["body"]["result"].as_str().unwrap_or("");
+    assert!(result.contains("X") || result.contains("x"), "Should list forced X: {result}");
+    assert!(result.contains("Y") || result.contains("y"), "Should list forced Y: {result}");
+}
+
+#[test]
+fn test_cycle_info() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(4, "evaluate", Some(json!({ "expression": "scanCycleInfo" }))),
+            dap_request(5, "disconnect", None),
+        ],
+    );
+
+    let resp = find_response(&messages, 4).unwrap();
+    let result = resp["body"]["result"].as_str().unwrap_or("");
+    assert!(result.contains("Instructions"), "Expected cycle info: {result}");
+}
+
+#[test]
+fn test_force_bool_variable() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(4, "evaluate", Some(json!({ "expression": "force y = true" }))),
+            dap_request(5, "evaluate", Some(json!({ "expression": "listForced" }))),
+            dap_request(6, "disconnect", None),
+        ],
+    );
+
+    let force_resp = find_response(&messages, 4).unwrap();
+    assert!(force_resp["body"]["result"].as_str().unwrap_or("").contains("TRUE"));
+}
+
+#[test]
+fn test_force_invalid_syntax() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(4, "evaluate", Some(json!({ "expression": "force invalid" }))),
+            dap_request(5, "disconnect", None),
+        ],
+    );
+
+    let resp = find_response(&messages, 4).unwrap();
+    assert!(resp["body"]["result"].as_str().unwrap_or("").contains("Usage"));
+}

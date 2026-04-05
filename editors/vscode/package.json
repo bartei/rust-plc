@@ -126,6 +126,30 @@
         "command": "structured-text.openMonitor",
         "title": "ST: Open PLC Monitor",
         "category": "Structured Text"
+      },
+      {
+        "command": "structured-text.forceVariable",
+        "title": "ST: Force Variable",
+        "category": "Structured Text",
+        "icon": "$(lock)"
+      },
+      {
+        "command": "structured-text.unforceVariable",
+        "title": "ST: Unforce Variable",
+        "category": "Structured Text",
+        "icon": "$(unlock)"
+      },
+      {
+        "command": "structured-text.listForced",
+        "title": "ST: List Forced Variables",
+        "category": "Structured Text",
+        "icon": "$(list-flat)"
+      },
+      {
+        "command": "structured-text.cycleInfo",
+        "title": "ST: Scan Cycle Info",
+        "category": "Structured Text",
+        "icon": "$(pulse)"
       }
     ],
     "menus": {
@@ -134,6 +158,28 @@
           "command": "structured-text.openMonitor",
           "when": "resourceLangId == structured-text",
           "group": "navigation"
+        }
+      ],
+      "debug/toolBar": [
+        {
+          "command": "structured-text.forceVariable",
+          "when": "debugType == st",
+          "group": "plc@1"
+        },
+        {
+          "command": "structured-text.unforceVariable",
+          "when": "debugType == st",
+          "group": "plc@2"
+        },
+        {
+          "command": "structured-text.listForced",
+          "when": "debugType == st",
+          "group": "plc@3"
+        },
+        {
+          "command": "structured-text.cycleInfo",
+          "when": "debugType == st",
+          "group": "plc@4"
         }
       ]
     }
