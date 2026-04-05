@@ -1,0 +1,26 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "st",
+      "request": "launch",
+      "name": "Debug Current ST File",
+      "program": "${file}",
+      "stopOnEntry": true
+    },
+    {
+      "type": "st",
+      "request": "launch",
+      "name": "Debug Hello World",
+      "program": "${workspaceFolder}/01_hello.st",
+      "stopOnEntry": true
+    },
+    {
+      "type": "st",
+      "request": "launch",
+      "name": "Debug Full Demo",
+      "program": "${workspaceFolder}/06_full_demo.st",
+      "stopOnEntry": true
+    }
+  ]
+}

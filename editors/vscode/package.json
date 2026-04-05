@@ -17,7 +17,8 @@
     "Debuggers"
   ],
   "activationEvents": [
-    "onLanguage:structured-text"
+    "onLanguage:structured-text",
+    "onDebugResolve:st"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -69,19 +70,29 @@
         }
       }
     ],
+    "breakpoints": [
+      {
+        "language": "structured-text"
+      }
+    ],
     "debuggers": [
       {
         "type": "st",
         "label": "Structured Text Debug",
-        "program": "./out/extension.js",
-        "runtime": "node",
+        "languages": ["structured-text"],
         "configurationAttributes": {
           "launch": {
             "required": ["program"],
             "properties": {
               "program": {
                 "type": "string",
-                "description": "Path to the .st file to debug"
+                "description": "Path to the .st file to debug",
+                "default": "${file}"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Stop on the first statement",
+                "default": true
               }
             }
           }
@@ -91,7 +102,21 @@
             "type": "st",
             "request": "launch",
             "name": "Debug ST Program",
-            "program": "${file}"
+            "program": "${file}",
+            "stopOnEntry": true
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "ST: Debug Program",
+            "description": "Debug the current Structured Text file",
+            "body": {
+              "type": "st",
+              "request": "launch",
+              "name": "Debug ${1:program}",
+              "program": "^\"\\${file}\"",
+              "stopOnEntry": true
+            }
           }
         ]
       }
