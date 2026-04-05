@@ -526,7 +526,6 @@ impl Vm {
         if let Some(frame) = self.call_stack.last() {
             let func = &self.module.functions[frame.func_index as usize];
             if func.kind == st_ir::PouKind::Program {
-                eprintln!("[VM] Saving retained locals for '{}': {:?}", func.name, frame.locals);
                 self.retained_locals
                     .insert(frame.func_index, frame.locals.clone());
             }
