@@ -16,6 +16,7 @@ allow = [
     "Unicode-DFS-2016",
     "Zlib",
     "BSL-1.0",
+    "GPL-3.0",
 ]
 confidence-threshold = 0.8
 

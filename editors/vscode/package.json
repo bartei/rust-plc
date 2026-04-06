@@ -4,7 +4,7 @@
   "description": "Language support for IEC 61131-3 Structured Text with LSP and online debugging",
   "version": "0.1.0",
   "publisher": "rust-plc",
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "repository": {
     "type": "git",
     "url": "https://github.com/user/rust-plc"
