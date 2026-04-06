@@ -919,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "st-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -939,7 +939,7 @@ dependencies = [
 
 [[package]]
 name = "st-compiler"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "st-ir",
  "st-semantics",
@@ -949,7 +949,7 @@ dependencies = [
 
 [[package]]
 name = "st-dap"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dap",
  "serde_json",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "st-grammar"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cc",
  "tree-sitter",
@@ -970,14 +970,14 @@ dependencies = [
 
 [[package]]
 name = "st-ir"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "st-lsp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
  "st-grammar",
@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "st-monitor"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "futures-util",
  "serde",
@@ -1007,7 +1007,7 @@ dependencies = [
 
 [[package]]
 name = "st-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "st-compiler",
@@ -1020,7 +1020,7 @@ dependencies = [
 
 [[package]]
 name = "st-semantics"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "st-syntax",
  "thiserror 2.0.18",
@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "st-syntax"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "glob",
  "serde",
