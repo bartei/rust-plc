@@ -131,6 +131,12 @@ rust-plc/
 └── docs/               mdBook documentation
 ```
 
+## IEC 61131-3 References
+
+- [IEC 61131-3 Official Standard](https://webstore.iec.ch/publication/4552) — the official specification (Ed.3, paywalled)
+- [Fernhill IEC 61131-3 Reference](https://www.fernhillsoftware.com/help/iec-61131-3/common-elements/index.html) — free online reference for syntax and examples
+- [PLCopen](https://plcopen.org/iec-61131-3) — industry consortium and supplementary guidelines
+
 ## Testing
 
 ```bash

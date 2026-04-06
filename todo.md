@@ -321,7 +321,67 @@ Ship a working LSP loop early to prove the VSCode integration.
 
 ---
 
-## Phase 12 (Future): LLVM Backend
+## Phase 12: IEC 61131-3 Object-Oriented Extensions (Classes)
+
+Implement the OOP extensions from IEC 61131-3 Third Edition (Table 48).
+Reference: [Fernhill CLASS Declaration](https://www.fernhillsoftware.com/help/iec-61131-3/common-elements/class-declaration.html)
+Spec: [IEC 61131-3 Ed.3 §6.6.5](https://webstore.iec.ch/publication/4552) (official standard, paywalled)
+
+- [ ] **Grammar extensions:**
+  - [ ] `CLASS <name> [EXTENDS <base>] [IMPLEMENTS <iface1>, <iface2>] ... END_CLASS`
+  - [ ] `METHOD [PUBLIC|PRIVATE|PROTECTED] <name> [: <return_type>] ... END_METHOD`
+  - [ ] `INTERFACE <name> [EXTENDS <base_iface>] ... END_INTERFACE`
+  - [ ] `PROPERTY <name> : <type> ... END_PROPERTY` with `GET` and `SET` accessors
+  - [ ] Access specifiers: `PUBLIC`, `PRIVATE`, `PROTECTED`, `INTERNAL`
+  - [ ] `THIS` keyword for self-reference within methods
+  - [ ] `SUPER` keyword for calling base class methods
+  - [ ] `ABSTRACT` and `FINAL` modifiers on classes and methods
+  - [ ] `OVERRIDE` keyword for overriding virtual methods
+- [ ] **AST types:**
+  - [ ] `ClassDecl`: name, base class, interfaces, var blocks, methods, properties
+  - [ ] `MethodDecl`: access specifier, name, return type, var blocks, body, modifiers
+  - [ ] `InterfaceDecl`: name, base interfaces, method signatures
+  - [ ] `PropertyDecl`: name, type, get body, set body
+- [ ] **Semantic analysis:**
+  - [ ] Class member resolution (field access via `.` on class instances)
+  - [ ] Method dispatch (static for non-virtual, vtable for virtual/overridden)
+  - [ ] Access specifier enforcement (PRIVATE only within class, PROTECTED within hierarchy)
+  - [ ] Interface conformance checking (all methods implemented)
+  - [ ] Inheritance type checking (base class compatibility, diamond problem)
+  - [ ] THIS/SUPER resolution within method bodies
+  - [ ] ABSTRACT class cannot be instantiated
+  - [ ] FINAL class cannot be extended, FINAL method cannot be overridden
+- [ ] **Compiler / IR:**
+  - [ ] Class instance layout: method table pointer + field slots
+  - [ ] Method compilation: implicit THIS parameter as first argument
+  - [ ] Virtual method dispatch via vtable lookup instruction
+  - [ ] Property access compiled as GET/SET method calls
+  - [ ] SUPER calls compiled as direct (non-virtual) parent method call
+  - [ ] Constructor/destructor support (FB_INIT / FB_EXIT pattern)
+- [ ] **VM:**
+  - [ ] Class instance storage (extends FB instance mechanism)
+  - [ ] VTable for virtual dispatch
+  - [ ] `CallVirtual` instruction for method dispatch
+- [ ] **Standard library updates:**
+  - [ ] Refactor existing FBs as classes where appropriate
+  - [ ] Interface examples (e.g., `IComparable`, `ISerializable`)
+- [ ] **Tests:**
+  - [ ] Class instantiation and field access
+  - [ ] Method calls (public/private/protected enforcement)
+  - [ ] Inheritance (single level, multi-level, method override)
+  - [ ] Interface implementation and conformance
+  - [ ] Abstract class / final class restrictions
+  - [ ] Properties (get/set)
+  - [ ] THIS/SUPER within methods
+  - [ ] Online change compatibility with classes
+- [ ] **Documentation:**
+  - [ ] Language reference page for Classes, Methods, Interfaces, Properties
+  - [ ] Migration guide: FUNCTION_BLOCK to CLASS
+  - [ ] Playground examples
+
+---
+
+## Phase 13 (Future): LLVM Backend
 
 Optional — adds native compilation for production PLC targets.
 
