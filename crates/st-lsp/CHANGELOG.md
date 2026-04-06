@@ -1,0 +1,18 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.1](https://github.com/bartei/rust-plc/compare/st-lsp-v0.1.0...st-lsp-v0.1.1) - 2026-04-06
+
+### Added
+
+- add documentHighlight, foldingRange, typeDefinition, workspaceSymbol, documentLink
+- implement signatureHelp, references, rename, formatting, codeAction
+- implement REF_TO pointers with ^ dereference and NULL
+- multi-file workspace support with autodiscovery and plc-project.yaml
+- IEC 61131-3 Structured Text compiler toolchain (phases 0-7)
