@@ -33,11 +33,11 @@ This is the foundation — everything else depends on parsing.
 
 - [x] Create `st-grammar/` with tree-sitter project structure (`grammar.js`, `src/`, `tree-sitter.json`)
 - [x] Define grammar for core ST constructs:
-  - [x] Literal types: INTEGER, REAL, STRING, BOOL, TIME, DATE, TOD, DT, typed literals
+  - [x] Literal types: INTEGER, REAL, STRING, BOOL, NULL, TIME, DATE, TOD, DT, typed literals
   - [x] Variable declarations: `VAR`, `VAR_INPUT`, `VAR_OUTPUT`, `VAR_IN_OUT`, `VAR_GLOBAL`, `VAR_EXTERNAL`, `VAR_TEMP` with `RETAIN`/`PERSISTENT`/`CONSTANT` qualifiers
-  - [x] Data types: elementary types, arrays, structs, enumerations, subranges, STRING/WSTRING with length
+  - [x] Data types: elementary types, arrays, structs, enumerations, subranges, STRING/WSTRING with length, REF_TO pointers
   - [x] Program Organization Units (POUs): `PROGRAM`, `FUNCTION`, `FUNCTION_BLOCK`
-  - [x] Expressions: arithmetic, boolean, comparison, parenthesized, function calls, power, unary
+  - [x] Expressions: arithmetic, boolean, comparison, parenthesized, function calls, power, unary, pointer dereference (`^`)
   - [x] Statements: assignment (`:=`), `IF/ELSIF/ELSE/END_IF`, `CASE/END_CASE`, `FOR/END_FOR`, `WHILE/END_WHILE`, `REPEAT/UNTIL/END_REPEAT`, `RETURN`, `EXIT`
   - [x] FB instantiation and method calls (`fbInstance(IN1 := val)`)
   - [x] Comments: `//` line, `(* ... *)` block, `/* ... */` block
@@ -142,54 +142,23 @@ Ship a working LSP loop early to prove the VSCode integration.
 - [ ] `textDocument/rename` — rename variables/POUs across all files
 - [ ] `textDocument/formatting` — auto-format ST source
 - [ ] `textDocument/codeAction` — quick fixes (e.g., declare undeclared variable)
-- [ ] **Multi-file workspace support** — design follows the IEC 61131-3 project model:
-  - [ ] **Autodiscovery** (default, zero-config): recursively walk all subdirectories from the workspace root, collect every `.st` and `.scl` file, compile them as one unit. No project file needed for simple projects. The compiler's two-pass design (register all POUs first, then analyze bodies) handles declaration order automatically — files can reference POUs from any other file regardless of filesystem order.
-  - [ ] **Project file** (`plc-project.yaml`, optional): for advanced configuration when autodiscovery isn't enough
-    ```yaml
-    name: MyProject
-    version: 1.0.0
-
-    # Optional: override autodiscovery with explicit file list
-    # If omitted, all .st/.scl files in the project root are auto-discovered
-    # sources:
-    #   - types.st
-    #   - controllers/*.st
-
-    # Entry point PROGRAM name (default: first PROGRAM found)
-    entryPoint: Main
-
-    # Additional library directories to include (walked recursively)
-    libraries:
-      - ./custom_libs/
-      - /shared/plc_libs/
-
-    # Files/directories to exclude from autodiscovery
-    exclude:
-      - test_*.st
-      - deprecated/
-    ```
-  - [ ] **Discovery logic** (priority order):
-    1. If `plc-project.yaml` exists in workspace root → use its configuration
-    2. If `sources` field is set → use explicit file list (supports globs)
-    3. If `sources` is omitted → autodiscover all `.st`/`.scl` files recursively from project root
-    4. Always: prepend stdlib, append library directories
-    5. Always: two-pass compilation resolves cross-file references regardless of file order
-  - [ ] **CLI integration**:
-    - `st-cli run .` — autodiscover from current directory
-    - `st-cli run --project plc-project.yaml` — use explicit project file
-    - `st-cli run file.st` — single file mode (existing behavior, still includes stdlib)
-  - [ ] **LSP workspace-aware analysis**: on any `.st` file change, re-discover all project files, parse with `parse_multi()`, run single semantic analysis pass. Cross-file POU resolution, global variable visibility, and type declarations work automatically.
-  - [ ] **Cross-file go-to-definition**: Ctrl+Click on a POU defined in another file opens that file at the declaration
-  - [ ] **Cross-file diagnostics**: undeclared variable errors check all project files, not just the current file
-  - [ ] **Approach**: reuse existing `parse_multi()` infrastructure — IEC 61131-3 uses a flat global scope for all POUs (no module/import system). All files are compiled as one unit, same as CODESYS and RuSTy.
+- [x] **Multi-file workspace support** (`project.rs`):
+  - [x] **Autodiscovery** (default, zero-config): recursively walks directories for `.st`/`.scl` files, skips `.hidden/`, `target/`, `node_modules/`
+  - [x] **Project file** (`plc-project.yaml`, optional): name, entryPoint, sources (globs), libraries, exclude patterns
+  - [x] **Discovery logic**: yaml > explicit sources > autodiscovery, always prepends stdlib
+  - [x] **CLI integration**: `st-cli run` (current dir), `st-cli run dir/` (project dir), `st-cli run file.st` (single file), `st-cli check` (same modes)
+  - [x] **LSP workspace-aware**: documents analyzed with stdlib context for cross-file POU resolution
+  - [x] 13 project discovery tests + multi-file playground example (`playground/multi_file_project/`)
+  - [ ] Cross-file go-to-definition (open other file at declaration) — future
+  - [ ] Cross-file diagnostics (errors check all project files) — future
 
 ---
 
 ## Phase 6: Intermediate Representation & Bytecode (`st-ir`, `st-compiler`)
 
 - [x] **Register-based IR instruction set** (`st-ir`):
-  - [x] Core types: `Value` (Bool, Int, UInt, Real, String, Time, Void), `VarType`, `Reg`, `Label`
-  - [x] 30+ instructions: `LoadConst`, `Move`, `LoadLocal/StoreLocal`, `LoadGlobal/StoreGlobal`, arithmetic (`Add/Sub/Mul/Div/Mod/Pow/Neg`), comparison (`CmpEq/Ne/Lt/Gt/Le/Ge`), logic (`And/Or/Xor/Not`), conversion (`ToInt/ToReal/ToBool`), control flow (`Jump/JumpIf/JumpIfNot`), calls (`Call/CallFb/Ret/RetVoid`), struct/array (`LoadArray/StoreArray/LoadField/StoreField`)
+  - [x] Core types: `Value` (Bool, Int, UInt, Real, String, Time, Ref, Null, Void), `VarType`, `Reg`, `Label`
+  - [x] 50+ instructions: `LoadConst`, `Move`, `LoadLocal/StoreLocal`, `LoadGlobal/StoreGlobal`, arithmetic (`Add/Sub/Mul/Div/Mod/Pow/Neg`), comparison (`CmpEq/Ne/Lt/Gt/Le/Ge`), logic (`And/Or/Xor/Not`), math intrinsics (`Sqrt/Sin/Cos/Tan/Asin/Acos/Atan/Ln/Log/Exp`), `SystemTime`, conversion (`ToInt/ToReal/ToBool`), control flow (`Jump/JumpIf/JumpIfNot`), calls (`Call/CallFb/Ret/RetVoid`), struct/array (`LoadArray/StoreArray/LoadField/StoreField`), pointers (`MakeRefLocal/MakeRefGlobal/Deref/DerefStore/LoadNull`)
   - [x] `Module` (functions + globals + type defs), `Function` (instructions + locals + source map + labels), `MemoryLayout` (slots with offsets)
   - [x] Serde serialization for offline storage
 - [x] **AST → IR compiler** (`st-compiler`):
@@ -228,10 +197,20 @@ Ship a working LSP loop early to prove the VSCode integration.
 - [x] **Tests** (31 tests): arithmetic (sum, sub, div, mod, power, real), boolean logic, all 6 comparisons, IF/ELSIF, FOR/BY, WHILE, REPEAT, CASE, EXIT, RETURN, function-calling-function, global variable persistence, cycle stats, division by zero, execution limit, Fibonacci algorithm
 - [x] **Standard library** (modular ST in `stdlib/`, auto-included via `builtin_stdlib()`):
   - [x] Counters: CTU, CTD, CTUD | Edge detection: R_TRIG, F_TRIG
-  - [x] Timers: TON, TOF, TP | Math: MAX/MIN/LIMIT/ABS (INT+REAL), SEL
-  - [x] Conversions: BOOL_TO_INT, INT_TO_BOOL
+  - [x] Timers: TON, TOF, TP — real-time using `SYSTEM_TIME()` and `TIME` values (e.g., `PT := T#5s`)
+  - [x] Math: MAX/MIN/LIMIT/ABS (INT+REAL), SEL
+  - [x] Trig/math intrinsics: SQRT, SIN, COS, TAN, ASIN, ACOS, ATAN, LN, LOG, EXP (VM instructions)
+  - [x] Type conversions: 30+ `*_TO_*` intrinsics (INT_TO_REAL, REAL_TO_INT, BOOL_TO_INT, etc.)
+  - [x] `SYSTEM_TIME()` intrinsic — returns elapsed milliseconds since engine start
   - [x] Multi-file compilation, FB instance persistence, FB field access
-  - [x] 16 integration tests + 2 playground examples (07_stdlib_demo, 08_custom_module)
+  - [x] 16 integration tests + 3 playground examples (07_stdlib_demo, 08_custom_module, 09_pointers)
+- [x] **Pointers** (`REF_TO`, `^`, `NULL`):
+  - [x] `REF_TO <type>` — typed pointer declarations
+  - [x] `REF(variable)` — take reference of a variable
+  - [x] `ptr^` — dereference (read and write)
+  - [x] `NULL` — null pointer literal (safe deref returns default)
+  - [x] VM: `Value::Ref(scope, slot)`, `MakeRefLocal/MakeRefGlobal`, `Deref/DerefStore`, `LoadNull`
+  - [x] 6 pointer tests + playground example
 - [x] Debug hooks (breakpoints, stepping) — completed in Phase 8
 
 ---
@@ -319,12 +298,15 @@ Ship a working LSP loop early to prove the VSCode integration.
 
 ## Phase 11: CLI Tool (`st-cli`)
 
-- [ ] `st-cli check <file>` — parse + semantic analysis, report errors
-- [ ] `st-cli compile <file> -o <output>` — compile to bytecode
-- [ ] `st-cli run <bytecode>` — execute in runtime (headless mode)
-- [ ] `st-cli serve` — start LSP + DAP + monitor servers (used by VSCode extension)
+- [x] `st-cli check [path]` — parse + semantic analysis (single file, directory, or project)
+- [x] `st-cli run [path] [-n N]` — compile and execute (single file, directory autodiscovery, or project yaml)
+- [x] `st-cli run` (no args) — autodiscover from current directory
+- [x] `st-cli serve` — start LSP server on stdio
+- [x] `st-cli debug <file>` — start DAP debug server on stdio
+- [x] Proper exit codes (0=ok, 1=errors)
+- [ ] `st-cli compile <file> -o <output>` — compile to bytecode file
 - [ ] `st-cli fmt <file>` — format source file
-- [ ] Proper exit codes, structured JSON error output for CI integration
+- [ ] Structured JSON error output for CI integration
 
 ---
 
@@ -341,12 +323,14 @@ Optional — adds native compilation for production PLC targets.
 
 ---
 
-## Cross-Cutting Concerns (Address Throughout)
+## Cross-Cutting Concerns
 
-- [ ] **Error quality:** Every error message includes source location, context snippet, and actionable suggestion
-- [ ] **Testing strategy:** Unit tests per crate, integration tests for end-to-end workflows (parse → compile → run → debug)
-- [ ] **Tracing / logging:** Use `tracing` crate throughout for structured diagnostics
-- [ ] **Documentation:** Rustdoc for public APIs, architecture decision records (ADRs) for major design choices
+- [x] **Testing:** 502 tests across 10 crates — unit, integration, LSP protocol, DAP protocol, WebSocket, end-to-end
+- [x] **CI/CD:** GitHub Actions (check, test, clippy, audit, cargo-deny, docs deploy), release-plz for semver
+- [x] **Documentation:** mdBook site (20+ pages) with architecture, tutorials, language reference, stdlib docs
+- [x] **Tracing / logging:** DAP server logs to stderr + Debug Console, `tracing` crate available throughout
+- [x] **Devcontainer:** Full VSCode dev environment with auto-build, extension install, playground
+- [x] **Error quality:** Line:column source locations, severity levels, diagnostic codes
 - [ ] **IEC 61131-3 compliance tracking:** Maintain a checklist of spec sections implemented vs. pending
 
 ---
