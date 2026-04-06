@@ -381,7 +381,316 @@ Spec: [IEC 61131-3 Ed.3 §6.6.5](https://webstore.iec.ch/publication/4552) (offi
 
 ---
 
-## Phase 13 (Future): Native Compilation & Hardware Target Platform System
+## Phase 13: Communication Extension System & Modbus Implementation
+
+A PLC is only useful if it can talk to the physical world. This phase establishes the
+**communication extension architecture** — a modular, plugin-based system where each
+protocol (Modbus, Profinet, EtherCAT, etc.) is an independent, versioned extension —
+and delivers the first two implementations: Modbus TCP and Modbus RTU/ASCII.
+
+### Design Principles
+
+1. **Each protocol is an independent crate** — separately versioned, tested, and maintained
+2. **No framework recompilation** — extensions are loaded via a trait interface at runtime
+3. **Community extensible** — third parties can publish protocol extensions (like an app store)
+4. **Device profiles** — reusable configurations for specific hardware (e.g., ABB ACS580 VFD
+   registers, Siemens ET200 I/O module maps) that simplify setup for end users
+5. **Cyclic + acyclic modes** — like CODESYS, TwinCAT, and Siemens: cyclic I/O happens every
+   scan cycle, acyclic requests (parameter reads, diagnostics) happen on-demand
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    ST Program                            │
+│   sensor := INPUT_REG_0;                                │
+│   OUTPUT_COIL_3 := motor_on;                            │
+└──────────────┬──────────────────────────┬───────────────┘
+               │ Read Inputs              │ Write Outputs
+┌──────────────▼──────────────────────────▼───────────────┐
+│              Communication Manager                       │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  │
+│  │  Modbus TCP  │  │ Modbus RTU   │  │  (future)     │  │
+│  │  Extension   │  │  Extension   │  │  Profinet     │  │
+│  └──────┬───────┘  └──────┬───────┘  └───────────────┘  │
+│         │                 │                              │
+│  ┌──────▼───────┐  ┌──────▼───────┐                     │
+│  │  Device      │  │  Device      │  Device profiles    │
+│  │  Profiles    │  │  Profiles    │  are reusable YAML  │
+│  │  abb_acs580  │  │  io_board_16 │  configs for known  │
+│  │  et200sp     │  │  temp_sensor │  hardware            │
+│  └──────────────┘  └──────────────┘                     │
+└──────────────────────────────────────────────────────────┘
+               │                 │
+         TCP/IP network    RS-485 serial
+               │                 │
+         ┌─────▼─────┐    ┌─────▼─────┐
+         │  Modbus   │    │  Modbus   │
+         │  Slave    │    │  RTU      │
+         │  Device   │    │  Device   │
+         └───────────┘    └───────────┘
+```
+
+### Communication Extension Trait
+
+```rust
+/// Every communication protocol implements this trait.
+/// Extensions are independent crates (e.g., `st-comm-modbus-tcp`).
+pub trait CommExtension: Send + Sync {
+    /// Extension metadata.
+    fn name(&self) -> &str;
+    fn version(&self) -> &str;
+    fn protocol(&self) -> &str;  // "modbus-tcp", "modbus-rtu", "profinet", etc.
+
+    /// Initialize the extension with its configuration.
+    fn configure(&mut self, config: &serde_yaml::Value) -> Result<(), String>;
+
+    /// Cyclic I/O: called by the engine BEFORE each scan cycle.
+    /// Reads physical inputs and writes them to the provided variable map.
+    fn read_inputs(&mut self, inputs: &mut HashMap<String, Value>) -> Result<(), CommError>;
+
+    /// Cyclic I/O: called by the engine AFTER each scan cycle.
+    /// Reads the variable map and writes physical outputs.
+    fn write_outputs(&mut self, outputs: &HashMap<String, Value>) -> Result<(), CommError>;
+
+    /// Acyclic request: on-demand read/write (diagnostics, parameter access).
+    fn acyclic_request(&mut self, request: AcyclicRequest) -> Result<AcyclicResponse, CommError>;
+
+    /// List all I/O variables this extension provides (for auto-generation of VAR_GLOBAL).
+    fn io_variables(&self) -> Vec<IoVariable>;
+
+    /// Start/stop the communication channel.
+    fn start(&mut self) -> Result<(), CommError>;
+    fn stop(&mut self) -> Result<(), CommError>;
+
+    /// Health/status.
+    fn is_connected(&self) -> bool;
+    fn diagnostics(&self) -> CommDiagnostics;
+}
+```
+
+### Configuration in plc-project.yaml
+
+```yaml
+name: BottleFillingLine
+target: host   # runs on the computer, no cross-compilation
+
+communications:
+  # Modbus TCP connection to a remote I/O module
+  - name: io_rack_1
+    protocol: modbus-tcp
+    host: 192.168.1.100
+    port: 502
+    unit_id: 1
+    mode: cyclic              # read/write every scan cycle
+    cycle_time: 10ms          # minimum interval between polls
+    timeout: 500ms
+    # Device profile: pre-defined register map for this hardware
+    device_profile: wago_750_352
+    # Or manual register mapping:
+    mapping:
+      inputs:
+        - { register: 0, count: 8, type: coil, alias_prefix: DI_ }
+        - { register: 0, count: 4, type: input_register, alias_prefix: AI_ }
+      outputs:
+        - { register: 0, count: 8, type: coil, alias_prefix: DO_ }
+        - { register: 0, count: 2, type: holding_register, alias_prefix: AO_ }
+
+  # Modbus RTU connection to a VFD on RS-485
+  - name: vfd_pump1
+    protocol: modbus-rtu
+    port: /dev/ttyUSB0
+    baud: 19200
+    parity: even
+    stop_bits: 1
+    unit_id: 3
+    mode: cyclic
+    device_profile: abb_acs580   # knows register addresses for speed, torque, status
+    # Profile auto-generates: VFD_PUMP1_SPEED_REF, VFD_PUMP1_SPEED_ACT,
+    #                         VFD_PUMP1_RUN, VFD_PUMP1_FAULT, etc.
+
+  # Acyclic-only connection for parameter access
+  - name: plc_neighbor
+    protocol: modbus-tcp
+    host: 192.168.1.200
+    port: 502
+    mode: acyclic             # only on-demand, not every cycle
+```
+
+This generates auto-included ST globals:
+```st
+(* Auto-generated from communication config — DO NOT EDIT *)
+VAR_GLOBAL
+    (* io_rack_1: Modbus TCP, wago_750_352 *)
+    DI_0 : BOOL;   DI_1 : BOOL;   DI_2 : BOOL;   DI_3 : BOOL;
+    DI_4 : BOOL;   DI_5 : BOOL;   DI_6 : BOOL;   DI_7 : BOOL;
+    AI_0 : INT;    AI_1 : INT;    AI_2 : INT;    AI_3 : INT;
+    DO_0 : BOOL;   DO_1 : BOOL;   DO_2 : BOOL;   DO_3 : BOOL;
+    AO_0 : INT;    AO_1 : INT;
+
+    (* vfd_pump1: Modbus RTU, abb_acs580 profile *)
+    VFD_PUMP1_RUN        : BOOL;    (* control word bit 0 *)
+    VFD_PUMP1_SPEED_REF  : REAL;    (* Hz, holding register 1 *)
+    VFD_PUMP1_SPEED_ACT  : REAL;    (* Hz, input register 2 *)
+    VFD_PUMP1_CURRENT    : REAL;    (* A, input register 3 *)
+    VFD_PUMP1_FAULT      : BOOL;    (* status word bit 3 *)
+    VFD_PUMP1_READY      : BOOL;    (* status word bit 0 *)
+END_VAR
+```
+
+### Device Profile System
+
+Device profiles are reusable YAML files describing the register map of specific hardware.
+They can be shared between projects and published as a community library.
+
+```yaml
+# profiles/abb_acs580.yaml
+name: ABB ACS580 Variable Frequency Drive
+vendor: ABB
+protocol: modbus-rtu
+description: "Standard Modbus register map for ABB ACS580 series VFDs"
+
+registers:
+  control:
+    - { name: RUN,       register: 0, bit: 0, type: coil, direction: output }
+    - { name: STOP,      register: 0, bit: 1, type: coil, direction: output }
+    - { name: FAULT_RST, register: 0, bit: 7, type: coil, direction: output }
+  status:
+    - { name: READY,     register: 0, bit: 0, type: discrete_input, direction: input }
+    - { name: RUNNING,   register: 0, bit: 1, type: discrete_input, direction: input }
+    - { name: FAULT,     register: 0, bit: 3, type: discrete_input, direction: input }
+  analog:
+    - { name: SPEED_REF, register: 1, type: holding_register, scale: 0.1, unit: Hz, direction: output }
+    - { name: SPEED_ACT, register: 2, type: input_register, scale: 0.1, unit: Hz, direction: input }
+    - { name: CURRENT,   register: 3, type: input_register, scale: 0.1, unit: A, direction: input }
+    - { name: TORQUE,    register: 4, type: input_register, scale: 0.1, unit: "Nm", direction: input }
+    - { name: POWER,     register: 5, type: input_register, scale: 0.1, unit: kW, direction: input }
+```
+
+### Extension Crate Structure
+
+Each communication extension is a standalone Rust crate:
+
+```
+st-comm-modbus-tcp/          # Independent crate, own version, own tests
+├── Cargo.toml               # depends on st-comm-api (the trait crate)
+├── src/
+│   ├── lib.rs               # implements CommExtension trait
+│   ├── client.rs            # Modbus TCP socket management
+│   ├── registers.rs         # Register read/write logic
+│   └── profile_loader.rs    # Device profile YAML parser
+├── profiles/                # Bundled device profiles
+│   ├── wago_750_352.yaml
+│   ├── schneider_tm3.yaml
+│   └── generic_io.yaml
+└── tests/
+    ├── connection_tests.rs
+    ├── register_tests.rs
+    └── profile_tests.rs
+
+st-comm-modbus-rtu/
+├── Cargo.toml
+├── src/
+│   ├── lib.rs
+│   ├── serial.rs            # RS-485/RS-232 management
+│   └── framing.rs           # RTU/ASCII frame encoding
+├── profiles/
+│   ├── abb_acs580.yaml
+│   ├── siemens_g120.yaml
+│   └── danfoss_fc302.yaml
+└── tests/
+
+st-comm-api/                 # Shared trait + types (lightweight, no I/O)
+├── Cargo.toml
+└── src/
+    ├── lib.rs               # CommExtension trait
+    ├── types.rs             # Value, IoVariable, CommError, etc.
+    └── profile.rs           # DeviceProfile schema
+```
+
+### Scan Cycle Integration
+
+```
+┌───────────────────────────────────────────────┐
+│              Engine Scan Cycle                  │
+│                                                 │
+│  1. comm_manager.read_inputs()                  │
+│     → Modbus TCP: read coils + registers        │
+│     → Modbus RTU: read device registers         │
+│     → Map raw data → ST global variables        │
+│                                                 │
+│  2. vm.scan_cycle("Main")                       │
+│     → Execute user's ST program                 │
+│     → Program reads DI_0, writes DO_0, etc.     │
+│                                                 │
+│  3. comm_manager.write_outputs()                │
+│     → Map ST global variables → raw data        │
+│     → Modbus TCP: write coils + registers        │
+│     → Modbus RTU: write device registers        │
+│                                                 │
+│  4. comm_manager.process_acyclic()              │
+│     → Handle queued on-demand requests          │
+└───────────────────────────────────────────────┘
+```
+
+### Implementation Plan
+
+- [ ] **`st-comm-api` crate** (trait + types):
+  - [ ] `CommExtension` trait (configure, read_inputs, write_outputs, acyclic, start/stop)
+  - [ ] `IoVariable` struct (name, type, direction, address)
+  - [ ] `CommError`, `CommDiagnostics`, `AcyclicRequest/Response` types
+  - [ ] `DeviceProfile` YAML schema and parser
+  - [ ] Config-to-ST VAR_GLOBAL generator
+- [ ] **`st-comm-modbus-tcp` crate**:
+  - [ ] Modbus TCP client (socket connection, retry, timeout)
+  - [ ] Read coils, discrete inputs, holding registers, input registers
+  - [ ] Write single/multiple coils, single/multiple registers
+  - [ ] Cyclic polling with configurable interval
+  - [ ] Device profile loading and register mapping
+  - [ ] Unit tests with mock TCP server
+  - [ ] Integration tests with real Modbus simulator
+- [ ] **`st-comm-modbus-rtu` crate**:
+  - [ ] Serial port management (RS-485/RS-232, baud, parity, stop bits)
+  - [ ] RTU framing (CRC-16 calculation, silence detection)
+  - [ ] ASCII framing (LRC calculation)
+  - [ ] Same register read/write API as TCP variant
+  - [ ] Device profile loading
+  - [ ] Unit tests with mock serial port
+- [ ] **Communication Manager** (in `st-runtime`):
+  - [ ] Load and initialize extensions from plc-project.yaml config
+  - [ ] Integrate into scan cycle: read_inputs → execute → write_outputs → acyclic
+  - [ ] Map extension IoVariables to VM global variable slots
+  - [ ] Connection monitoring and automatic reconnection
+  - [ ] Diagnostics exposed via monitor server
+- [ ] **Engine integration**:
+  - [ ] `st-cli run` loads communication config and starts extensions
+  - [ ] `st-cli comm-status` shows connection health
+  - [ ] `st-cli comm-test` sends a test read to verify connectivity
+- [ ] **Bundled device profiles**:
+  - [ ] Generic Modbus I/O (coils + registers)
+  - [ ] ABB ACS580 VFD
+  - [ ] Siemens G120 VFD
+  - [ ] WAGO 750-352 I/O coupler
+  - [ ] Generic temperature sensor (RTD/thermocouple via analog input)
+- [ ] **Documentation**:
+  - [ ] Communication extension architecture guide
+  - [ ] "Creating a Communication Extension" tutorial
+  - [ ] "Creating a Device Profile" guide
+  - [ ] Modbus TCP quickstart
+  - [ ] Modbus RTU quickstart
+  - [ ] Playground example: Modbus TCP I/O with simulated devices
+- [ ] **Future protocol extensions** (separate crates, independent development):
+  - [ ] `st-comm-profinet` — PROFINET I/O
+  - [ ] `st-comm-ethercat` — EtherCAT
+  - [ ] `st-comm-canopen` — CANopen / CAN bus
+  - [ ] `st-comm-opcua` — OPC UA client
+  - [ ] `st-comm-mqtt` — MQTT publish/subscribe
+  - [ ] `st-comm-s7` — Siemens S7 protocol
+  - [ ] `st-comm-ethernet-ip` — EtherNet/IP (Allen-Bradley)
+
+---
+
+## Phase 14 (Future): Native Compilation & Hardware Target Platform System
 
 Two major capabilities: (1) LLVM native compilation backend, and (2) a plugin-based platform system
 that lets each hardware target define its peripherals, I/O mapping, and compilation settings as a
