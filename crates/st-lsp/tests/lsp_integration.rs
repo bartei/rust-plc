@@ -994,3 +994,131 @@ fn test_code_action_declare_variable() {
 
     client.shutdown();
 }
+
+// =============================================================================
+// Document Highlight
+// =============================================================================
+
+#[test]
+fn test_document_highlight() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("highlight.st");
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": "PROGRAM Main\nVAR\n    counter : INT := 0;\nEND_VAR\n    counter := counter + 1;\nEND_PROGRAM\n"
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    let resp = client.request(
+        "textDocument/documentHighlight",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 4, "character": 6 }
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(result.is_array(), "Expected highlight array");
+    let highlights = result.as_array().unwrap();
+    assert!(highlights.len() >= 3, "Expected at least 3 highlights for 'counter', got {}", highlights.len());
+}
+
+// =============================================================================
+// Folding Ranges
+// =============================================================================
+
+#[test]
+fn test_folding_ranges() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("folding.st");
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    IF x > 0 THEN\n        x := 1;\n    END_IF;\nEND_PROGRAM\n"
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    let resp = client.request(
+        "textDocument/foldingRange",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+
+    let result = &resp["result"];
+    assert!(result.is_array(), "Expected folding ranges array");
+    let ranges = result.as_array().unwrap();
+    assert!(ranges.len() >= 2, "Expected at least 2 folding ranges, got {}", ranges.len());
+}
+
+// =============================================================================
+// Workspace Symbol
+// =============================================================================
+
+#[test]
+fn test_workspace_symbol() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("wssymbol.st");
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": "FUNCTION Helper : INT\nVAR_INPUT\n    x : INT;\nEND_VAR\n    Helper := x;\nEND_FUNCTION\n\nPROGRAM Main\nVAR\n    r : INT := 0;\nEND_VAR\n    r := Helper(x := 1);\nEND_PROGRAM\n"
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    let resp = client.request(
+        "workspace/symbol",
+        json!({ "query": "Help" }),
+    );
+
+    let result = &resp["result"];
+    assert!(result.is_array(), "Expected symbol array");
+    let symbols = result.as_array().unwrap();
+    assert!(!symbols.is_empty(), "Expected at least one symbol matching 'Help'");
+    assert!(symbols.iter().any(|s| s["name"].as_str() == Some("Helper")));
+
+    // Empty query — should return all symbols
+    let resp2 = client.request(
+        "workspace/symbol",
+        json!({ "query": "" }),
+    );
+    let all_symbols = resp2["result"].as_array().unwrap();
+    assert!(all_symbols.len() >= 2, "Expected at least Main + Helper");
+
+    client.shutdown();
+}

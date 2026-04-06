@@ -189,6 +189,14 @@ impl LanguageServer for Backend {
                         },
                     ),
                 ),
+                document_highlight_provider: Some(OneOf::Left(true)),
+                folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+                type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
+                document_link_provider: Some(DocumentLinkOptions {
+                    resolve_provider: Some(false),
+                    work_done_progress_options: Default::default(),
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -712,6 +720,262 @@ impl LanguageServer for Backend {
         } else {
             Ok(Some(actions))
         }
+    }
+
+    // ── Document Highlight ──────────────────────────────────────────
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let docs = self.documents.read().await;
+        let Some(doc) = docs.get(uri) else { return Ok(None) };
+
+        let offset = doc.position_to_offset(pos);
+        let word = self.get_word_at(doc, offset);
+        if word.is_empty() { return Ok(None); }
+
+        let mut highlights = Vec::new();
+        let bytes = doc.source.as_bytes();
+        let word_upper = word.to_uppercase();
+        let mut search_pos = 0;
+
+        while search_pos < bytes.len() {
+            if let Some(idx) = doc.source[search_pos..].to_uppercase().find(&word_upper) {
+                let abs_pos = search_pos + idx;
+                let before_ok = abs_pos == 0 || !(bytes[abs_pos - 1].is_ascii_alphanumeric() || bytes[abs_pos - 1] == b'_');
+                let after_pos = abs_pos + word.len();
+                let after_ok = after_pos >= bytes.len() || !(bytes[after_pos].is_ascii_alphanumeric() || bytes[after_pos] == b'_');
+
+                if before_ok && after_ok {
+                    highlights.push(DocumentHighlight {
+                        range: Range::new(
+                            doc.offset_to_position(abs_pos),
+                            doc.offset_to_position(after_pos),
+                        ),
+                        kind: Some(DocumentHighlightKind::TEXT),
+                    });
+                }
+                search_pos = abs_pos + word.len();
+            } else {
+                break;
+            }
+        }
+
+        if highlights.is_empty() { Ok(None) } else { Ok(Some(highlights)) }
+    }
+
+    // ── Folding Ranges ──────────────────────────────────────────────
+    async fn folding_range(
+        &self,
+        params: FoldingRangeParams,
+    ) -> Result<Option<Vec<FoldingRange>>> {
+        let uri = &params.text_document.uri;
+        let docs = self.documents.read().await;
+        let Some(doc) = docs.get(uri) else { return Ok(None) };
+
+        let mut ranges = Vec::new();
+        let mut stack: Vec<(u32, &str)> = Vec::new(); // (start_line, keyword)
+
+        for (line_num, line) in doc.source.lines().enumerate() {
+            let trimmed = line.trim().to_uppercase();
+            let ln = line_num as u32;
+
+            // Opening keywords
+            if trimmed.starts_with("PROGRAM ")
+                || trimmed.starts_with("FUNCTION_BLOCK ")
+                || trimmed.starts_with("FUNCTION ")
+                || trimmed.starts_with("TYPE")
+                || trimmed.starts_with("STRUCT")
+                || trimmed.starts_with("VAR")
+                || trimmed.starts_with("IF ")
+                || trimmed.starts_with("FOR ")
+                || trimmed.starts_with("WHILE ")
+                || trimmed.starts_with("REPEAT")
+                || trimmed.starts_with("CASE ")
+                || trimmed == "ELSE"
+                || trimmed.starts_with("ELSIF ")
+            {
+                stack.push((ln, "block"));
+            }
+
+            // Closing keywords
+            if trimmed.starts_with("END_") || trimmed == "ELSE" || trimmed.starts_with("ELSIF ") || trimmed.starts_with("UNTIL ") {
+                if let Some((start, _)) = stack.pop() {
+                    if ln > start {
+                        ranges.push(FoldingRange {
+                            start_line: start,
+                            start_character: None,
+                            end_line: ln,
+                            end_character: None,
+                            kind: Some(FoldingRangeKind::Region),
+                            collapsed_text: None,
+                        });
+                    }
+                }
+            }
+
+            // Comment blocks
+            if trimmed.starts_with("(*") && !trimmed.contains("*)") {
+                stack.push((ln, "comment"));
+            }
+            if trimmed.contains("*)") && !trimmed.starts_with("(*") {
+                if let Some((start, kind)) = stack.pop() {
+                    if kind == "comment" && ln > start {
+                        ranges.push(FoldingRange {
+                            start_line: start,
+                            start_character: None,
+                            end_line: ln,
+                            end_character: None,
+                            kind: Some(FoldingRangeKind::Comment),
+                            collapsed_text: None,
+                        });
+                    }
+                }
+            }
+        }
+
+        if ranges.is_empty() { Ok(None) } else { Ok(Some(ranges)) }
+    }
+
+    // ── Go to Type Definition ───────────────────────────────────────
+    async fn goto_type_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let docs = self.documents.read().await;
+        let Some(doc) = docs.get(uri) else { return Ok(None) };
+
+        let offset = doc.position_to_offset(pos);
+        if let Some((word, scope_id)) = self.resolve_at_position(doc, offset) {
+            if let Some((_sid, sym)) = doc.analysis.symbols.resolve(scope_id, &word) {
+                // Find the type name of this variable's type
+                let type_name = match &sym.ty {
+                    st_semantics::types::Ty::Struct { name, .. } => Some(name.clone()),
+                    st_semantics::types::Ty::Enum { name, .. } => Some(name.clone()),
+                    st_semantics::types::Ty::FunctionBlock { name } => Some(name.clone()),
+                    st_semantics::types::Ty::Subrange { name, .. } => Some(name.clone()),
+                    st_semantics::types::Ty::Alias { name, .. } => Some(name.clone()),
+                    _ => None,
+                };
+
+                if let Some(type_name) = type_name {
+                    // Resolve the type definition
+                    let global = doc.analysis.symbols.global_scope_id();
+                    if let Some(type_sym) = doc.analysis.symbols.resolve(global, &type_name) {
+                        let range = doc.text_range_to_lsp(type_sym.1.range);
+                        return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                            uri: uri.clone(),
+                            range,
+                        })));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    // ── Workspace Symbol ────────────────────────────────────────────
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let query = params.query.to_uppercase();
+        let docs = self.documents.read().await;
+        let mut symbols = Vec::new();
+
+        for (uri, doc) in docs.iter() {
+            for item in &doc.ast.items {
+                let (name, kind, range) = match item {
+                    st_syntax::ast::TopLevelItem::Program(p) => {
+                        (p.name.name.clone(), SymbolKind::MODULE, p.range)
+                    }
+                    st_syntax::ast::TopLevelItem::Function(f) => {
+                        (f.name.name.clone(), SymbolKind::FUNCTION, f.range)
+                    }
+                    st_syntax::ast::TopLevelItem::FunctionBlock(fb) => {
+                        (fb.name.name.clone(), SymbolKind::CLASS, fb.range)
+                    }
+                    st_syntax::ast::TopLevelItem::TypeDeclaration(td) => {
+                        if let Some(def) = td.definitions.first() {
+                            (def.name.name.clone(), SymbolKind::STRUCT, def.range)
+                        } else {
+                            continue;
+                        }
+                    }
+                    st_syntax::ast::TopLevelItem::GlobalVarDeclaration(_) => continue,
+                };
+
+                if query.is_empty() || name.to_uppercase().contains(&query) {
+                    #[allow(deprecated)]
+                    symbols.push(SymbolInformation {
+                        name,
+                        kind,
+                        tags: None,
+                        deprecated: None,
+                        location: Location {
+                            uri: uri.clone(),
+                            range: doc.text_range_to_lsp(range),
+                        },
+                        container_name: None,
+                    });
+                }
+            }
+        }
+
+        if symbols.is_empty() { Ok(None) } else { Ok(Some(symbols)) }
+    }
+
+    // ── Document Links ──────────────────────────────────────────────
+    async fn document_link(
+        &self,
+        params: DocumentLinkParams,
+    ) -> Result<Option<Vec<DocumentLink>>> {
+        let uri = &params.text_document.uri;
+        let docs = self.documents.read().await;
+        let Some(doc) = docs.get(uri) else { return Ok(None) };
+
+        let mut links = Vec::new();
+
+        // Find file paths in comments (simple heuristic: look for .st or .scl references)
+        for (line_num, line) in doc.source.lines().enumerate() {
+            let trimmed = line.trim();
+            // Only look in comments
+            if !(trimmed.starts_with("//") || trimmed.starts_with("(*") || trimmed.contains("(*")) {
+                continue;
+            }
+            // Find patterns like filename.st or path/to/file.st
+            for word in trimmed.split_whitespace() {
+                let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '/' && c != '_' && c != '-');
+                if (clean.ends_with(".st") || clean.ends_with(".scl")) && clean.len() > 3 {
+                    if let Some(col) = line.find(clean) {
+                        // Try to resolve relative to the document
+                        let uri_path: &str = uri.path();
+                        if let Ok(base) = std::path::Path::new(uri_path).parent()
+                            .ok_or("no parent")
+                        {
+                            let target = base.join(clean);
+                            if let Ok(target_uri) = Url::from_file_path(&target) {
+                                links.push(DocumentLink {
+                                    range: Range::new(
+                                        Position::new(line_num as u32, col as u32),
+                                        Position::new(line_num as u32, (col + clean.len()) as u32),
+                                    ),
+                                    target: Some(target_uri),
+                                    tooltip: Some(format!("Open {clean}")),
+                                    data: None,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if links.is_empty() { Ok(None) } else { Ok(Some(links)) }
     }
 }
 

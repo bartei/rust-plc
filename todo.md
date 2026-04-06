@@ -151,6 +151,17 @@ Ship a working LSP loop early to prove the VSCode integration.
   - [x] 13 project discovery tests + multi-file playground example (`playground/multi_file_project/`)
   - [ ] Cross-file go-to-definition (open other file at declaration) — future
   - [ ] Cross-file diagnostics (errors check all project files) — future
+- [ ] **Additional LSP features (remaining):**
+  - [x] `textDocument/documentHighlight` — highlight all occurrences of symbol under cursor
+  - [x] `textDocument/foldingRange` — collapse PROGRAM/IF/VAR/FOR/WHILE/CASE blocks
+  - [x] `textDocument/typeDefinition` — jump to TYPE declaration of a variable's type
+  - [x] `workspace/symbol` — Ctrl+T search for any POU/type across workspace
+  - [x] `textDocument/documentLink` — make file paths in comments clickable
+  - [ ] `textDocument/selectionRange` — smart expand/shrink selection (word → expr → stmt → block)
+  - [ ] `textDocument/inlayHint` — show inferred types, parameter names at call sites
+  - [ ] `textDocument/onTypeFormatting` — auto-indent after `;` or `THEN`
+  - [ ] `textDocument/callHierarchy` — show callers/callees of a function
+  - [ ] `textDocument/linkedEditingRange` — edit matching IF/END_IF pairs simultaneously
 
 ---
 
