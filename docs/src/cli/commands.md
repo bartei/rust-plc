@@ -1,41 +1,83 @@
 # CLI Commands
 
-The `st-cli` tool provides commands for checking, compiling, running, and serving Structured Text programs.
+The `st-cli` tool provides commands for checking, compiling, running, formatting, and serving Structured Text programs.
 
 ## `st-cli check`
 
-Parse and analyze a file, reporting all diagnostics (errors and warnings).
+Parse and analyze source file(s), reporting all diagnostics.
 
 ```bash
-st-cli check <file>
+st-cli check [path] [--json]
 ```
 
-**Example:**
+**Path modes:**
+
+| Path | Behavior |
+|------|----------|
+| `st-cli check` | Autodiscover `.st` files from current directory |
+| `st-cli check file.st` | Check a single file |
+| `st-cli check dir/` | Autodiscover from directory |
+| `st-cli check plc-project.yaml` | Use project file configuration |
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output diagnostics as structured JSON (for CI integration) |
+
+**Examples:**
 ```bash
 $ st-cli check program.st
 program.st: OK
 
 $ st-cli check broken.st
-broken.st:5:10: error: undeclared variable 'undefined_var'
+broken.st:5:10: error: undeclared variable 'x'
 broken.st:8:8: warning: unused variable 'temp'
+
+# Project mode
+$ cd my_project/
+$ st-cli check
+Project 'MyProject': 4 source file(s)
+  controllers/main.st
+  types/data.st
+  utils.st
+  main.st
+Project 'MyProject': OK
+
+# JSON output for CI
+$ st-cli check broken.st --json
+[
+  {
+    "file": "broken.st",
+    "line": 5,
+    "column": 10,
+    "severity": "error",
+    "code": "UndeclaredVariable",
+    "message": "undeclared variable 'x'"
+  }
+]
 ```
 
 **Exit codes:**
 - `0` — No errors (warnings are OK)
 - `1` — One or more errors found
 
-**Diagnostic format:**
-```
-<file>:<line>:<column>: <severity>: <message>
-```
-
 ## `st-cli run`
 
 Compile and execute a Structured Text program.
 
 ```bash
-st-cli run <file> [-n <cycles>]
+st-cli run [path] [-n <cycles>]
 ```
+
+**Path modes:**
+
+| Path | Behavior |
+|------|----------|
+| `st-cli run` | Autodiscover from current directory, run first PROGRAM found |
+| `st-cli run file.st` | Compile and run a single file |
+| `st-cli run dir/` | Autodiscover from directory |
+| `st-cli run -n 1000` | Autodiscover + run 1000 scan cycles |
 
 **Options:**
 
@@ -45,39 +87,91 @@ st-cli run <file> [-n <cycles>]
 
 **Examples:**
 ```bash
-# Run a single scan cycle
+# Single file
 $ st-cli run program.st
 Executed 1 cycle(s) in 8.5µs (avg 8.5µs/cycle, 16 instructions)
 
-# Run 10,000 scan cycles (PLC-style continuous execution)
+# 10,000 scan cycles
 $ st-cli run program.st -n 10000
 Executed 10000 cycle(s) in 17.4ms (avg 1.74µs/cycle, 16 instructions)
+
+# Project mode
+$ cd my_project/
+$ st-cli run -n 100
+Project 'MyProject': 5 source file(s)
+Executed 100 cycle(s) in 1.8ms (avg 18µs/cycle, 112 instructions)
 ```
 
 **Pipeline:**
-1. Parse the source file (with stdlib merged via `builtin_stdlib()`)
-2. Run semantic analysis — abort if errors
-3. Compile to bytecode (intrinsics emitted as single instructions)
-4. Execute in the VM for N cycles
+1. Discover source files (single file, directory, or project yaml)
+2. Parse all sources with stdlib merged via `builtin_stdlib()`
+3. Run semantic analysis — abort if errors
+4. Compile to bytecode (intrinsics emitted as single instructions)
+5. Execute in the VM for N cycles
 
-**Global variables** persist across scan cycles, simulating PLC behavior:
-```st
-VAR_GLOBAL
-    counter : INT;
-END_VAR
+**PLC behavior:**
+- **PROGRAM locals persist** across scan cycles (like a real PLC)
+- **Global variables persist** across scan cycles
+- **FB instance state persists** across calls
+- **Timers use wall-clock time** via `SYSTEM_TIME()`
 
-PROGRAM Main
-VAR
-    x : INT := 0;
-END_VAR
-    counter := counter + 1;  (* increments each cycle *)
-END_PROGRAM
+## `st-cli compile`
+
+Compile a Structured Text source file to a bytecode file.
+
+```bash
+st-cli compile <file> -o <output>
 ```
 
-**Error handling:**
-- Parse errors → reported and exits with code 1
-- Semantic errors → reported and exits with code 1
-- Runtime errors (division by zero, infinite loop) → reported and exits with code 1
+**Example:**
+```bash
+$ st-cli compile program.st -o program.json
+Compiled to program.json (78047 bytes)
+```
+
+The output is a JSON-serialized `Module` containing all compiled functions, global variables, type definitions, and source maps. This can be used for offline analysis or loaded by external tools.
+
+**Pipeline:**
+1. Parse the source file with stdlib
+2. Run semantic analysis — abort if errors
+3. Compile to bytecode
+4. Serialize module as JSON to the output file
+
+## `st-cli fmt`
+
+Format Structured Text source file(s) in place.
+
+```bash
+st-cli fmt [path]
+```
+
+**Path modes:**
+
+| Path | Behavior |
+|------|----------|
+| `st-cli fmt` | Format all `.st` files in current directory (autodiscover) |
+| `st-cli fmt file.st` | Format a single file |
+| `st-cli fmt dir/` | Format all files in directory |
+
+**Example:**
+```bash
+$ st-cli fmt program.st
+Formatted: program.st
+Formatted 1 file(s)
+
+# Format entire project
+$ cd my_project/
+$ st-cli fmt
+Formatted: controllers/main.st
+Formatted: utils.st
+Formatted 2 file(s)
+
+# Already formatted
+$ st-cli fmt program.st
+All 1 file(s) already formatted
+```
+
+The formatter normalizes indentation (4 spaces per level) for all ST block structures: PROGRAM, FUNCTION, VAR, IF, FOR, WHILE, CASE, STRUCT, TYPE, etc.
 
 ## `st-cli serve`
 
@@ -89,13 +183,26 @@ st-cli serve
 
 The server communicates over **stdin/stdout** using the JSON-RPC protocol. This is typically invoked by the VSCode extension, not directly by users.
 
-**Supported LSP capabilities:**
-- `textDocument/publishDiagnostics`
-- `textDocument/hover`
-- `textDocument/definition`
-- `textDocument/completion` (with `.` trigger for struct fields)
-- `textDocument/documentSymbol`
-- `textDocument/semanticTokens/full`
+**Supported LSP capabilities (16 features):**
+
+| Feature | Protocol Method |
+|---------|----------------|
+| Diagnostics | `textDocument/publishDiagnostics` |
+| Hover | `textDocument/hover` |
+| Go-to-definition | `textDocument/definition` |
+| Go-to-type-definition | `textDocument/typeDefinition` |
+| Completion | `textDocument/completion` (triggers: `.`) |
+| Signature help | `textDocument/signatureHelp` (triggers: `(`, `,`) |
+| Find references | `textDocument/references` |
+| Rename | `textDocument/rename` |
+| Document symbols | `textDocument/documentSymbol` |
+| Workspace symbols | `workspace/symbol` |
+| Document highlight | `textDocument/documentHighlight` |
+| Folding ranges | `textDocument/foldingRange` |
+| Document links | `textDocument/documentLink` |
+| Semantic tokens | `textDocument/semanticTokens/full` |
+| Formatting | `textDocument/formatting` |
+| Code actions | `textDocument/codeAction` |
 
 ## `st-cli debug`
 
@@ -105,14 +212,9 @@ Start a Debug Adapter Protocol (DAP) session for a Structured Text file.
 st-cli debug <file>
 ```
 
-The debug command compiles the source file and launches the DAP server over stdin/stdout. This is typically invoked by the VSCode extension when you press F5, not called directly by users.
+This is typically invoked by the VSCode extension when you press F5, not called directly by users.
 
-**Example:**
-```bash
-$ st-cli debug my_program.st
-```
-
-**DAP capabilities supported:**
+**DAP capabilities:**
 
 | Capability | Description |
 |-----------|-------------|
@@ -120,40 +222,26 @@ $ st-cli debug my_program.st
 | Step In | Step into function/FB calls (`F11`) |
 | Step Over | Step over one statement (`F10`) |
 | Step Out | Run until current function returns (`Shift+F11`) |
-| Continue | Run across scan cycles until a breakpoint is hit (`F5`, up to 100,000 cycles) |
+| Continue | Run across scan cycles until a breakpoint is hit (`F5`) |
 | Stack Trace | View the full call stack including nested POU calls |
 | Scopes | Inspect Locals and Globals scopes |
 | Variables | View all variables with types and current values |
-| Evaluate | Evaluate variable names in the current scope |
+| Evaluate | Evaluate variable names or PLC commands |
 
-**PLC-specific extensions via evaluate:**
-
-The debugger supports PLC-specific commands entered as evaluate expressions in the Debug Console:
+**PLC-specific debug commands** (type in the Debug Console):
 
 | Expression | Description |
 |-----------|-------------|
-| `force x = 42` | Force variable `x` to value 42 (overrides program logic) |
-| `force y = true` | Force a BOOL variable to TRUE |
-| `unforce x` | Remove force override from variable `x` |
-| `listForced` | List all currently forced variables and their values |
-| `scanCycleInfo` | Show scan cycle statistics (count, timing) |
-
-These commands are also available via **4 VSCode debug toolbar buttons** (Force, Unforce, List Forced, Cycle Info) when a debug session is active.
+| `force x = 42` | Force variable `x` to value 42 |
+| `unforce x` | Remove force from variable `x` |
+| `listForced` | List all forced variables |
+| `scanCycleInfo` | Show cycle statistics |
 
 **Key behaviors:**
-
-- **Continue runs across scan cycles.** When you press Continue (F5), execution proceeds through the remainder of the current scan cycle and into subsequent cycles (up to 100,000) until a breakpoint is hit. This matches the expected PLC debugging experience where the program loops continuously.
-- **Step at end of cycle wraps.** When stepping reaches the end of a scan cycle, the VM wraps to the next cycle instead of terminating.
-- **PROGRAM locals are retained across scan cycles.** The VM uses `body_start_pc` to skip variable initialization on subsequent cycles, preserving local variable state just like a real PLC.
-- **FB instance state persisted.** Function block instance state is maintained across scan cycles via the `fb_instances` HashMap.
-- **Variable names that conflict with ST keywords** (e.g., a variable named `dt` conflicting with the `DT` date-time keyword) are handled correctly by the debugger's evaluate command.
-
-**Pipeline:**
-1. Parse the source file (with stdlib merged)
-2. Run semantic analysis -- abort if errors
-3. Compile to bytecode with source map entries
-4. Launch DAP server, awaiting `initialize` and `launch` requests
-5. Execute in the VM under debugger control
+- Continue runs across scan cycles (up to 100,000) until a breakpoint hits
+- Step at end of cycle wraps to the next cycle
+- PROGRAM locals and FB state persist across cycles
+- 4 VSCode debug toolbar buttons: Force, Unforce, List Forced, Cycle Info
 
 ## `st-cli help`
 
@@ -166,9 +254,20 @@ st-cli: IEC 61131-3 Structured Text toolchain
 Usage: st-cli <command> [options]
 
 Commands:
-  serve [--stdio]   Start the LSP server (default: stdio)
-  check <file>      Parse and analyze a file, report diagnostics
-  run <file> [-n N] Compile and execute a program (N cycles, default 1)
-  debug <file>      Start a DAP debug session over stdio
+  serve             Start the LSP server (stdio)
+  check [path]      Parse and analyze, report diagnostics
+  run [path] [-n N] Compile and execute (N cycles, default 1)
+  compile <path> -o <output>  Compile to bytecode file
+  fmt [path]        Format source file(s) in place
+  debug <file>      Start DAP debug server (stdin/stdout)
   help              Show this help message
+
+Flags:
+  --json            Output diagnostics as JSON (for CI integration)
+
+Path modes:
+  (no path)         Use current directory as project root
+  file.st           Single file mode
+  directory/        Project mode (autodiscover .st files)
+  plc-project.yaml  Explicit project file
 ```
