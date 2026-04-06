@@ -7,7 +7,14 @@ an atomic swap.
 
 ## Overview
 
-The online change pipeline consists of three steps:
+The simplest way to perform an online change is via the high-level API:
+
+```rust
+engine.online_change(new_source)?;
+```
+
+This runs the full pipeline: parse, analyze, compile, compare modules, migrate
+state, and atomic swap. Under the hood, the pipeline consists of three steps:
 
 ```
   Old Module + New Source
@@ -19,14 +26,14 @@ The online change pipeline consists of three steps:
   └──────────┬──────────┘
              │ yes
              v
-  ┌─────────────────────┐
+  ┌────────��────────────┐
   │  migrate_locals()    │ ── Copy variable values from old
   │  → State preserved   │    VM state into new module layout
-  └──────────┬──────────┘
+  └──────────���───────��──┘
              │
              v
-  ┌─────────────────────┐
-  │  apply_online_change │ ── Atomic swap of the module in
+  ┌─────���───────────────┐
+  │  vm.swap_module()    │ ── Atomic swap of the module in
   │  → Engine updated    │    the running engine
   └─────────────────────┘
 ```
@@ -37,18 +44,10 @@ must perform a full restart instead.
 ## Compatibility Analysis
 
 `analyze_change(old_module, new_module)` compares two `st_ir::Module` values
-and returns a `ChangeResult`:
+and returns a `ChangeAnalysis`:
 
 ```rust
-pub enum ChangeResult {
-    Compatible {
-        /// Variables whose values can be migrated
-        migrateable: Vec<String>,
-    },
-    Incompatible {
-        reason: String,
-    },
-}
+pub fn analyze_change(old: &Module, new: &Module) -> ChangeAnalysis;
 ```
 
 ### What is Compatible
@@ -85,10 +84,7 @@ variable values from the old VM's memory into the new module's memory layout:
 pub fn migrate_locals(
     old_vm: &Vm,
     new_module: &mut Module,
-) -> Result<MigrationReport, MigrationError> {
-    // For each variable in the new module that also exists in the old module
-    // with the same type, copy the current runtime value.
-}
+) -> Result<MigrationReport, MigrationError>;
 ```
 
 The migration is **name-and-type-based**: a variable in the new module receives
@@ -105,23 +101,12 @@ The migration returns a report listing:
 
 ## Atomic Swap
 
-`apply_online_change(engine, new_module)` performs the actual replacement:
+`vm.swap_module(new_module)` performs the actual replacement:
 
 1. The engine finishes the current scan cycle (never interrupts mid-cycle)
 2. The old module is swapped out and the new module is installed
 3. The next scan cycle executes the new bytecode
 4. Program locals that were migrated retain their values
-
-```rust
-pub fn apply_online_change(
-    engine: &mut Engine,
-    new_module: Module,
-) -> Result<(), OnlineChangeError> {
-    // Wait for current cycle to complete
-    // Swap module atomically
-    // Reset PC to body_start_pc (skip re-initialization)
-}
-```
 
 The use of `body_start_pc` is critical: it causes the VM to skip the variable
 initialization preamble on the next cycle, preserving the migrated values. This
@@ -195,6 +180,6 @@ The system reports the incompatibility and the program must be fully restarted.
 ## Integration with Monitor Server
 
 Online change can be triggered through the monitor server's WebSocket API using
-the `online_change` request type. This allows the VSCode monitor panel (or any
-WebSocket client) to push new compiled modules to the running engine. See
+the `onlineChange` request type. This allows the VSCode monitor panel (or any
+WebSocket client) to push new source code to the running engine. See
 [Monitor Server](./monitor-server.md) for the protocol details.

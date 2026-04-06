@@ -1,0 +1,7 @@
+name: BottleFillingLine
+version: "1.0.0"
+entryPoint: Main
+
+# Optional: exclude test files from compilation
+exclude:
+  - test_*.st

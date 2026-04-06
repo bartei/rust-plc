@@ -25,37 +25,46 @@ updates. Force commands flow in the reverse direction.
 
 ## Protocol Reference
 
-All messages use JSON over WebSocket. Requests include an `id` field for
-correlation. Responses echo the `id` back.
+All messages use JSON over WebSocket. Requests are tagged by `method` name
+with optional `params`. Responses are tagged by `type`.
 
 ### Request Format
 
+Requests use serde's tag-content encoding:
+
 ```json
 {
-  "id": 1,
   "method": "<method_name>",
   "params": { ... }
 }
 ```
 
-### Response Format
+### Response Types
 
+The server sends back one of four message types:
+
+| Type | Description |
+|------|-------------|
+| `response` | Success/failure response to a request |
+| `variableUpdate` | Pushed variable value update for subscribers |
+| `cycleInfo` | Scan cycle statistics |
+| `error` | Error message |
+
+**Response format:**
 ```json
 {
-  "id": 1,
-  "result": { ... }
+  "type": "response",
+  "id": null,
+  "success": true,
+  "data": { ... }
 }
 ```
 
-### Error Response Format
-
+**Error format:**
 ```json
 {
-  "id": 1,
-  "error": {
-    "code": -1,
-    "message": "description of the error"
-  }
+  "type": "error",
+  "message": "description of the error"
 }
 ```
 
@@ -68,37 +77,33 @@ The monitor server supports 8 request types:
 ### 1. `subscribe`
 
 Subscribe to live variable updates. After subscribing, the server pushes
-variable snapshots after each scan cycle.
+`variableUpdate` messages after each scan cycle (or at the specified interval).
 
 **Request:**
 ```json
 {
-  "id": 1,
   "method": "subscribe",
-  "params": {}
+  "params": {
+    "variables": ["Main.counter", "Main.limit"],
+    "interval_ms": 0
+  }
 }
 ```
 
-**Response:**
-```json
-{
-  "id": 1,
-  "result": { "status": "subscribed" }
-}
-```
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `variables` | `string[]` | Variable names to subscribe to |
+| `interval_ms` | `u64` | Update interval in milliseconds (0 = every cycle) |
 
 After subscribing, the server sends push notifications:
 ```json
 {
-  "method": "variables",
-  "params": {
-    "cycle": 1042,
-    "values": {
-      "Main.counter": { "type": "INT", "value": 37 },
-      "Main.limit": { "type": "INT", "value": 50 },
-      "Main.active": { "type": "BOOL", "value": false }
-    }
-  }
+  "type": "variableUpdate",
+  "cycle": 1042,
+  "variables": [
+    { "name": "Main.counter", "value": "37", "type": "INT" },
+    { "name": "Main.limit", "value": "50", "type": "INT" }
+  ]
 }
 ```
 
@@ -106,96 +111,30 @@ After subscribing, the server sends push notifications:
 
 ### 2. `unsubscribe`
 
-Stop receiving live variable updates.
+Stop receiving updates for specific variables.
 
 **Request:**
 ```json
 {
-  "id": 2,
   "method": "unsubscribe",
-  "params": {}
-}
-```
-
-**Response:**
-```json
-{
-  "id": 2,
-  "result": { "status": "unsubscribed" }
-}
-```
-
----
-
-### 3. `read_variables`
-
-Read all variable values once (polling mode).
-
-**Request:**
-```json
-{
-  "id": 3,
-  "method": "read_variables",
-  "params": {}
-}
-```
-
-**Response:**
-```json
-{
-  "id": 3,
-  "result": {
-    "cycle": 1042,
-    "values": {
-      "Main.counter": { "type": "INT", "value": 37 },
-      "Main.limit": { "type": "INT", "value": 50 },
-      "Main.active": { "type": "BOOL", "value": false }
-    }
-  }
-}
-```
-
----
-
-### 4. `force_variable`
-
-Override a variable's value. The forced value is written at the start of each
-scan cycle, overriding whatever the program logic computes.
-
-**Request:**
-```json
-{
-  "id": 4,
-  "method": "force_variable",
   "params": {
-    "name": "Main.counter",
-    "value": 100
+    "variables": ["Main.counter"]
   }
-}
-```
-
-**Response:**
-```json
-{
-  "id": 4,
-  "result": { "status": "forced", "name": "Main.counter" }
 }
 ```
 
 ---
 
-### 5. `unforce_variable`
+### 3. `read`
 
-Remove the force override from a variable, returning it to normal program
-control.
+Read current values of specific variables (polling mode).
 
 **Request:**
 ```json
 {
-  "id": 5,
-  "method": "unforce_variable",
+  "method": "read",
   "params": {
-    "name": "Main.counter"
+    "variables": ["Main.counter", "Main.limit"]
   }
 }
 ```
@@ -203,34 +142,12 @@ control.
 **Response:**
 ```json
 {
-  "id": 5,
-  "result": { "status": "unforced", "name": "Main.counter" }
-}
-```
-
----
-
-### 6. `list_forced`
-
-List all currently forced variables and their forced values.
-
-**Request:**
-```json
-{
-  "id": 6,
-  "method": "list_forced",
-  "params": {}
-}
-```
-
-**Response:**
-```json
-{
-  "id": 6,
-  "result": {
-    "forced": [
-      { "name": "Main.counter", "value": 100 },
-      { "name": "Main.active", "value": true }
+  "type": "response",
+  "success": true,
+  "data": {
+    "variables": [
+      { "name": "Main.counter", "value": "37", "type": "INT" },
+      { "name": "Main.limit", "value": "50", "type": "INT" }
     ]
   }
 }
@@ -238,16 +155,93 @@ List all currently forced variables and their forced values.
 
 ---
 
-### 7. `online_change`
+### 4. `write`
 
-Push a new compiled module to the running engine for hot-reload. The server
-performs compatibility analysis, variable migration, and atomic swap.
+Write a value to a variable.
 
 **Request:**
 ```json
 {
-  "id": 7,
-  "method": "online_change",
+  "method": "write",
+  "params": {
+    "variable": "Main.counter",
+    "value": 100
+  }
+}
+```
+
+---
+
+### 5. `force`
+
+Override a variable's value. The forced value is written at the start of each
+scan cycle, overriding whatever the program logic computes.
+
+**Request:**
+```json
+{
+  "method": "force",
+  "params": {
+    "variable": "Main.counter",
+    "value": 100
+  }
+}
+```
+
+---
+
+### 6. `unforce`
+
+Remove the force override from a variable, returning it to normal program
+control.
+
+**Request:**
+```json
+{
+  "method": "unforce",
+  "params": {
+    "variable": "Main.counter"
+  }
+}
+```
+
+---
+
+### 7. `getCycleInfo`
+
+Get scan cycle statistics. This method takes no parameters.
+
+**Request:**
+```json
+{
+  "method": "getCycleInfo"
+}
+```
+
+**Response:**
+```json
+{
+  "type": "cycleInfo",
+  "cycle_count": 1042,
+  "last_cycle_us": 150,
+  "min_cycle_us": 120,
+  "max_cycle_us": 450,
+  "avg_cycle_us": 165
+}
+```
+
+---
+
+### 8. `onlineChange`
+
+Push new source code to the running engine for hot-reload. The server
+performs the full pipeline: parse, analyze, compile, compatibility analysis,
+variable migration, and atomic swap.
+
+**Request:**
+```json
+{
+  "method": "onlineChange",
   "params": {
     "source": "PROGRAM Main\nVAR\n  counter : INT := 0;\nEND_VAR\n  counter := counter + 2;\nEND_PROGRAM"
   }
@@ -257,12 +251,10 @@ performs compatibility analysis, variable migration, and atomic swap.
 **Response (success):**
 ```json
 {
-  "id": 7,
-  "result": {
-    "status": "applied",
-    "migrated": ["Main.counter"],
-    "defaulted": [],
-    "dropped": []
+  "type": "response",
+  "success": true,
+  "data": {
+    "status": "applied"
   }
 }
 ```
@@ -270,44 +262,12 @@ performs compatibility analysis, variable migration, and atomic swap.
 **Response (incompatible):**
 ```json
 {
-  "id": 7,
-  "error": {
-    "code": -2,
-    "message": "incompatible change: variable 'counter' type changed from INT to DINT"
-  }
+  "type": "error",
+  "message": "incompatible change: variable 'counter' type changed from INT to DINT"
 }
 ```
 
 See [Online Change](./online-change.md) for details on compatibility rules.
-
----
-
-### 8. `status`
-
-Query the engine status: whether it is running, paused, or stopped, and the
-current scan cycle count.
-
-**Request:**
-```json
-{
-  "id": 8,
-  "method": "status",
-  "params": {}
-}
-```
-
-**Response:**
-```json
-{
-  "id": 8,
-  "result": {
-    "state": "running",
-    "cycle": 1042,
-    "program": "Main",
-    "forced_count": 2
-  }
-}
-```
 
 ## MonitorHandle API
 

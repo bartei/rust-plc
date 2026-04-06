@@ -6,7 +6,12 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[dev-dependencies]
+tempfile = "3"
+
 [dependencies]
 st-grammar.workspace = true
 tree-sitter.workspace = true
 serde.workspace = true
+serde_yaml.workspace = true
+glob.workspace = true

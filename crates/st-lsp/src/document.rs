@@ -55,12 +55,22 @@ impl Document {
             .set_language(&st_grammar::language())
             .expect("Failed to load ST grammar");
         let tree = parser.parse(source, None).expect("Failed to parse");
+
+        // Parse with stdlib context for cross-file type/POU resolution
+        let stdlib = st_syntax::multi_file::builtin_stdlib();
+        let mut all_sources: Vec<&str> = stdlib;
+        all_sources.push(source);
+        let multi_result = st_syntax::multi_file::parse_multi(&all_sources);
+
+        let analysis = st_semantics::analyze::analyze(&multi_result.source_file);
+
+        // Return the user's AST (from the single-file parse) but with
+        // the multi-file analysis (which includes stdlib symbols)
         let lower_result: LowerResult = st_syntax::lower::lower(&tree, source);
-        let analysis = st_semantics::analyze::analyze(&lower_result.source_file);
         (
             tree,
             lower_result.source_file,
-            lower_result.errors,
+            multi_result.errors,
             analysis,
         )
     }

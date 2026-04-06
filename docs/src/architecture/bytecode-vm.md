@@ -31,6 +31,19 @@ All IEC integer widths widen to `i64`/`u64`; all floats become `f64`.
 This keeps the instruction set small -- one `Add`, not eight
 width-specific variants.
 
+### Time Arithmetic
+
+The `Value::Time(i64)` variant stores time durations in nanoseconds.
+Time values participate in standard arithmetic operations:
+
+- **Addition/Subtraction**: `TIME + TIME` and `TIME - TIME` produce
+  `TIME` results. This is used by the standard library timers to compute
+  elapsed time (e.g., `ET := SYSTEM_TIME() - start_time`).
+- **Comparison**: `TIME >= TIME`, `TIME < TIME`, etc. are used by timers
+  to check if the preset has been reached (e.g., `ET >= PT`).
+- TIME literals (`T#5s`, `T#100ms`, `T#1m30s`) compile to `LoadConst`
+  with a `Value::Time(...)` constant.
+
 ## Call Frames
 
 Each function invocation pushes a `CallFrame`:
@@ -58,6 +71,38 @@ while registers hold intermediate expression results.
 
 Slots are addressed by `u16` indices into the corresponding
 `MemoryLayout`.
+
+## Force / Unforce Variables
+
+The VM supports **forcing** variable values, which overrides the normal
+program-computed value with a fixed value set by the debugger or monitor:
+
+```rust
+pub fn force_variable(&mut self, name: &str, value: Value);
+pub fn unforce_variable(&mut self, name: &str);
+```
+
+When a variable is forced:
+
+- `LoadLocal` and `LoadGlobal` instructions check the force table first.
+  If the variable is forced, the forced value is returned instead of the
+  actual stored value.
+- The forced value persists across scan cycles until explicitly unforced.
+- Force/unforce is accessible from both the DAP debugger (via evaluate
+  expressions like `force x = 42`, `unforce x`) and the monitor server
+  (via WebSocket `force_variable` / `unforce_variable` requests).
+
+The VM maintains a `HashMap` of forced variables (by name) that is
+consulted during variable load operations.
+
+## FB Instance State
+
+Function block instances maintain persistent state across scan cycles
+via the `fb_instances` HashMap in the VM. When a `CallFb` instruction
+executes, the VM looks up (or creates) the instance state for that
+particular instance slot, ensuring that internal variables (like edge
+detection `prev` flags or timer `start_time` values) are preserved
+between calls.
 
 ## Fetch-Decode-Execute Loop
 
@@ -96,6 +141,30 @@ If **either** operand is `Real`, both promote to `f64`. Otherwise the
 operation stays in `i64`. Comparisons follow the same pattern through
 `cmp_op()`. Division by zero on integer operands returns
 `VmError::DivisionByZero`.
+
+## Intrinsic Instructions
+
+The VM executes several intrinsic instructions that map directly to
+native operations:
+
+### Math Intrinsics
+
+`Sqrt`, `Sin`, `Cos`, `Tan`, `Asin`, `Acos`, `Atan`, `Ln`, `Log`,
+`Exp` -- each takes a source register, converts its value to `f64`,
+applies the corresponding Rust `f64` method, and stores the result
+as `Value::Real`.
+
+### SystemTime
+
+`SystemTime(dst)` writes the current elapsed time since engine start
+into the destination register as a `Value::Time(...)`. This is the
+foundation for the real-time timers in the standard library.
+
+### Type Conversions
+
+`ToInt(dst, src)`, `ToReal(dst, src)`, `ToBool(dst, src)` convert
+between value types. These are emitted by the compiler for the 30+
+`*_TO_*` intrinsic functions.
 
 ## Control Flow via Labels
 
@@ -191,6 +260,13 @@ pub struct EngineConfig {
 }
 ```
 
+### PROGRAM Local Retention
+
+The VM uses `body_start_pc` to skip variable initialization on
+subsequent scan cycles. This means PROGRAM locals retain their values
+across cycles, matching real PLC behavior. The same mechanism is used
+after online change to preserve migrated variable values.
+
 ### Variable Access Between Cycles
 
 ```rust
@@ -200,3 +276,11 @@ engine.vm_mut().set_global("counter", Value::Int(0))    // write
 
 This is the foundation for `st-monitor` (live variable streaming) and
 `st-dap` (debug adapter protocol).
+
+### Online Change
+
+The engine supports hot-reloading via `engine.online_change(source)`,
+which performs the full pipeline: parse, analyze, compile, compare
+modules via `analyze_change()`, migrate state via `migrate_locals()`,
+and atomically swap via `vm.swap_module()`. See
+[Online Change](./online-change.md) for full details.

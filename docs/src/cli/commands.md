@@ -55,9 +55,9 @@ Executed 10000 cycle(s) in 17.4ms (avg 1.74µs/cycle, 16 instructions)
 ```
 
 **Pipeline:**
-1. Parse the source file
+1. Parse the source file (with stdlib merged via `builtin_stdlib()`)
 2. Run semantic analysis — abort if errors
-3. Compile to bytecode
+3. Compile to bytecode (intrinsics emitted as single instructions)
 4. Execute in the VM for N cycles
 
 **Global variables** persist across scan cycles, simulating PLC behavior:
@@ -120,20 +120,36 @@ $ st-cli debug my_program.st
 | Step In | Step into function/FB calls (`F11`) |
 | Step Over | Step over one statement (`F10`) |
 | Step Out | Run until current function returns (`Shift+F11`) |
-| Continue | Run across scan cycles until a breakpoint is hit (`F5`) |
+| Continue | Run across scan cycles until a breakpoint is hit (`F5`, up to 100,000 cycles) |
 | Stack Trace | View the full call stack including nested POU calls |
 | Scopes | Inspect Locals and Globals scopes |
 | Variables | View all variables with types and current values |
 | Evaluate | Evaluate variable names in the current scope |
 
+**PLC-specific extensions via evaluate:**
+
+The debugger supports PLC-specific commands entered as evaluate expressions in the Debug Console:
+
+| Expression | Description |
+|-----------|-------------|
+| `force x = 42` | Force variable `x` to value 42 (overrides program logic) |
+| `force y = true` | Force a BOOL variable to TRUE |
+| `unforce x` | Remove force override from variable `x` |
+| `listForced` | List all currently forced variables and their values |
+| `scanCycleInfo` | Show scan cycle statistics (count, timing) |
+
+These commands are also available via **4 VSCode debug toolbar buttons** (Force, Unforce, List Forced, Cycle Info) when a debug session is active.
+
 **Key behaviors:**
 
-- **Continue runs across scan cycles.** When you press Continue (F5), execution proceeds through the remainder of the current scan cycle and into subsequent cycles until a breakpoint is hit. This matches the expected PLC debugging experience where the program loops continuously.
+- **Continue runs across scan cycles.** When you press Continue (F5), execution proceeds through the remainder of the current scan cycle and into subsequent cycles (up to 100,000) until a breakpoint is hit. This matches the expected PLC debugging experience where the program loops continuously.
+- **Step at end of cycle wraps.** When stepping reaches the end of a scan cycle, the VM wraps to the next cycle instead of terminating.
 - **PROGRAM locals are retained across scan cycles.** The VM uses `body_start_pc` to skip variable initialization on subsequent cycles, preserving local variable state just like a real PLC.
+- **FB instance state persisted.** Function block instance state is maintained across scan cycles via the `fb_instances` HashMap.
 - **Variable names that conflict with ST keywords** (e.g., a variable named `dt` conflicting with the `DT` date-time keyword) are handled correctly by the debugger's evaluate command.
 
 **Pipeline:**
-1. Parse the source file
+1. Parse the source file (with stdlib merged)
 2. Run semantic analysis -- abort if errors
 3. Compile to bytecode with source map entries
 4. Launch DAP server, awaiting `initialize` and `launch` requests

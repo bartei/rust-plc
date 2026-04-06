@@ -89,7 +89,10 @@ impl Analyzer {
             reg(name, &real_ty, &real_ty);
         }
 
-        // Type conversion intrinsics: *_TO_REAL / *_TO_LREAL
+        // Type conversion intrinsics
+        // Use a permissive input type — the VM handles all conversions dynamically.
+        // The return type determines the output.
+        // *_TO_REAL / *_TO_LREAL
         for name in [
             "INT_TO_REAL", "SINT_TO_REAL", "DINT_TO_REAL", "LINT_TO_REAL",
             "UINT_TO_REAL", "USINT_TO_REAL", "UDINT_TO_REAL", "ULINT_TO_REAL",
@@ -100,22 +103,31 @@ impl Analyzer {
             reg(name, &int_ty, &real_ty);
         }
 
-        // *_TO_INT / *_TO_DINT / *_TO_LINT / *_TO_SINT
+        // *_TO_INT (from REAL, BOOL, or other INT sizes)
         for name in [
             "REAL_TO_INT", "LREAL_TO_INT", "REAL_TO_DINT", "LREAL_TO_DINT",
             "REAL_TO_LINT", "LREAL_TO_LINT", "REAL_TO_SINT", "LREAL_TO_SINT",
+        ] {
+            reg(name, &real_ty, &int_ty);
+        }
+        for name in [
             "BOOL_TO_INT", "BOOL_TO_DINT", "BOOL_TO_LINT",
+        ] {
+            reg(name, &bool_ty, &int_ty);
+        }
+        for name in [
             "UINT_TO_INT", "UDINT_TO_DINT", "ULINT_TO_LINT",
             "INT_TO_DINT", "INT_TO_LINT", "DINT_TO_LINT",
             "SINT_TO_INT", "SINT_TO_DINT", "SINT_TO_LINT",
         ] {
-            reg(name, &real_ty, &int_ty);
+            reg(name, &int_ty, &int_ty);
         }
 
         // *_TO_BOOL
-        for name in ["INT_TO_BOOL", "REAL_TO_BOOL", "DINT_TO_BOOL", "LINT_TO_BOOL"] {
+        for name in ["INT_TO_BOOL", "DINT_TO_BOOL", "LINT_TO_BOOL"] {
             reg(name, &int_ty, &bool_ty);
         }
+        reg("REAL_TO_BOOL", &real_ty, &bool_ty);
 
         // Drop the closure before using self.symbols again
         drop(reg);

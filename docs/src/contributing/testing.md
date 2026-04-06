@@ -5,7 +5,7 @@ them, and how to add new tests.
 
 ## Overview
 
-The workspace contains **455 tests** across all crates. Every crate with
+The workspace contains **483 tests** across all crates. Every crate with
 non-trivial logic has its own test suite. Tests range from unit tests
 (individual functions) to integration tests (full parse-analyze-compile-run
 round trips).
@@ -22,24 +22,24 @@ cargo test --workspace
 | **st-grammar** | `src/lib.rs` (inline) | 11 | Parser loads, minimal programs, FBs, functions, types, control flow, expressions, literals, comments, error recovery, incremental parse |
 | **st-syntax** | `tests/lower_tests.rs` | 21 | CST-to-AST lowering for all node types |
 | **st-syntax** | `tests/coverage_gaps.rs` | 58 | Additional lowering edge cases |
-| **st-semantics** | `tests/end_to_end_tests.rs` | 44 | Full parse-and-analyze round trips |
-| **st-semantics** | `tests/scope_tests.rs` | 13 | Scope creation, resolution, shadowing |
-| **st-semantics** | `tests/type_tests.rs` | 16 | Type coercion, common_type, numeric ranking |
-| **st-semantics** | `tests/control_flow_tests.rs` | 22 | IF/FOR/WHILE/REPEAT/CASE semantics |
-| **st-semantics** | `tests/call_tests.rs` | 11 | Function/FB call argument checking |
-| **st-semantics** | `tests/struct_array_tests.rs` | 38 | Struct field access, array indexing, UDTs |
+| **st-semantics** | `tests/end_to_end_tests.rs` | 17 | Full parse-and-analyze round trips |
+| **st-semantics** | `tests/scope_tests.rs` | 22 | Scope creation, resolution, shadowing |
+| **st-semantics** | `tests/type_tests.rs` | 38 | Type coercion, common_type, numeric ranking |
+| **st-semantics** | `tests/control_flow_tests.rs` | 16 | IF/FOR/WHILE/REPEAT/CASE semantics |
+| **st-semantics** | `tests/call_tests.rs` | 13 | Function/FB call argument checking |
+| **st-semantics** | `tests/struct_array_tests.rs` | 11 | Struct field access, array indexing, UDTs |
 | **st-semantics** | `tests/warning_tests.rs` | 10 | Unused variables, write-without-read |
-| **st-semantics** | `tests/coverage_gaps.rs` | 17 | Edge cases for additional coverage |
+| **st-semantics** | `tests/coverage_gaps.rs` | 44 | Edge cases for additional coverage |
 | **st-lsp** | `tests/lsp_integration.rs` | 13 | Subprocess LSP lifecycle (init, open, diagnostics, shutdown) |
 | **st-lsp** | `tests/unit_tests.rs` | 41 | In-process tests for completion, semantic tokens, document sync |
 | **st-compiler** | `tests/compile_tests.rs` | 35 | AST-to-IR compilation for all statement/expression types |
-| **st-runtime** | `tests/vm_tests.rs` | 31 | VM execution: arithmetic, control flow, calls, limits, cycles |
-| **st-dap** | `tests/dap_integration.rs` | 18 | DAP protocol: breakpoints, stepping, continue across cycles, variables, evaluate |
-| **st-monitor** | `tests/ws_tests.rs` | 19 | WebSocket protocol: connect, subscribe, variable streaming, force/unforce |
-| **st-monitor** | `tests/serialization_tests.rs` | 4 | JSON-RPC message serialization and deserialization |
-| **st-monitor** | `tests/handle_tests.rs` | 3 | MonitorHandle thread-safety, publish/receive round-trip |
-| **st-compiler** | `tests/online_change_tests.rs` | 20 | analyze_change compatibility, migrate_locals state preservation |
-| **st-runtime** | `tests/online_change_integration.rs` | 10 | apply_online_change atomic swap, engine continuity |
+| **st-runtime** | `tests/vm_tests.rs` | 42 | VM execution: arithmetic, control flow, calls, limits, cycles, intrinsics |
+| **st-runtime** | `tests/stdlib_tests.rs` | 16 | Standard library integration: counters, timers, edge detection, math |
+| **st-runtime** | `tests/online_change_tests.rs` | 10 | Engine-level online change: apply, preserve state, reject incompatible |
+| **st-runtime** | `src/online_change.rs` (inline) | 11 | analyze_change compatibility, migrate_locals state preservation |
+| **st-runtime** | `src/debug.rs` (inline) | 9 | Debug-mode VM helpers |
+| **st-dap** | `tests/dap_integration.rs` | 26 | DAP protocol: breakpoints, stepping, continue across cycles, variables, evaluate, force/unforce |
+| **st-monitor** | `tests/monitor_tests.rs` | 4 | WebSocket protocol: connect, subscribe, variable streaming, force/unforce |
 
 ## Test Patterns
 
@@ -132,8 +132,23 @@ fn test_for_loop() {
 
 These tests cover arithmetic operations, comparison, logic, control flow
 (IF/FOR/WHILE/REPEAT/CASE), function calls with return values, FB instance
-calls, safety limits (stack overflow, execution limit), division by zero, and
-scan cycle execution through the Engine.
+calls, safety limits (stack overflow, execution limit), division by zero,
+scan cycle execution through the Engine, and intrinsic functions (trig, math,
+conversions, SYSTEM_TIME).
+
+### Standard Library Tests (st-runtime)
+
+The `tests/stdlib_tests.rs` file tests the standard library function blocks
+end-to-end: counters (CTU, CTD, CTUD) counting on rising edges, timers
+(TON, TOF, TP) with TIME values and SYSTEM_TIME(), edge detection (R_TRIG,
+F_TRIG), and math functions (MAX_INT, MIN_INT, ABS_INT, LIMIT_INT, etc.).
+
+### DAP Tests (st-dap)
+
+DAP integration tests in `tests/dap_integration.rs` test the full debug
+protocol including breakpoints, stepping, continue across scan cycles,
+variable inspection, and PLC-specific extensions: `force x = 42`,
+`unforce x`, `listForced`, and `scanCycleInfo`.
 
 ## Running Individual Test Suites
 
@@ -156,17 +171,17 @@ cargo test -p st-compiler
 # VM tests
 cargo test -p st-runtime
 
+# Standard library tests
+cargo test -p st-runtime --test stdlib_tests
+
 # DAP debugger integration tests
 cargo test -p st-dap
 
 # Monitor server tests
 cargo test -p st-monitor
 
-# Online change tests (unit)
-cargo test -p st-compiler --test online_change_tests
-
-# Online change tests (integration)
-cargo test -p st-runtime --test online_change_integration
+# Online change tests (engine-level)
+cargo test -p st-runtime --test online_change_tests
 ```
 
 ## Code Coverage
@@ -258,5 +273,5 @@ All tests run on every push. The CI pipeline:
 
 1. `cargo fmt --check` -- formatting.
 2. `cargo clippy --workspace` -- lints.
-3. `cargo test --workspace` -- all 455 tests.
+3. `cargo test --workspace` -- all 483 tests.
 4. `cargo llvm-cov --workspace` -- coverage report (optional).

@@ -55,6 +55,17 @@ Design choices:
 - The convenience function `st_syntax::parse(source)` creates a parser,
   parses, and lowers in one call.
 
+## Stage 2.5: Multi-File Compilation
+
+Before semantic analysis, the compiler supports **multi-file compilation**
+via `parse_multi()`. The standard library is embedded at compile time through
+`builtin_stdlib()`, which concatenates all `stdlib/*.st` files into a single
+source string. The parser merges the stdlib AST with the user's AST, and only
+reports errors from the user source (stdlib parse errors are suppressed).
+
+This means all standard library functions (counters, timers, edge detection,
+math) are available in every program without import statements.
+
 ## Stage 3: Semantic Analysis
 
 **Crate:** `st-semantics` (`crates/st-semantics/src/analyze.rs`)
@@ -90,6 +101,22 @@ For each POU, the analyzer:
    **scope chain** (`SymbolTable::resolve()` walks from current scope up to
    global).
 4. Type-checks expressions using the rules in `types.rs`.
+
+### Intrinsic Function Recognition
+
+The semantic analyzer recognizes **compiler intrinsic functions** by name.
+These include:
+
+- **Type conversions** (30+): `INT_TO_REAL`, `REAL_TO_INT`, `BOOL_TO_INT`, etc.
+  The compiler recognizes `*_TO_*` patterns and emits `ToInt`, `ToReal`, or
+  `ToBool` instructions directly.
+- **Trig/math functions** (10): `SQRT`, `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`,
+  `ATAN`, `LN`, `LOG`, `EXP`. Each compiles to a dedicated VM instruction.
+- **SYSTEM_TIME()**: Compiles to the `SystemTime` VM instruction, returning
+  elapsed milliseconds since engine start as a TIME value.
+
+These intrinsics bypass normal function call resolution and are emitted as
+single VM instructions for maximum efficiency.
 
 ### Scope Chain
 
@@ -162,12 +189,14 @@ register reuse or optimization pass; the register file is sized to
 | **Arithmetic** | `Add`, `Sub`, `Mul`, `Div`, `Mod`, `Pow`, `Neg` |
 | **Comparison** | `CmpEq`, `CmpNe`, `CmpLt`, `CmpGt`, `CmpLe`, `CmpGe` |
 | **Logic/bitwise** | `And`, `Or`, `Xor`, `Not` |
+| **Math intrinsics** | `Sqrt`, `Sin`, `Cos`, `Tan`, `Asin`, `Acos`, `Atan`, `Ln`, `Log`, `Exp` |
+| **System** | `SystemTime` |
 | **Conversion** | `ToInt`, `ToReal`, `ToBool` |
 | **Control flow** | `Jump(label)`, `JumpIf(reg, label)`, `JumpIfNot(reg, label)` |
 | **Calls** | `Call { func_index, dst, args }`, `CallFb { instance_slot, func_index, args }`, `Ret(reg)`, `RetVoid` |
 | **Aggregate access** | `LoadArray`, `StoreArray`, `LoadField`, `StoreField` |
 
-Total: **37 instruction variants**.
+Total: **48 instruction variants**.
 
 ### Source Map Generation
 
@@ -210,13 +239,16 @@ potential caching or transport.
   AST (SourceFile)
       |
       v
+  [builtin_stdlib() + parse_multi()]  merge stdlib AST with user AST
+      |
+      v
   [analyze.rs]  pass 1: register names, pass 2: analyze bodies
       |
       v
   SymbolTable + Vec<Diagnostic>
       |
       v
-  [compile.rs]  register POUs, then compile to bytecode
+  [compile.rs]  register POUs, then compile to bytecode (intrinsics emitted inline)
       |
       v
   Module { functions, globals, type_defs }

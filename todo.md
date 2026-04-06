@@ -142,7 +142,46 @@ Ship a working LSP loop early to prove the VSCode integration.
 - [ ] `textDocument/rename` — rename variables/POUs across all files
 - [ ] `textDocument/formatting` — auto-format ST source
 - [ ] `textDocument/codeAction` — quick fixes (e.g., declare undeclared variable)
-- [ ] Multi-file workspace support: resolve cross-file POU references, global variables
+- [ ] **Multi-file workspace support** — design follows the IEC 61131-3 project model:
+  - [ ] **Autodiscovery** (default, zero-config): recursively walk all subdirectories from the workspace root, collect every `.st` and `.scl` file, compile them as one unit. No project file needed for simple projects. The compiler's two-pass design (register all POUs first, then analyze bodies) handles declaration order automatically — files can reference POUs from any other file regardless of filesystem order.
+  - [ ] **Project file** (`plc-project.yaml`, optional): for advanced configuration when autodiscovery isn't enough
+    ```yaml
+    name: MyProject
+    version: 1.0.0
+
+    # Optional: override autodiscovery with explicit file list
+    # If omitted, all .st/.scl files in the project root are auto-discovered
+    # sources:
+    #   - types.st
+    #   - controllers/*.st
+
+    # Entry point PROGRAM name (default: first PROGRAM found)
+    entryPoint: Main
+
+    # Additional library directories to include (walked recursively)
+    libraries:
+      - ./custom_libs/
+      - /shared/plc_libs/
+
+    # Files/directories to exclude from autodiscovery
+    exclude:
+      - test_*.st
+      - deprecated/
+    ```
+  - [ ] **Discovery logic** (priority order):
+    1. If `plc-project.yaml` exists in workspace root → use its configuration
+    2. If `sources` field is set → use explicit file list (supports globs)
+    3. If `sources` is omitted → autodiscover all `.st`/`.scl` files recursively from project root
+    4. Always: prepend stdlib, append library directories
+    5. Always: two-pass compilation resolves cross-file references regardless of file order
+  - [ ] **CLI integration**:
+    - `st-cli run .` — autodiscover from current directory
+    - `st-cli run --project plc-project.yaml` — use explicit project file
+    - `st-cli run file.st` — single file mode (existing behavior, still includes stdlib)
+  - [ ] **LSP workspace-aware analysis**: on any `.st` file change, re-discover all project files, parse with `parse_multi()`, run single semantic analysis pass. Cross-file POU resolution, global variable visibility, and type declarations work automatically.
+  - [ ] **Cross-file go-to-definition**: Ctrl+Click on a POU defined in another file opens that file at the declaration
+  - [ ] **Cross-file diagnostics**: undeclared variable errors check all project files, not just the current file
+  - [ ] **Approach**: reuse existing `parse_multi()` infrastructure — IEC 61131-3 uses a flat global scope for all POUs (no module/import system). All files are compiled as one unit, same as CODESYS and RuSTy.
 
 ---
 
@@ -193,7 +232,7 @@ Ship a working LSP loop early to prove the VSCode integration.
   - [x] Conversions: BOOL_TO_INT, INT_TO_BOOL
   - [x] Multi-file compilation, FB instance persistence, FB field access
   - [x] 16 integration tests + 2 playground examples (07_stdlib_demo, 08_custom_module)
-- [ ] Debug hooks (breakpoints, stepping) — Phase 8
+- [x] Debug hooks (breakpoints, stepping) — completed in Phase 8
 
 ---
 

@@ -234,11 +234,31 @@ The editor highlights the current line (typically the first executable statement
 
 | Button | Keyboard | Action |
 |--------|----------|--------|
-| ▶ Continue | `F5` | Run until next breakpoint or end |
+| ▶ Continue | `F5` | Run until next breakpoint (across scan cycles, up to 100,000) |
 | ⏭ Step Over | `F10` | Execute one statement, skip into function calls |
 | ⏬ Step Into | `F11` | Execute one statement, enter function calls |
 | ⏫ Step Out | `Shift+F11` | Run until current function returns |
 | ⏹ Stop | `Shift+F5` | End debug session |
+
+### PLC-Specific Debug Toolbar Buttons
+
+The VSCode extension adds 4 PLC-specific buttons to the debug toolbar:
+
+| Button | Action |
+|--------|--------|
+| **Force** | Force a variable to a specific value (overrides program logic) |
+| **Unforce** | Remove the force override from a variable |
+| **List Forced** | Show all currently forced variables and their values |
+| **Cycle Info** | Display scan cycle statistics (count, timing) |
+
+You can also use these via the **Debug Console** by typing evaluate expressions:
+
+```
+force counter = 42
+unforce counter
+listForced
+scanCycleInfo
+```
 
 ### Inspect Variables
 
@@ -416,10 +436,14 @@ This enables an iterative development workflow where you can edit program logic 
 | Step out | Shift+F11 |
 | Continue | F5 |
 | Stop debugging | Shift+F5 |
+| Force variable | Debug toolbar button or `force x = 42` in Debug Console |
+| Unforce variable | Debug toolbar button or `unforce x` in Debug Console |
+| List forced variables | Debug toolbar button or `listForced` in Debug Console |
+| Scan cycle info | Debug toolbar button or `scanCycleInfo` in Debug Console |
 | Hover for type | Ctrl+hover on identifier |
 | Go to definition | Ctrl+click on identifier |
 | Code completion | Start typing or Ctrl+Space |
 | Document outline | View → Outline |
 | Problems panel | View → Problems |
 | Open PLC Monitor | Ctrl+Shift+P → "ST: Open PLC Monitor" |
-| Force variable | Right-click variable in Monitor panel |
+| Force variable (Monitor) | Right-click variable in Monitor panel |

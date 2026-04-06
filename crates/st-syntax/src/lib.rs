@@ -6,6 +6,7 @@
 pub mod ast;
 pub mod lower;
 pub mod multi_file;
+pub mod project;
 
 /// Convenience: parse source text and lower to AST in one step.
 pub fn parse(source: &str) -> lower::LowerResult {

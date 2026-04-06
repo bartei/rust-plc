@@ -1,6 +1,6 @@
 # Standard Library
 
-The IEC 61131-3 standard library provides a set of reusable function blocks and functions commonly needed in PLC programming. The library is implemented as plain Structured Text source files in the `stdlib/` directory and is automatically loaded by the compiler -- all standard library functions and function blocks are available in every program without any import statements.
+The IEC 61131-3 standard library provides a set of reusable function blocks and functions commonly needed in PLC programming. The library is implemented as plain Structured Text source files in the `stdlib/` directory and is automatically loaded by the compiler via `builtin_stdlib()` -- all standard library functions and function blocks are available in every program without any import statements.
 
 The library includes:
 
@@ -10,7 +10,9 @@ The library includes:
 | [Edge Detection](#edge-detection) | `stdlib/edge_detection.st` | R_TRIG, F_TRIG |
 | [Timers](#timers) | `stdlib/timers.st` | TON, TOF, TP |
 | [Math & Selection](#math--selection) | `stdlib/math.st` | MAX, MIN, LIMIT, ABS, SEL |
-| [Conversions](#type-conversions) | `stdlib/conversions.st` | BOOL_TO_INT, INT_TO_BOOL |
+| [Type Conversions](#type-conversions) | Compiler intrinsics | 30+ *_TO_* functions (INT_TO_REAL, REAL_TO_INT, etc.) |
+| [Trig & Math Intrinsics](#trigonometric--math-intrinsics) | Compiler intrinsics | SQRT, SIN, COS, TAN, ASIN, ACOS, ATAN, LN, LOG, EXP |
+| [System Time](#system-time) | Compiler intrinsic | SYSTEM_TIME() |
 
 ---
 
@@ -197,11 +199,7 @@ END_PROGRAM
 
 Source: `stdlib/timers.st`
 
-Timers count **scan cycles**, not wall-clock time. The preset value `PT` is the number of cycles to delay. To convert from real time, divide the desired duration by your scan cycle time:
-
-```
-PT := desired_ms / cycle_time_ms
-```
+Timers use **real-time TIME values** and the `SYSTEM_TIME()` intrinsic to measure wall-clock elapsed time. The preset value `PT` is a `TIME` type specified using TIME literals (e.g., `T#5s`, `T#100ms`, `T#1m30s`). This makes timers independent of scan cycle speed.
 
 > **Note:** The timer input is named `IN1` (not `IN`) to avoid a keyword conflict in Structured Text.
 
@@ -212,46 +210,46 @@ All three timer blocks share the same input/output signature:
 | Name | Type | Description |
 |------|------|-------------|
 | `IN1` | BOOL | Timer input |
-| `PT` | INT | Preset time in scan cycles |
+| `PT` | TIME | Preset time (e.g., `T#5s`, `T#500ms`) |
 
 **Outputs**
 
 | Name | Type | Description |
 |------|------|-------------|
 | `Q` | BOOL | Timer output |
-| `ET` | INT | Elapsed time in scan cycles |
+| `ET` | TIME | Elapsed time |
 
 ### TON -- On-Delay Timer
 
-`Q` goes TRUE after `IN1` has been TRUE for `PT` consecutive scan cycles. When `IN1` goes FALSE, both `Q` and `ET` reset immediately.
+`Q` goes TRUE after `IN1` has been TRUE for at least the duration `PT`. When `IN1` goes FALSE, both `Q` and `ET` reset immediately. Internally, the timer records the start time via `SYSTEM_TIME()` when `IN1` first goes TRUE, and computes `ET` as the difference on each scan.
 
 ```
 IN1:  _____|‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾|_____
-ET:   00000 1 2 3 4 5 5 5 5 5 00000
+ET:   T#0s  ... increasing ... T#0s
 Q:    _____|          ‾‾‾‾‾‾‾|_____
-              ^-- PT=5 reached
+              ^-- ET >= PT reached
 ```
 
 ### TOF -- Off-Delay Timer
 
-`Q` goes TRUE immediately when `IN1` goes TRUE. When `IN1` goes FALSE, `Q` stays TRUE for `PT` additional scan cycles before turning FALSE.
+`Q` goes TRUE immediately when `IN1` goes TRUE. When `IN1` goes FALSE, `Q` stays TRUE for the duration `PT` before turning FALSE.
 
 ```
 IN1:  _____|‾‾‾‾‾|________________________
 Q:    _____|‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾|___________
-ET:   00000 00000 1 2 3 4 5 5 5 00000
-                          ^-- PT=5, Q goes FALSE
+ET:   T#0s  T#0s  ... increasing ... T#0s
+                          ^-- ET >= PT, Q goes FALSE
 ```
 
 ### TP -- Pulse Timer
 
-On a rising edge of `IN1`, `Q` goes TRUE for exactly `PT` scan cycles, regardless of what `IN1` does during the pulse. A new pulse cannot be triggered while the current one is active.
+On a rising edge of `IN1`, `Q` goes TRUE for exactly the duration `PT`, regardless of what `IN1` does during the pulse. A new pulse cannot be triggered while the current one is active.
 
 ```
 IN1:  _____|‾‾‾‾‾‾‾‾‾‾‾‾‾|________
 Q:    _____|‾‾‾‾‾‾‾‾‾|____________
-ET:   00000 1 2 3 4 5 000000000000
-                  ^-- PT=5, pulse ends
+ET:   T#0s  ... increasing ... T#0s
+                  ^-- ET >= PT, pulse ends
 ```
 
 **Example**
@@ -263,8 +261,8 @@ VAR
     raw_input : BOOL;
     clean_input : BOOL;
 END_VAR
-    // Debounce: require input to be stable for 5 cycles
-    debounce(IN1 := raw_input, PT := 5);
+    // Debounce: require input to be stable for 5 seconds
+    debounce(IN1 := raw_input, PT := T#5s);
     clean_input := debounce.Q;
 END_PROGRAM
 ```
@@ -327,14 +325,60 @@ END_PROGRAM
 
 ## Type Conversions
 
-Source: `stdlib/conversions.st`
+Type conversion functions are implemented as **compiler intrinsics**. The compiler recognizes `*_TO_*` function name patterns and emits `ToInt`, `ToReal`, or `ToBool` VM instructions directly, rather than calling a user-defined function. The file `stdlib/conversions.st` serves as documentation for the available conversions.
 
-Explicit type conversion functions. The VM handles implicit widening coercions automatically; these functions are for explicit conversion and narrowing cases.
+### To REAL / LREAL
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `BOOL_TO_INT` | `BOOL_TO_INT(IN1: BOOL) : INT` | Returns 1 if TRUE, 0 if FALSE |
-| `INT_TO_BOOL` | `INT_TO_BOOL(IN1: INT) : BOOL` | Returns TRUE if nonzero, FALSE if 0 |
+| Function | Description |
+|----------|-------------|
+| `INT_TO_REAL` | Integer to REAL |
+| `SINT_TO_REAL` | Short integer to REAL |
+| `DINT_TO_REAL` | Double integer to REAL |
+| `LINT_TO_REAL` | Long integer to REAL |
+| `UINT_TO_REAL` | Unsigned integer to REAL |
+| `USINT_TO_REAL` | Unsigned short integer to REAL |
+| `UDINT_TO_REAL` | Unsigned double integer to REAL |
+| `ULINT_TO_REAL` | Unsigned long integer to REAL |
+| `BOOL_TO_REAL` | Boolean to REAL (FALSE=0.0, TRUE=1.0) |
+| `INT_TO_LREAL` | Integer to LREAL |
+| `SINT_TO_LREAL` | Short integer to LREAL |
+| `DINT_TO_LREAL` | Double integer to LREAL |
+| `LINT_TO_LREAL` | Long integer to LREAL |
+| `REAL_TO_LREAL` | REAL to LREAL |
+
+### To INT / DINT / LINT / SINT
+
+| Function | Description |
+|----------|-------------|
+| `REAL_TO_INT` | REAL to integer (truncates) |
+| `LREAL_TO_INT` | LREAL to integer (truncates) |
+| `REAL_TO_DINT` | REAL to double integer |
+| `LREAL_TO_DINT` | LREAL to double integer |
+| `REAL_TO_LINT` | REAL to long integer |
+| `LREAL_TO_LINT` | LREAL to long integer |
+| `REAL_TO_SINT` | REAL to short integer |
+| `LREAL_TO_SINT` | LREAL to short integer |
+| `BOOL_TO_INT` | Boolean to integer (FALSE=0, TRUE=1) |
+| `BOOL_TO_DINT` | Boolean to double integer |
+| `BOOL_TO_LINT` | Boolean to long integer |
+| `UINT_TO_INT` | Unsigned integer to signed integer |
+| `UDINT_TO_DINT` | Unsigned double integer to signed |
+| `ULINT_TO_LINT` | Unsigned long integer to signed |
+| `INT_TO_DINT` | Integer to double integer |
+| `INT_TO_LINT` | Integer to long integer |
+| `DINT_TO_LINT` | Double integer to long integer |
+| `SINT_TO_INT` | Short integer to integer |
+| `SINT_TO_DINT` | Short integer to double integer |
+| `SINT_TO_LINT` | Short integer to long integer |
+
+### To BOOL
+
+| Function | Description |
+|----------|-------------|
+| `INT_TO_BOOL` | Integer to boolean (0=FALSE, nonzero=TRUE) |
+| `REAL_TO_BOOL` | REAL to boolean |
+| `DINT_TO_BOOL` | Double integer to boolean |
+| `LINT_TO_BOOL` | Long integer to boolean |
 
 **Example**
 
@@ -343,14 +387,72 @@ PROGRAM ConversionExample
 VAR
     flag : BOOL := TRUE;
     flag_as_int : INT;
-    value : INT := 42;
+    my_real : REAL;
+    my_int : INT := 42;
     value_as_bool : BOOL;
 END_VAR
     flag_as_int := BOOL_TO_INT(IN1 := flag);
     // flag_as_int = 1
 
-    value_as_bool := INT_TO_BOOL(IN1 := value);
+    my_real := INT_TO_REAL(IN1 := my_int);
+    // my_real = 42.0
+
+    value_as_bool := INT_TO_BOOL(IN1 := my_int);
     // value_as_bool = TRUE
+END_PROGRAM
+```
+
+---
+
+## Trigonometric & Math Intrinsics
+
+These functions are **VM intrinsic instructions** -- the compiler recognizes the function name and emits a dedicated bytecode instruction. They operate on REAL values.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `SQRT` | `SQRT(IN1: REAL) : REAL` | Square root |
+| `SIN` | `SIN(IN1: REAL) : REAL` | Sine (radians) |
+| `COS` | `COS(IN1: REAL) : REAL` | Cosine (radians) |
+| `TAN` | `TAN(IN1: REAL) : REAL` | Tangent (radians) |
+| `ASIN` | `ASIN(IN1: REAL) : REAL` | Arc sine |
+| `ACOS` | `ACOS(IN1: REAL) : REAL` | Arc cosine |
+| `ATAN` | `ATAN(IN1: REAL) : REAL` | Arc tangent |
+| `LN` | `LN(IN1: REAL) : REAL` | Natural logarithm |
+| `LOG` | `LOG(IN1: REAL) : REAL` | Base-10 logarithm |
+| `EXP` | `EXP(IN1: REAL) : REAL` | Exponential (e^x) |
+
+**Example**
+
+```st
+PROGRAM TrigExample
+VAR
+    angle : REAL := 1.5708;   // approx pi/2
+    result : REAL;
+    root : REAL;
+END_VAR
+    result := SIN(IN1 := angle);
+    // result ~ 1.0
+
+    root := SQRT(IN1 := 144.0);
+    // root = 12.0
+END_PROGRAM
+```
+
+---
+
+## System Time
+
+`SYSTEM_TIME()` is a compiler intrinsic that returns the elapsed time in milliseconds since the engine started, as a `TIME` value. It is used internally by the standard library timers (TON, TOF, TP) and can also be called directly from user programs.
+
+**Example**
+
+```st
+PROGRAM TimestampExample
+VAR
+    now : TIME;
+END_VAR
+    now := SYSTEM_TIME();
+    // now contains the elapsed time since engine start
 END_PROGRAM
 ```
 
