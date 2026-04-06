@@ -137,11 +137,11 @@ Ship a working LSP loop early to prove the VSCode integration.
 - [x] **`textDocument/documentSymbol`** — outline view with nested POUs, variables, types
 - [x] **LSP integration tests** (13 tests): initialize, diagnostics, hover, go-to-def, semantic tokens, completion (variables, dot-struct, function snippets), document symbols, multi-document, close/clear
 - [x] **VSCode extension e2e test scaffolding** (`@vscode/test-electron`): language registration, .st recognition, diagnostics verification
-- [ ] `textDocument/signatureHelp` — parameter hints for function/FB calls
-- [ ] `textDocument/references` — find all usages of a variable/POU
-- [ ] `textDocument/rename` — rename variables/POUs across all files
-- [ ] `textDocument/formatting` — auto-format ST source
-- [ ] `textDocument/codeAction` — quick fixes (e.g., declare undeclared variable)
+- [x] `textDocument/signatureHelp` — parameter hints for function/FB calls (trigger on `(` and `,`)
+- [x] `textDocument/references` — find all usages of a variable/POU (case-insensitive, whole-word)
+- [x] `textDocument/rename` — rename variables/POUs across the file
+- [x] `textDocument/formatting` — auto-format ST source (indent normalization)
+- [x] `textDocument/codeAction` — quick fix: declare undeclared variable as INT
 - [x] **Multi-file workspace support** (`project.rs`):
   - [x] **Autodiscovery** (default, zero-config): recursively walks directories for `.st`/`.scl` files, skips `.hidden/`, `target/`, `node_modules/`
   - [x] **Project file** (`plc-project.yaml`, optional): name, entryPoint, sources (globs), libraries, exclude patterns

@@ -749,3 +749,248 @@ fn test_document_symbols() {
 
     client.shutdown();
 }
+
+// =============================================================================
+// Signature Help
+// =============================================================================
+
+#[test]
+fn test_signature_help() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("sighelp.st");
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": "FUNCTION Add : INT\nVAR_INPUT\n    a : INT;\n    b : INT;\nEND_VAR\n    Add := a + b;\nEND_FUNCTION\n\nPROGRAM Main\nVAR\n    result : INT := 0;\nEND_VAR\n    result := Add(a := 1, b := 2);\nEND_PROGRAM\n"
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    // Request signature help inside Add( call — position on 'Add'
+    let resp = client.request(
+        "textDocument/signatureHelp",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 12, "character": 17 }
+        }),
+    );
+
+    let result = &resp["result"];
+    if !result.is_null() {
+        let sigs = result["signatures"].as_array().unwrap();
+        assert!(!sigs.is_empty(), "Expected at least one signature");
+        let sig_label = sigs[0]["label"].as_str().unwrap_or("");
+        assert!(sig_label.contains("a:") || sig_label.contains("a :"), "Signature should contain param 'a': {sig_label}");
+    }
+
+    client.shutdown();
+}
+
+// =============================================================================
+// References
+// =============================================================================
+
+#[test]
+fn test_references() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("refs.st");
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": "PROGRAM Main\nVAR\n    counter : INT := 0;\nEND_VAR\n    counter := counter + 1;\n    counter := counter * 2;\nEND_PROGRAM\n"
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    let resp = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 4, "character": 6 },
+            "context": { "includeDeclaration": true }
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(result.is_array(), "Expected array of locations");
+    let refs = result.as_array().unwrap();
+    // 'counter' appears: declaration (line 2) + 4 usages (lines 4,4,5,5) = 5+
+    assert!(refs.len() >= 3, "Expected at least 3 references to 'counter', got {}", refs.len());
+
+    client.shutdown();
+}
+
+// =============================================================================
+// Rename
+// =============================================================================
+
+#[test]
+fn test_rename() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("rename.st");
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": "PROGRAM Main\nVAR\n    myVar : INT := 0;\nEND_VAR\n    myVar := myVar + 1;\nEND_PROGRAM\n"
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    let resp = client.request(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 4, "character": 6 },
+            "newName": "renamedVar"
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(!result.is_null(), "Expected workspace edit");
+    let changes = &result["changes"];
+    let edits = changes[uri.as_str()].as_array().unwrap();
+    assert!(edits.len() >= 2, "Expected at least 2 edits (decl + usages), got {}", edits.len());
+
+    // All edits should replace with "renamedVar"
+    for edit in edits {
+        assert_eq!(edit["newText"].as_str(), Some("renamedVar"));
+    }
+
+    client.shutdown();
+}
+
+// =============================================================================
+// Formatting
+// =============================================================================
+
+#[test]
+fn test_formatting() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("format.st");
+    // Poorly indented code
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": "PROGRAM Main\nVAR\nx : INT := 0;\nEND_VAR\nx := 1;\nIF x > 0 THEN\nx := 2;\nEND_IF;\nEND_PROGRAM\n"
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    let resp = client.request(
+        "textDocument/formatting",
+        json!({
+            "textDocument": { "uri": uri },
+            "options": { "tabSize": 4, "insertSpaces": true }
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(result.is_array(), "Expected formatting edits");
+    let edits = result.as_array().unwrap();
+    assert!(!edits.is_empty(), "Expected at least one formatting edit");
+
+    // The formatted text should have proper indentation
+    let new_text = edits[0]["newText"].as_str().unwrap();
+    assert!(new_text.contains("    x : INT"), "Expected indented variable: {new_text}");
+
+    client.shutdown();
+}
+
+// =============================================================================
+// Code Action (quick fix)
+// =============================================================================
+
+#[test]
+fn test_code_action_declare_variable() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("codeaction.st");
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    x := undeclared_var;\nEND_PROGRAM\n"
+            }
+        }),
+    );
+    let notif = client.wait_for_notification("textDocument/publishDiagnostics");
+    let diags = notif["params"]["diagnostics"].as_array().unwrap();
+
+    // Find the undeclared variable diagnostic
+    let undeclared_diag = diags.iter().find(|d| {
+        d["message"].as_str().unwrap_or("").contains("undeclared")
+    });
+
+    if let Some(diag) = undeclared_diag {
+        let resp = client.request(
+            "textDocument/codeAction",
+            json!({
+                "textDocument": { "uri": uri },
+                "range": diag["range"],
+                "context": { "diagnostics": [diag] }
+            }),
+        );
+
+        let result = &resp["result"];
+        if !result.is_null() && result.is_array() {
+            let actions = result.as_array().unwrap();
+            assert!(!actions.is_empty(), "Expected at least one code action");
+            let action = &actions[0];
+            assert!(action["title"].as_str().unwrap_or("").contains("Declare"), "Expected declare action");
+        }
+    }
+
+    client.shutdown();
+}

@@ -170,6 +170,15 @@ impl LanguageServer for Backend {
                     ..Default::default()
                 }),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Left(true)),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+                    retrigger_characters: None,
+                    work_done_progress_options: Default::default(),
+                }),
+                document_formatting_provider: Some(OneOf::Left(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
@@ -455,6 +464,340 @@ impl LanguageServer for Backend {
 
         Ok(Some(DocumentSymbolResponse::Nested(symbols)))
     }
+
+    // ── Signature Help ──────────────────────────────────────────────
+    async fn signature_help(
+        &self,
+        params: SignatureHelpParams,
+    ) -> Result<Option<SignatureHelp>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let docs = self.documents.read().await;
+        let Some(doc) = docs.get(uri) else { return Ok(None) };
+
+        let offset = doc.position_to_offset(pos);
+        if let Some((word, scope_id)) = self.resolve_at_position(doc, offset) {
+            if let Some((_sid, sym)) = doc.analysis.symbols.resolve(scope_id, &word) {
+                match &sym.kind {
+                    st_semantics::scope::SymbolKind::Function { return_type, params } => {
+                        let param_infos: Vec<ParameterInformation> = params.iter().map(|p| {
+                            ParameterInformation {
+                                label: ParameterLabel::Simple(format!("{}: {}", p.name, p.ty.display_name())),
+                                documentation: None,
+                            }
+                        }).collect();
+                        let sig = SignatureInformation {
+                            label: format!("{}({}) : {}",
+                                sym.name,
+                                params.iter().map(|p| format!("{}: {}", p.name, p.ty.display_name())).collect::<Vec<_>>().join(", "),
+                                return_type.display_name()
+                            ),
+                            documentation: None,
+                            parameters: Some(param_infos),
+                            active_parameter: None,
+                        };
+                        return Ok(Some(SignatureHelp {
+                            signatures: vec![sig],
+                            active_signature: Some(0),
+                            active_parameter: None,
+                        }));
+                    }
+                    st_semantics::scope::SymbolKind::FunctionBlock { params, outputs } => {
+                        let all_params: Vec<_> = params.iter().chain(outputs.iter()).collect();
+                        let param_infos: Vec<ParameterInformation> = all_params.iter().map(|p| {
+                            ParameterInformation {
+                                label: ParameterLabel::Simple(format!("{}: {}", p.name, p.ty.display_name())),
+                                documentation: None,
+                            }
+                        }).collect();
+                        let sig = SignatureInformation {
+                            label: format!("{}({})",
+                                sym.name,
+                                all_params.iter().map(|p| format!("{}: {}", p.name, p.ty.display_name())).collect::<Vec<_>>().join(", "),
+                            ),
+                            documentation: None,
+                            parameters: Some(param_infos),
+                            active_parameter: None,
+                        };
+                        return Ok(Some(SignatureHelp {
+                            signatures: vec![sig],
+                            active_signature: Some(0),
+                            active_parameter: None,
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    // ── References ──────────────────────────────────────────────────
+    async fn references(
+        &self,
+        params: ReferenceParams,
+    ) -> Result<Option<Vec<Location>>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let docs = self.documents.read().await;
+        let Some(doc) = docs.get(uri) else { return Ok(None) };
+
+        let offset = doc.position_to_offset(pos);
+        let word = self.get_word_at(doc, offset);
+        if word.is_empty() {
+            return Ok(None);
+        }
+
+        // Find all occurrences of the word in the source
+        let mut locations = Vec::new();
+        let bytes = doc.source.as_bytes();
+        let word_upper = word.to_uppercase();
+        let mut search_pos = 0;
+
+        while search_pos < bytes.len() {
+            if let Some(idx) = doc.source[search_pos..].to_uppercase().find(&word_upper) {
+                let abs_pos = search_pos + idx;
+                // Check it's a whole word (not part of a larger identifier)
+                let before_ok = abs_pos == 0 || !bytes[abs_pos - 1].is_ascii_alphanumeric() && bytes[abs_pos - 1] != b'_';
+                let after_pos = abs_pos + word.len();
+                let after_ok = after_pos >= bytes.len() || !bytes[after_pos].is_ascii_alphanumeric() && bytes[after_pos] != b'_';
+
+                if before_ok && after_ok {
+                    let start = doc.offset_to_position(abs_pos);
+                    let end = doc.offset_to_position(after_pos);
+                    locations.push(Location {
+                        uri: uri.clone(),
+                        range: Range::new(start, end),
+                    });
+                }
+                search_pos = abs_pos + word.len();
+            } else {
+                break;
+            }
+        }
+
+        if locations.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(locations))
+        }
+    }
+
+    // ── Rename ──────────────────────────────────────────────────────
+    async fn rename(
+        &self,
+        params: RenameParams,
+    ) -> Result<Option<WorkspaceEdit>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let new_name = &params.new_name;
+        let docs = self.documents.read().await;
+        let Some(doc) = docs.get(uri) else { return Ok(None) };
+
+        let offset = doc.position_to_offset(pos);
+        let word = self.get_word_at(doc, offset);
+        if word.is_empty() {
+            return Ok(None);
+        }
+
+        // Find all occurrences and create text edits
+        let mut edits = Vec::new();
+        let bytes = doc.source.as_bytes();
+        let word_upper = word.to_uppercase();
+        let mut search_pos = 0;
+
+        while search_pos < bytes.len() {
+            if let Some(idx) = doc.source[search_pos..].to_uppercase().find(&word_upper) {
+                let abs_pos = search_pos + idx;
+                let before_ok = abs_pos == 0 || !bytes[abs_pos - 1].is_ascii_alphanumeric() && bytes[abs_pos - 1] != b'_';
+                let after_pos = abs_pos + word.len();
+                let after_ok = after_pos >= bytes.len() || !bytes[after_pos].is_ascii_alphanumeric() && bytes[after_pos] != b'_';
+
+                if before_ok && after_ok {
+                    let start = doc.offset_to_position(abs_pos);
+                    let end = doc.offset_to_position(after_pos);
+                    edits.push(TextEdit {
+                        range: Range::new(start, end),
+                        new_text: new_name.clone(),
+                    });
+                }
+                search_pos = abs_pos + word.len();
+            } else {
+                break;
+            }
+        }
+
+        if edits.is_empty() {
+            return Ok(None);
+        }
+
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(uri.clone(), edits);
+
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }))
+    }
+
+    // ── Formatting ──────────────────────────────────────────────────
+    async fn formatting(
+        &self,
+        params: DocumentFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        let uri = &params.text_document.uri;
+        let docs = self.documents.read().await;
+        let Some(doc) = docs.get(uri) else { return Ok(None) };
+
+        let formatted = format_st_source(&doc.source, params.options.tab_size as usize);
+        if formatted == doc.source {
+            return Ok(None);
+        }
+
+        // Replace the entire document
+        let last_line = doc.source.lines().count().saturating_sub(1) as u32;
+        let last_col = doc.source.lines().last().map(|l| l.len()).unwrap_or(0) as u32;
+
+        Ok(Some(vec![TextEdit {
+            range: Range::new(Position::new(0, 0), Position::new(last_line, last_col)),
+            new_text: formatted,
+        }]))
+    }
+
+    // ── Code Actions ────────────────────────────────────────────────
+    async fn code_action(
+        &self,
+        params: CodeActionParams,
+    ) -> Result<Option<CodeActionResponse>> {
+        let uri = &params.text_document.uri;
+        let docs = self.documents.read().await;
+        let Some(doc) = docs.get(uri) else { return Ok(None) };
+
+        let mut actions = Vec::new();
+
+        for diag in &params.context.diagnostics {
+            // Quick fix: declare undeclared variable
+            if diag.message.contains("undeclared variable") {
+                if let Some(var_name) = diag.message.strip_prefix("undeclared variable '") {
+                    let var_name = var_name.trim_end_matches('\'');
+                    // Find the VAR block to insert into
+                    if let Some(insert_pos) = find_var_block_insert_position(&doc.source) {
+                        let indent = "    ";
+                        let new_text = format!("{indent}{var_name} : INT := 0;\n");
+                        let pos = doc.offset_to_position(insert_pos);
+
+                        let mut changes = std::collections::HashMap::new();
+                        changes.insert(uri.clone(), vec![TextEdit {
+                            range: Range::new(pos, pos),
+                            new_text,
+                        }]);
+
+                        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                            title: format!("Declare '{var_name}' as INT"),
+                            kind: Some(CodeActionKind::QUICKFIX),
+                            diagnostics: Some(vec![diag.clone()]),
+                            edit: Some(WorkspaceEdit {
+                                changes: Some(changes),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }));
+                    }
+                }
+            }
+        }
+
+        if actions.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(actions))
+        }
+    }
+}
+
+impl Backend {
+    /// Get the word at the given byte offset.
+    fn get_word_at(&self, doc: &Document, offset: usize) -> String {
+        let bytes = doc.source.as_bytes();
+        if offset >= bytes.len() {
+            return String::new();
+        }
+        let mut start = offset;
+        while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+            start -= 1;
+        }
+        let mut end = offset;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+        if start == end { return String::new(); }
+        std::str::from_utf8(&bytes[start..end]).unwrap_or("").to_string()
+    }
+}
+
+/// Simple ST formatter: normalizes indentation.
+fn format_st_source(source: &str, tab_size: usize) -> String {
+    let indent_str = " ".repeat(tab_size);
+    let mut result = String::new();
+    let mut indent_level: i32 = 0;
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            result.push('\n');
+            continue;
+        }
+
+        let upper = trimmed.to_uppercase();
+
+        // Decrease indent for closing keywords
+        if upper.starts_with("END_")
+            || upper.starts_with("END_VAR")
+            || upper == "ELSE"
+            || upper.starts_with("ELSIF")
+            || upper.starts_with("UNTIL")
+        {
+            indent_level = (indent_level - 1).max(0);
+        }
+
+        // Write indented line
+        for _ in 0..indent_level {
+            result.push_str(&indent_str);
+        }
+        result.push_str(trimmed);
+        result.push('\n');
+
+        // Increase indent for opening keywords
+        if upper.starts_with("PROGRAM ")
+            || upper.starts_with("FUNCTION ")
+            || upper.starts_with("FUNCTION_BLOCK ")
+            || upper.starts_with("VAR")
+            || upper.starts_with("IF ") || upper == "ELSE"
+            || upper.starts_with("ELSIF ")
+            || upper.starts_with("FOR ")
+            || upper.starts_with("WHILE ")
+            || upper.starts_with("REPEAT")
+            || upper.starts_with("CASE ")
+            || upper.starts_with("STRUCT")
+            || upper.starts_with("TYPE")
+        {
+            indent_level += 1;
+        }
+    }
+
+    result
+}
+
+/// Find the byte offset where a new variable declaration can be inserted
+/// (right after the last variable in the first VAR block).
+fn find_var_block_insert_position(source: &str) -> Option<usize> {
+    let upper = source.to_uppercase();
+    // Find first END_VAR
+    let end_var_pos = upper.find("END_VAR")?;
+    // Insert just before END_VAR
+    // Find the start of the END_VAR line
+    let line_start = source[..end_var_pos].rfind('\n').map(|p| p + 1).unwrap_or(0);
+    Some(line_start)
 }
 
 #[allow(deprecated)]
