@@ -29,8 +29,13 @@ fn print_usage() {
     eprintln!("  serve             Start the LSP server (stdio)");
     eprintln!("  check [path]      Parse and analyze, report diagnostics");
     eprintln!("  run [path] [-n N] Compile and execute (N cycles, default 1)");
+    eprintln!("  compile <path> -o <output>  Compile to bytecode file");
+    eprintln!("  fmt [path]        Format source file(s) in place");
     eprintln!("  debug <file>      Start DAP debug server (stdin/stdout)");
     eprintln!("  help              Show this help message");
+    eprintln!();
+    eprintln!("Flags:");
+    eprintln!("  --json            Output diagnostics as JSON (for CI integration)");
     eprintln!();
     eprintln!("Path modes:");
     eprintln!("  (no path)         Use current directory as project root");
@@ -67,6 +72,12 @@ fn main() {
         "run" => {
             run_program_cmd(&args);
         }
+        "compile" => {
+            run_compile_cmd(&args);
+        }
+        "fmt" => {
+            run_fmt_cmd(&args);
+        }
         "debug" => {
             if args.len() < 3 {
                 eprintln!("Usage: st-cli debug <file>");
@@ -87,7 +98,8 @@ fn main() {
 }
 
 fn run_check(path: Option<&str>, args: &[String]) {
-    let target = path.map(Path::new);
+    let json_output = args.iter().any(|a| a == "--json");
+    let target = path.filter(|p| *p != "--json").map(Path::new);
 
     // Determine if single file or project
     let is_single_file = target
@@ -113,18 +125,8 @@ fn run_check(path: Option<&str>, args: &[String]) {
             ));
         }
 
-        let mut has_errors = false;
-        for d in &result.diagnostics {
-            let severity = match d.severity {
-                st_semantics::diagnostic::Severity::Error => { has_errors = true; "error" }
-                st_semantics::diagnostic::Severity::Warning => "warning",
-                st_semantics::diagnostic::Severity::Info => "info",
-            };
-            let (line, col) = byte_offset_to_line_col(&source, d.range.start);
-            eprintln!("{}:{}:{}: {}: {}", path.display(), line, col, severity, d.message);
-        }
-
-        if result.diagnostics.is_empty() {
+        let has_errors = print_diagnostics(&result.diagnostics, &source, &path.display().to_string(), json_output);
+        if !json_output && result.diagnostics.is_empty() {
             eprintln!("{}: OK", path.display());
         }
         if has_errors { process::exit(1); }
@@ -152,15 +154,9 @@ fn run_check(path: Option<&str>, args: &[String]) {
         };
 
         let result = st_semantics::analyze::analyze(&parse_result.source_file);
-        let mut has_errors = false;
-        for d in &result.diagnostics {
-            if d.severity == st_semantics::diagnostic::Severity::Error {
-                has_errors = true;
-                eprintln!("error: {}", d.message);
-            }
-        }
+        let has_errors = print_diagnostics(&result.diagnostics, "", &project.name, json_output);
 
-        if !has_errors {
+        if !json_output && !has_errors {
             eprintln!("Project '{}': OK", project.name);
         }
         if has_errors { process::exit(1); }
@@ -307,6 +303,219 @@ fn run_program_cmd(args: &[String]) {
             process::exit(1);
         }
     }
+}
+
+fn run_compile_cmd(args: &[String]) {
+    // Parse args: compile <path> -o <output>
+    let mut source_path: Option<&str> = None;
+    let mut output_path: Option<&str> = None;
+    let mut i = 2;
+    while i < args.len() {
+        if args[i] == "-o" && i + 1 < args.len() {
+            output_path = Some(&args[i + 1]);
+            i += 2;
+        } else if source_path.is_none() {
+            source_path = Some(&args[i]);
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+
+    let source_path = source_path.unwrap_or_else(|| {
+        eprintln!("Usage: st-cli compile <file> -o <output>");
+        process::exit(1);
+    });
+    let output_path = output_path.unwrap_or_else(|| {
+        eprintln!("Usage: st-cli compile <file> -o <output>");
+        process::exit(1);
+    });
+
+    let source = match std::fs::read_to_string(source_path) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("Error reading '{source_path}': {e}"); process::exit(1); }
+    };
+
+    let parse_result = parse_with_stdlib(&source);
+    if !parse_result.errors.is_empty() {
+        for err in &parse_result.errors {
+            let (line, col) = byte_offset_to_line_col(&source, err.range.start);
+            eprintln!("{source_path}:{line}:{col}: error: {}", err.message);
+        }
+        process::exit(1);
+    }
+
+    let analysis = st_semantics::analyze::analyze(&parse_result.source_file);
+    let has_errors = analysis.diagnostics.iter().any(|d| d.severity == st_semantics::diagnostic::Severity::Error);
+    if has_errors {
+        for d in &analysis.diagnostics {
+            if d.severity == st_semantics::diagnostic::Severity::Error {
+                let (line, col) = byte_offset_to_line_col(&source, d.range.start);
+                eprintln!("{source_path}:{line}:{col}: error: {}", d.message);
+            }
+        }
+        process::exit(1);
+    }
+
+    let module = match st_compiler::compile(&parse_result.source_file) {
+        Ok(m) => m,
+        Err(e) => { eprintln!("Compilation error: {e}"); process::exit(1); }
+    };
+
+    // Serialize module to JSON
+    let json = serde_json::to_string_pretty(&module).unwrap_or_else(|e| {
+        eprintln!("Serialization error: {e}"); process::exit(1);
+    });
+
+    match std::fs::write(output_path, &json) {
+        Ok(()) => eprintln!("Compiled to {output_path} ({} bytes)", json.len()),
+        Err(e) => { eprintln!("Error writing '{output_path}': {e}"); process::exit(1); }
+    }
+}
+
+fn run_fmt_cmd(args: &[String]) {
+    let path = args.get(2).map(|s| s.as_str());
+    let target = path.map(Path::new);
+
+    let is_single_file = target
+        .map(|p| p.is_file() && matches!(p.extension().and_then(|e| e.to_str()), Some("st" | "scl")))
+        .unwrap_or(false);
+
+    let files = if is_single_file {
+        vec![target.unwrap().to_path_buf()]
+    } else {
+        // Discover project files
+        let project = match st_syntax::project::discover_project(target) {
+            Ok(p) => p,
+            Err(e) => { eprintln!("Project discovery error: {e}"); process::exit(1); }
+        };
+        project.source_files
+    };
+
+    let mut formatted_count = 0;
+    for file in &files {
+        let source = match std::fs::read_to_string(file) {
+            Ok(s) => s,
+            Err(e) => { eprintln!("Error reading {}: {e}", file.display()); continue; }
+        };
+
+        let formatted = format_st(&source);
+        if formatted != source {
+            match std::fs::write(file, &formatted) {
+                Ok(()) => {
+                    eprintln!("Formatted: {}", file.display());
+                    formatted_count += 1;
+                }
+                Err(e) => eprintln!("Error writing {}: {e}", file.display()),
+            }
+        }
+    }
+
+    if formatted_count == 0 {
+        eprintln!("All {} file(s) already formatted", files.len());
+    } else {
+        eprintln!("Formatted {formatted_count} file(s)");
+    }
+}
+
+/// Format ST source: normalize indentation.
+fn format_st(source: &str) -> String {
+    let indent_str = "    ";
+    let mut result = String::new();
+    let mut indent_level: i32 = 0;
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            result.push('\n');
+            continue;
+        }
+
+        let upper = trimmed.to_uppercase();
+
+        // Decrease indent for closing/transition keywords
+        if upper.starts_with("END_")
+            || upper == "ELSE"
+            || upper.starts_with("ELSIF")
+            || upper.starts_with("UNTIL")
+        {
+            indent_level = (indent_level - 1).max(0);
+        }
+
+        for _ in 0..indent_level {
+            result.push_str(indent_str);
+        }
+        result.push_str(trimmed);
+        result.push('\n');
+
+        // Increase indent for opening keywords
+        if upper.starts_with("PROGRAM ")
+            || upper.starts_with("FUNCTION ")
+            || upper.starts_with("FUNCTION_BLOCK ")
+            || upper.starts_with("VAR")
+            || upper.starts_with("IF ") || upper == "ELSE"
+            || upper.starts_with("ELSIF ")
+            || upper.starts_with("FOR ")
+            || upper.starts_with("WHILE ")
+            || upper.starts_with("REPEAT")
+            || upper.starts_with("CASE ")
+            || upper.starts_with("STRUCT")
+            || upper.starts_with("TYPE")
+        {
+            indent_level += 1;
+        }
+    }
+
+    result
+}
+
+/// Print diagnostics in human-readable or JSON format. Returns true if any errors.
+fn print_diagnostics(
+    diagnostics: &[st_semantics::diagnostic::Diagnostic],
+    source: &str,
+    file_name: &str,
+    json_output: bool,
+) -> bool {
+    let mut has_errors = false;
+
+    if json_output {
+        let items: Vec<serde_json::Value> = diagnostics.iter().map(|d| {
+            let severity = match d.severity {
+                st_semantics::diagnostic::Severity::Error => { has_errors = true; "error" }
+                st_semantics::diagnostic::Severity::Warning => "warning",
+                st_semantics::diagnostic::Severity::Info => "info",
+            };
+            let (line, col) = if !source.is_empty() {
+                byte_offset_to_line_col(source, d.range.start)
+            } else {
+                (0, 0)
+            };
+            serde_json::json!({
+                "file": file_name,
+                "line": line,
+                "column": col,
+                "severity": severity,
+                "code": format!("{:?}", d.code),
+                "message": d.message
+            })
+        }).collect();
+        println!("{}", serde_json::to_string_pretty(&items).unwrap());
+    } else {
+        for d in diagnostics {
+            let severity = match d.severity {
+                st_semantics::diagnostic::Severity::Error => { has_errors = true; "error" }
+                st_semantics::diagnostic::Severity::Warning => "warning",
+                st_semantics::diagnostic::Severity::Info => "info",
+            };
+            if !source.is_empty() {
+                let (line, col) = byte_offset_to_line_col(source, d.range.start);
+                eprintln!("{file_name}:{line}:{col}: {severity}: {}", d.message);
+            } else {
+                eprintln!("{severity}: {}", d.message);
+            }
+        }
+    }
+    has_errors
 }
 
 fn byte_offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {

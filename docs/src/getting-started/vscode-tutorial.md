@@ -112,9 +112,44 @@ Start typing inside the program body. Completion suggestions appear automaticall
 | `FUNCTION_BLOCK` | Full FB template |
 | `PROGRAM` | Full program template |
 
-### Document Outline
+### Go to Type Definition
 
-Open the **Outline** panel (View → Open View → Outline):
+**Ctrl+Shift+Click** (or use the right-click context menu → "Go to Type Definition") on any variable to jump to the declaration of its type. This is especially useful with user-defined types:
+
+- Click on a variable of type `MyStruct` → jumps to the `TYPE MyStruct : STRUCT ... END_STRUCT; END_TYPE` declaration
+- Click on a variable of type `MyFB` → jumps to the `FUNCTION_BLOCK MyFB` declaration
+
+This differs from Go-to-definition (which jumps to where the variable is declared) by jumping to where the variable's type is declared instead.
+
+### Signature Help
+
+When calling a function or function block, the editor shows parameter hints automatically:
+
+- Type `IsAboveThreshold(` → a tooltip appears showing `(value: INT, threshold: INT) : BOOL` with the first parameter highlighted
+- Type a `,` after the first argument → the tooltip advances to highlight the next parameter
+
+This works for all FUNCTION and FUNCTION_BLOCK calls, showing parameter names and types as you type each argument.
+
+### Find All References
+
+Press **Shift+F12** (or right-click → "Find All References") on any identifier to find every usage in the file:
+
+- On `counter` → shows all lines where `counter` is read or assigned
+- On `IsAboveThreshold` → shows the declaration and all call sites
+
+The search is case-insensitive and matches whole words only, consistent with IEC 61131-3 semantics.
+
+### Rename Symbol
+
+Press **F2** on any variable or POU name to rename it across all occurrences in the file:
+
+- Place the cursor on `counter` → press F2 → type `cycle_count` → all occurrences of `counter` are renamed to `cycle_count`
+
+The rename is case-insensitive and applies to all references, declarations, and usages simultaneously.
+
+### Document Symbols (Outline)
+
+Press **Ctrl+Shift+O** to open the document symbol picker, or open the **Outline** panel (View → Open View → Outline):
 
 ```
 ▼ Main (PROGRAM)
@@ -127,7 +162,55 @@ Open the **Outline** panel (View → Open View → Outline):
     threshold : VarInput : INT
 ```
 
-This shows all POUs and their variables in a navigable tree.
+This shows all POUs and their variables in a navigable tree. Type in the picker to filter by name.
+
+### Workspace Symbols
+
+Press **Ctrl+T** to search for any POU or type across all open files in the workspace. This is useful when working with multi-file projects:
+
+- Type `Main` → shows all PROGRAM/FUNCTION/FUNCTION_BLOCK declarations named "Main" across all `.st` files
+- Type `Temp` → finds any POU or type whose name contains "Temp"
+
+### Document Highlight
+
+Place your cursor on any identifier and all other occurrences of that symbol in the file are instantly highlighted with a background color. This happens automatically with no keyboard shortcut needed:
+
+- Click on `counter` → every reference to `counter` in the file lights up
+- Click on `exceeded` → all usages are highlighted
+
+This makes it easy to visually trace how a variable flows through your program.
+
+### Folding Ranges
+
+Click the fold icons in the gutter (the small triangles next to line numbers) to collapse code blocks:
+
+- **PROGRAM / FUNCTION / FUNCTION_BLOCK** — collapse entire POU bodies
+- **VAR / VAR_INPUT / VAR_OUTPUT** — collapse variable declaration blocks
+- **IF / FOR / WHILE / CASE** — collapse control flow blocks
+- **Comment blocks** `(* ... *)` — collapse multi-line comments
+
+You can also use **Ctrl+Shift+[** to fold and **Ctrl+Shift+]** to unfold the block at the cursor.
+
+### Document Links
+
+File paths mentioned in comments become clickable links:
+
+```st
+(* See utils.st for helper functions *)
+// Reference: alarm_logic.st
+```
+
+Ctrl+Click on these paths to open the referenced file directly in the editor.
+
+### Formatting
+
+Press **Shift+Alt+F** to auto-format the entire document. The formatter normalizes indentation to produce consistently readable code. You can also right-click and select "Format Document" from the context menu.
+
+### Code Actions (Quick Fixes)
+
+When the LSP reports an undeclared variable, press **Ctrl+.** (or click the lightbulb icon) to see available quick fixes:
+
+- If you type `new_var := 42;` without declaring `new_var`, the diagnostics underline it. Press **Ctrl+.** and select the quick fix to automatically add `new_var : INT;` to the nearest VAR block.
 
 ### Diagnostics (Error Detection)
 
@@ -425,10 +508,29 @@ This enables an iterative development workflow where you can edit program logic 
 
 ## Quick Reference
 
-| Action | How |
-|--------|-----|
+| Action | Shortcut / How |
+|--------|----------------|
+| **CLI** | |
 | Check file | `st-cli check file.st` |
 | Run program | `st-cli run file.st -n 100` |
+| **LSP Features** | |
+| Hover for type info | Ctrl+hover on identifier (Cmd+hover on macOS) |
+| Go to definition | Ctrl+Click on identifier (Cmd+Click on macOS) |
+| Go to type definition | Right-click → Go to Type Definition |
+| Code completion | Start typing, or Ctrl+Space (Cmd+Space on macOS) |
+| Signature help | Type `(` or `,` inside a function call |
+| Find all references | Shift+F12 |
+| Rename symbol | F2 |
+| Document symbols (outline) | Ctrl+Shift+O (Cmd+Shift+O on macOS) |
+| Workspace symbols | Ctrl+T (Cmd+T on macOS) |
+| Document highlight | Place cursor on identifier (automatic) |
+| Fold block | Ctrl+Shift+[ (Cmd+Option+[ on macOS) |
+| Unfold block | Ctrl+Shift+] (Cmd+Option+] on macOS) |
+| Document links | Ctrl+Click on file path in comment |
+| Format document | Shift+Alt+F (Shift+Option+F on macOS) |
+| Code action (quick fix) | Ctrl+. (Cmd+. on macOS) |
+| Problems panel | View → Problems |
+| **Debugging** | |
 | Start debugging | Open `.st` file → F5 |
 | Set breakpoint | Click gutter or F9 |
 | Step over | F10 |
@@ -440,10 +542,6 @@ This enables an iterative development workflow where you can edit program logic 
 | Unforce variable | Debug toolbar button or `unforce x` in Debug Console |
 | List forced variables | Debug toolbar button or `listForced` in Debug Console |
 | Scan cycle info | Debug toolbar button or `scanCycleInfo` in Debug Console |
-| Hover for type | Ctrl+hover on identifier |
-| Go to definition | Ctrl+click on identifier |
-| Code completion | Start typing or Ctrl+Space |
-| Document outline | View → Outline |
-| Problems panel | View → Problems |
+| **Monitor** | |
 | Open PLC Monitor | Ctrl+Shift+P → "ST: Open PLC Monitor" |
 | Force variable (Monitor) | Right-click variable in Monitor panel |

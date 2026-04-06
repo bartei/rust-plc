@@ -315,9 +315,9 @@ Ship a working LSP loop early to prove the VSCode integration.
 - [x] `st-cli serve` — start LSP server on stdio
 - [x] `st-cli debug <file>` — start DAP debug server on stdio
 - [x] Proper exit codes (0=ok, 1=errors)
-- [ ] `st-cli compile <file> -o <output>` — compile to bytecode file
-- [ ] `st-cli fmt <file>` — format source file
-- [ ] Structured JSON error output for CI integration
+- [x] `st-cli compile <file> -o <output>` — compile to JSON bytecode file
+- [x] `st-cli fmt [path]` — format source file(s) in place (single file or project autodiscovery)
+- [x] `--json` flag on `check` — structured JSON error output for CI integration
 
 ---
 

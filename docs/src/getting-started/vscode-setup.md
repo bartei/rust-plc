@@ -4,13 +4,24 @@ The rust-plc toolchain includes a VSCode extension that provides full IDE suppor
 
 ## Features
 
-- **Syntax highlighting** — Keywords, types, variables, comments, literals
-- **Real-time diagnostics** — Errors and warnings as you type
-- **Hover information** — Type info for variables, function signatures
-- **Go-to-definition** — Ctrl+Click to jump to declarations
-- **Code completion** — Variables, functions, keywords, struct fields after `.`
-- **Document outline** — Symbol tree in the sidebar
-- **Semantic tokens** — Context-aware highlighting (distinguishes functions from variables)
+The language server provides 16 LSP features for a full IDE experience:
+
+- **Diagnostics** — Real-time errors and warnings as you type (30+ diagnostic codes)
+- **Hover** — Ctrl+hover shows type info, function signatures, and variable kinds
+- **Go-to-definition** — Ctrl+Click jumps to variable or POU declarations
+- **Go-to-type-definition** — Jumps to the TYPE, STRUCT, or FUNCTION_BLOCK declaration of a variable's type
+- **Completion** — Auto-complete with keywords (snippets), variables, functions, struct fields (dot-trigger), FB members, and types
+- **Signature help** — Parameter hints on `(` and `,` inside function and FB calls
+- **Find all references** — Shift+F12 finds all usages of a symbol (case-insensitive, whole-word)
+- **Rename symbol** — F2 renames across all occurrences in the file
+- **Document symbols** — Ctrl+Shift+O outline view with nested POUs and variables
+- **Workspace symbols** — Ctrl+T search for any POU or type across all open files
+- **Document highlight** — Cursor on an identifier highlights all occurrences instantly
+- **Folding ranges** — Collapse PROGRAM, FUNCTION, VAR, IF, FOR, WHILE, CASE, and comment blocks
+- **Document links** — File paths in comments (e.g., `// see utils.st`) become clickable links
+- **Semantic tokens** — 10 token types for rich, context-aware syntax highlighting
+- **Formatting** — Shift+Alt+F auto-indents the entire file
+- **Code actions** — Ctrl+. quick fix: declare undeclared variable as INT
 
 ## Installation
 

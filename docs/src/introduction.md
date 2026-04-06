@@ -4,7 +4,7 @@
 
 - **Compiler** — Parses Structured Text source code, performs semantic analysis with 30+ diagnostic checks, and compiles to register-based bytecode
 - **Runtime** — A bytecode VM that executes compiled programs in a PLC-style scan cycle loop
-- **LSP Server** — Full Language Server Protocol integration for real-time diagnostics, hover information, go-to-definition, code completion, and syntax highlighting in VSCode
+- **LSP Server** — Full Language Server Protocol integration with 16 features: diagnostics, hover, go-to-definition, go-to-type-definition, completion, signature help, find all references, rename, document/workspace symbols, document highlight, folding, document links, semantic tokens, formatting, and code actions
 - **DAP Debugger** — Full Debug Adapter Protocol support with breakpoints, stepping, variable inspection, and scan-cycle-aware continue
 - **Online Change** — Hot-reload compiled programs without stopping the runtime, with automatic variable migration
 - **Monitor Server** — WebSocket-based live variable dashboard for real-time trend recording
@@ -35,7 +35,7 @@ END_PROGRAM
 |---------|--------|
 | Full ST parser with error recovery | ✅ |
 | 30+ semantic diagnostics (type errors, undeclared vars, etc.) | ✅ |
-| LSP server (diagnostics, hover, go-to-def, completion) | ✅ |
+| LSP server (16 features: diagnostics, hover, go-to-def, completion, references, rename, formatting, and more) | ✅ |
 | VSCode extension with syntax highlighting | ✅ |
 | Bytecode compiler | ✅ |
 | Runtime VM with scan cycle engine | ✅ |
