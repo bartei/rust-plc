@@ -231,6 +231,7 @@ module.exports = grammar({
         $._elementary_type,
         $.array_type,
         $.string_type,
+        $.ref_type,
         $._type_name
       ),
 
@@ -273,6 +274,12 @@ module.exports = grammar({
       seq(
         choice(kw("STRING"), kw("WSTRING")),
         optional(seq("[", field("length", $._expression), "]"))
+      ),
+
+    ref_type: ($) =>
+      seq(
+        kw("REF_TO"),
+        field("target_type", $._data_type)
       ),
 
     // User-defined type name (FB name, struct name, etc.)
@@ -505,7 +512,8 @@ module.exports = grammar({
           repeat(
             choice(
               seq(".", $.identifier),
-              seq("[", commaSep1($._expression), "]")
+              seq("[", commaSep1($._expression), "]"),
+              "^"  // dereference operator
             )
           )
         )
@@ -551,12 +559,15 @@ module.exports = grammar({
         $.real_literal,
         $.string_literal,
         $.boolean_literal,
+        $.null_literal,
         $.time_literal,
         $.date_literal,
         $.tod_literal,
         $.dt_literal,
         $.typed_literal
       ),
+
+    null_literal: ($) => kw("NULL"),
 
     integer_literal: ($) =>
       token(

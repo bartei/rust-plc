@@ -76,6 +76,8 @@ pub mod kind {
     pub const LINE_COMMENT: &str = "line_comment";
     pub const BLOCK_COMMENT: &str = "block_comment";
     pub const IDENTIFIER: &str = "identifier";
+    pub const REF_TYPE: &str = "ref_type";
+    pub const NULL_LITERAL: &str = "null_literal";
 }
 
 #[cfg(test)]

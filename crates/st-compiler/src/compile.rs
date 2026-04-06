@@ -175,6 +175,7 @@ impl ModuleCompiler {
                 | ElementaryType::Ltod | ElementaryType::Dt | ElementaryType::Ldt => VarType::Time,
             },
             DataType::String(_) => VarType::String,
+            DataType::Ref(_) => VarType::Ref,
             DataType::Array(_) => VarType::Int, // simplified: arrays handled separately
             DataType::UserDefined(_) => VarType::Int, // simplified: resolved at link time
         }
@@ -396,6 +397,17 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn compile_store(&mut self, target: &VariableAccess, val_reg: Reg, range: TextRange) {
+        // Check for pointer dereference store: ptr^ := value
+        if target.parts.len() >= 2 {
+            if let (Some(AccessPart::Identifier(id)), Some(AccessPart::Deref)) =
+                (target.parts.first(), target.parts.get(1))
+            {
+                let ptr_reg = self.compile_load_variable(&id.name);
+                self.emit_sourced(Instruction::DerefStore(ptr_reg, val_reg), range);
+                return;
+            }
+        }
+
         if let Some(AccessPart::Identifier(id)) = target.parts.first() {
             if let Some(slot) = self.find_local(&id.name) {
                 self.emit_sourced(Instruction::StoreLocal(slot, val_reg), range);
@@ -569,13 +581,21 @@ impl<'a> FunctionCompiler<'a> {
             }
             Expression::Variable(va) => {
                 if va.parts.len() >= 2 {
+                    // Check for pointer dereference: ptr^
+                    if let (Some(AccessPart::Identifier(id)), Some(AccessPart::Deref)) =
+                        (va.parts.first(), va.parts.get(1))
+                    {
+                        let ptr_reg = self.compile_load_variable(&id.name);
+                        let dst = self.alloc_reg();
+                        self.emit(Instruction::Deref(dst, ptr_reg));
+                        return dst;
+                    }
                     // Multi-part access: fb_instance.field
                     if let (Some(AccessPart::Identifier(obj)), Some(AccessPart::Identifier(field))) =
                         (va.parts.first(), va.parts.get(1))
                     {
                         if let Some(slot) = self.find_local(&obj.name) {
                             if self.fb_type_names.contains_key(&slot) {
-                                // FB field access: emit LoadField(dst, instance_slot, field_index)
                                 let fb_type = self.fb_type_names.get(&slot).unwrap().clone();
                                 let field_idx = self.module_functions
                                     .iter()
@@ -657,6 +677,41 @@ impl<'a> FunctionCompiler<'a> {
     fn compile_function_call_expr(&mut self, fc: &FunctionCallExpr) -> Reg {
         let name = fc.name.as_str();
         let dst = self.alloc_reg();
+
+        // REF() intrinsic — takes a variable name and returns a reference
+        if name.to_uppercase() == "REF" {
+            if let Some(first_arg) = fc.arguments.first() {
+                let var_name = match first_arg {
+                    Argument::Positional(Expression::Variable(va)) => {
+                        va.parts.first().and_then(|p| match p {
+                            AccessPart::Identifier(id) => Some(id.name.clone()),
+                            _ => None,
+                        })
+                    }
+                    Argument::Named { value: Expression::Variable(va), .. } => {
+                        va.parts.first().and_then(|p| match p {
+                            AccessPart::Identifier(id) => Some(id.name.clone()),
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some(name) = var_name {
+                    if let Some(slot) = self.find_local(&name) {
+                        self.emit(Instruction::MakeRefLocal(dst, slot));
+                    } else if let Some(slot) = self.find_global(&name) {
+                        self.emit(Instruction::MakeRefGlobal(dst, slot));
+                    } else {
+                        self.emit(Instruction::LoadNull(dst));
+                    }
+                } else {
+                    self.emit(Instruction::LoadNull(dst));
+                }
+            } else {
+                self.emit(Instruction::LoadNull(dst));
+            }
+            return dst;
+        }
 
         // Check for zero-argument intrinsics
         if name.to_uppercase() == "SYSTEM_TIME" {
@@ -764,6 +819,7 @@ impl<'a> FunctionCompiler<'a> {
             LiteralKind::Date(_) => Value::Time(0),
             LiteralKind::Tod(_) => Value::Time(0),
             LiteralKind::Dt(_) => Value::Time(0),
+            LiteralKind::Null => Value::Null,
             LiteralKind::Typed { raw_value, .. } => {
                 if let Ok(v) = raw_value.parse::<i64>() {
                     Value::Int(v)

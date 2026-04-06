@@ -44,6 +44,10 @@
             "named": true
           },
           {
+            "type": "null_literal",
+            "named": true
+          },
+          {
             "type": "or_expression",
             "named": true
           },
@@ -140,6 +144,10 @@
             "named": true
           },
           {
+            "type": "null_literal",
+            "named": true
+          },
+          {
             "type": "or_expression",
             "named": true
           },
@@ -225,6 +233,10 @@
           },
           {
             "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
             "named": true
           },
           {
@@ -324,6 +336,10 @@
             "named": true
           },
           {
+            "type": "null_literal",
+            "named": true
+          },
+          {
             "type": "or_expression",
             "named": true
           },
@@ -416,6 +432,10 @@
           "named": true
         },
         {
+          "type": "null_literal",
+          "named": true
+        },
+        {
           "type": "or_expression",
           "named": true
         },
@@ -503,6 +523,10 @@
             "named": true
           },
           {
+            "type": "null_literal",
+            "named": true
+          },
+          {
             "type": "or_expression",
             "named": true
           },
@@ -582,6 +606,10 @@
           },
           {
             "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
             "named": true
           },
           {
@@ -745,6 +773,10 @@
             "named": true
           },
           {
+            "type": "ref_type",
+            "named": true
+          },
+          {
             "type": "string_type",
             "named": true
           }
@@ -814,6 +846,10 @@
           },
           {
             "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
             "named": true
           },
           {
@@ -935,6 +971,10 @@
           "named": true
         },
         {
+          "type": "null_literal",
+          "named": true
+        },
+        {
           "type": "or_expression",
           "named": true
         },
@@ -1019,6 +1059,10 @@
           },
           {
             "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
             "named": true
           },
           {
@@ -1121,6 +1165,10 @@
           },
           {
             "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
             "named": true
           },
           {
@@ -1233,6 +1281,10 @@
           },
           {
             "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
             "named": true
           },
           {
@@ -1350,6 +1402,10 @@
             "named": true
           },
           {
+            "type": "null_literal",
+            "named": true
+          },
+          {
             "type": "or_expression",
             "named": true
           },
@@ -1448,6 +1504,10 @@
             "named": true
           },
           {
+            "type": "null_literal",
+            "named": true
+          },
+          {
             "type": "real_literal",
             "named": true
           },
@@ -1528,6 +1588,10 @@
           },
           {
             "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
             "named": true
           },
           {
@@ -1613,6 +1677,10 @@
             "named": true
           },
           {
+            "type": "null_literal",
+            "named": true
+          },
+          {
             "type": "or_expression",
             "named": true
           },
@@ -1692,6 +1760,10 @@
           },
           {
             "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
             "named": true
           },
           {
@@ -1962,6 +2034,10 @@
             "named": true
           },
           {
+            "type": "ref_type",
+            "named": true
+          },
+          {
             "type": "string_type",
             "named": true
           }
@@ -2040,6 +2116,10 @@
           },
           {
             "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
             "named": true
           },
           {
@@ -2155,6 +2235,10 @@
             "named": true
           },
           {
+            "type": "null_literal",
+            "named": true
+          },
+          {
             "type": "or_expression",
             "named": true
           },
@@ -2252,6 +2336,10 @@
           },
           {
             "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
             "named": true
           },
           {
@@ -2353,6 +2441,10 @@
             "named": true
           },
           {
+            "type": "null_literal",
+            "named": true
+          },
+          {
             "type": "or_expression",
             "named": true
           },
@@ -2397,6 +2489,11 @@
     }
   },
   {
+    "type": "null_literal",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "or_expression",
     "named": true,
     "fields": {
@@ -2438,6 +2535,10 @@
           },
           {
             "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
             "named": true
           },
           {
@@ -2537,6 +2638,10 @@
             "named": true
           },
           {
+            "type": "null_literal",
+            "named": true
+          },
+          {
             "type": "or_expression",
             "named": true
           },
@@ -2625,6 +2730,10 @@
           "named": true
         },
         {
+          "type": "null_literal",
+          "named": true
+        },
+        {
           "type": "or_expression",
           "named": true
         },
@@ -2709,6 +2818,10 @@
           },
           {
             "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
             "named": true
           },
           {
@@ -2801,6 +2914,10 @@
           },
           {
             "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
             "named": true
           },
           {
@@ -2899,6 +3016,134 @@
     }
   },
   {
+    "type": "ref_type",
+    "named": true,
+    "fields": {
+      "target_type": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "BOOL",
+            "named": false
+          },
+          {
+            "type": "BYTE",
+            "named": false
+          },
+          {
+            "type": "DATE",
+            "named": false
+          },
+          {
+            "type": "DATE_AND_TIME",
+            "named": false
+          },
+          {
+            "type": "DINT",
+            "named": false
+          },
+          {
+            "type": "DT",
+            "named": false
+          },
+          {
+            "type": "DWORD",
+            "named": false
+          },
+          {
+            "type": "INT",
+            "named": false
+          },
+          {
+            "type": "LDATE",
+            "named": false
+          },
+          {
+            "type": "LDT",
+            "named": false
+          },
+          {
+            "type": "LINT",
+            "named": false
+          },
+          {
+            "type": "LREAL",
+            "named": false
+          },
+          {
+            "type": "LTIME",
+            "named": false
+          },
+          {
+            "type": "LTOD",
+            "named": false
+          },
+          {
+            "type": "LWORD",
+            "named": false
+          },
+          {
+            "type": "REAL",
+            "named": false
+          },
+          {
+            "type": "SINT",
+            "named": false
+          },
+          {
+            "type": "TIME",
+            "named": false
+          },
+          {
+            "type": "TIME_OF_DAY",
+            "named": false
+          },
+          {
+            "type": "TOD",
+            "named": false
+          },
+          {
+            "type": "UDINT",
+            "named": false
+          },
+          {
+            "type": "UINT",
+            "named": false
+          },
+          {
+            "type": "ULINT",
+            "named": false
+          },
+          {
+            "type": "USINT",
+            "named": false
+          },
+          {
+            "type": "WORD",
+            "named": false
+          },
+          {
+            "type": "array_type",
+            "named": true
+          },
+          {
+            "type": "qualified_name",
+            "named": true
+          },
+          {
+            "type": "ref_type",
+            "named": true
+          },
+          {
+            "type": "string_type",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "repeat_statement",
     "named": true,
     "fields": {
@@ -2950,6 +3195,10 @@
           },
           {
             "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
             "named": true
           },
           {
@@ -3134,6 +3383,10 @@
             "named": true
           },
           {
+            "type": "null_literal",
+            "named": true
+          },
+          {
             "type": "or_expression",
             "named": true
           },
@@ -3219,6 +3472,10 @@
           },
           {
             "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
             "named": true
           },
           {
@@ -3383,6 +3640,10 @@
           },
           {
             "type": "qualified_name",
+            "named": true
+          },
+          {
+            "type": "ref_type",
             "named": true
           },
           {
@@ -3559,6 +3820,10 @@
             "named": true
           },
           {
+            "type": "null_literal",
+            "named": true
+          },
+          {
             "type": "or_expression",
             "named": true
           },
@@ -3638,6 +3903,10 @@
           },
           {
             "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
             "named": true
           },
           {
@@ -3830,6 +4099,10 @@
             "named": true
           },
           {
+            "type": "ref_type",
+            "named": true
+          },
+          {
             "type": "string_type",
             "named": true
           },
@@ -4014,6 +4287,10 @@
             "named": true
           },
           {
+            "type": "null_literal",
+            "named": true
+          },
+          {
             "type": "parenthesized_expression",
             "named": true
           },
@@ -4131,6 +4408,10 @@
           "named": true
         },
         {
+          "type": "null_literal",
+          "named": true
+        },
+        {
           "type": "or_expression",
           "named": true
         },
@@ -4215,6 +4496,10 @@
           },
           {
             "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
             "named": true
           },
           {
@@ -4382,6 +4667,10 @@
             "named": true
           },
           {
+            "type": "ref_type",
+            "named": true
+          },
+          {
             "type": "string_type",
             "named": true
           }
@@ -4441,6 +4730,10 @@
           },
           {
             "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
             "named": true
           },
           {
@@ -4740,6 +5033,10 @@
     "named": false
   },
   {
+    "type": "NULL",
+    "named": false
+  },
+  {
     "type": "OF",
     "named": false
   },
@@ -4757,6 +5054,10 @@
   },
   {
     "type": "REAL",
+    "named": false
+  },
+  {
+    "type": "REF_TO",
     "named": false
   },
   {
@@ -4881,6 +5182,10 @@
   },
   {
     "type": "]",
+    "named": false
+  },
+  {
+    "type": "^",
     "named": false
   },
   {

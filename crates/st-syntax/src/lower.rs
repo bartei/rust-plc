@@ -403,6 +403,12 @@ impl<'a> LowerCtx<'a> {
         match node.kind() {
             kind::ARRAY_TYPE => DataType::Array(Box::new(self.lower_array_type(node))),
             kind::STRING_TYPE => DataType::String(self.lower_string_type(node)),
+            kind::REF_TYPE => {
+                let target = node.child_by_field_name("target_type")
+                    .map(|n| self.lower_data_type(n))
+                    .unwrap_or(DataType::Elementary(ElementaryType::Int));
+                DataType::Ref(Box::new(target))
+            }
             kind::QUALIFIED_NAME => DataType::UserDefined(self.lower_qualified_name(node)),
             // Elementary type keywords show up as anonymous nodes with text like "INT", "BOOL"
             _ => {
@@ -748,6 +754,10 @@ impl<'a> LowerCtx<'a> {
                 range: self.range(node),
             }),
             kind::TYPED_LITERAL => Expression::Literal(self.lower_typed_literal(node)),
+            kind::NULL_LITERAL => Expression::Literal(Literal {
+                kind: LiteralKind::Null,
+                range: self.range(node),
+            }),
             kind::VARIABLE_ACCESS => Expression::Variable(self.lower_variable_access(node)),
             kind::FUNCTION_CALL => {
                 Expression::FunctionCall(Box::new(self.lower_function_call(node)))
@@ -846,9 +856,11 @@ impl<'a> LowerCtx<'a> {
         for child in node.children(&mut cursor) {
             match child.kind() {
                 kind::IDENTIFIER => parts.push(AccessPart::Identifier(self.lower_identifier(child))),
+                _ if self.text(child) == "^" => {
+                    parts.push(AccessPart::Deref);
+                }
                 _ if child.kind().contains("expression") || child.kind() == kind::INTEGER_LITERAL || child.kind() == kind::VARIABLE_ACCESS => {
-                    // Array index — collect all expressions between [ and ]
-                    // This is handled below
+                    // Array index — handled below
                 }
                 _ => {}
             }

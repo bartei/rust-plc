@@ -132,6 +132,26 @@ impl Analyzer {
         // Drop the closure before using self.symbols again
         drop(reg);
 
+        // REF() intrinsic — takes any variable, returns a reference
+        self.symbols.define(
+            global,
+            Symbol {
+                name: "REF".to_string(),
+                ty: Ty::Unknown, // return type depends on argument
+                kind: SymbolKind::Function {
+                    return_type: Ty::Unknown,
+                    params: vec![ParamDef {
+                        name: "IN1".to_string(),
+                        ty: Ty::Unknown, // accepts any type
+                        var_kind: VarKind::VarInput,
+                    }],
+                },
+                range: TextRange::new(0, 0),
+                used: true,
+                assigned: true,
+            },
+        );
+
         // System time intrinsic (no args → TIME)
         let time_ty = Ty::Elementary(ElementaryType::Time);
         self.symbols.define(
@@ -673,6 +693,7 @@ impl Analyzer {
             LiteralKind::Date(_) => Ty::Elementary(ElementaryType::Date),
             LiteralKind::Tod(_) => Ty::Elementary(ElementaryType::Tod),
             LiteralKind::Dt(_) => Ty::Elementary(ElementaryType::Dt),
+            LiteralKind::Null => Ty::Unknown, // NULL is compatible with any REF_TO
             LiteralKind::Typed { ty, .. } => Ty::Elementary(*ty),
         }
     }
@@ -826,6 +847,11 @@ impl Analyzer {
                             return Ty::Unknown;
                         }
                     }
+                }
+                AccessPart::Deref => {
+                    // Pointer dereference: ptr^ — the type becomes the pointed-to type
+                    // For now, accept any type through deref (simplified)
+                    current_ty = Ty::Unknown;
                 }
             }
         }
@@ -1204,6 +1230,7 @@ impl Analyzer {
                     self.const_eval_int(e).map(|v| v as u32)
                 }),
             },
+            DataType::Ref(_) => Ty::Unknown, // REF_TO type — simplified for now
             DataType::UserDefined(qn) => {
                 let name = qn.as_str();
                 // Check if it's a known type

@@ -76,6 +76,7 @@ pub enum VarType {
     String, // heap-allocated
     Time,   // nanoseconds as i64
     FbInstance(u16), // index into Module::functions
+    Ref,             // REF_TO pointer
 }
 
 impl VarType {
@@ -85,6 +86,7 @@ impl VarType {
             VarType::Int | VarType::UInt | VarType::Real | VarType::Time => 8,
             VarType::String => 24, // ptr + len + capacity
             VarType::FbInstance(_) => 0, // size determined by the FB's MemoryLayout
+            VarType::Ref => 4, // scope_tag + slot_index
         }
     }
 }
@@ -97,7 +99,12 @@ pub enum Value {
     UInt(u64),
     Real(f64),
     String(String),
-    Time(i64),     // nanoseconds
+    Time(i64),     // milliseconds
+    /// A reference (pointer) to a variable: (scope_tag, slot_index).
+    /// scope_tag: 0 = local, 1 = global, 2+ = FB instance.
+    Ref(u16, u16),
+    /// Null pointer.
+    Null,
     Void,
 }
 
@@ -139,6 +146,7 @@ impl Value {
             VarType::String => Value::String(String::new()),
             VarType::Time => Value::Time(0),
             VarType::FbInstance(_) => Value::Void,
+            VarType::Ref => Value::Null,
         }
     }
 }
@@ -259,6 +267,18 @@ pub enum Instruction {
     Ret(Reg),
     /// Return void (for programs / FBs).
     RetVoid,
+
+    // ── Pointer operations ────────────────────────────────────────────
+    /// Take a reference to a local variable: dst = REF(local_slot).
+    MakeRefLocal(Reg, u16),
+    /// Take a reference to a global variable: dst = REF(global_slot).
+    MakeRefGlobal(Reg, u16),
+    /// Dereference a pointer (read): dst = ptr^.
+    Deref(Reg, Reg),
+    /// Dereference a pointer (write): ptr^ := value.
+    DerefStore(Reg, Reg),
+    /// Load NULL into a register.
+    LoadNull(Reg),
 
     // ── Array / struct access ────────────────────────────────────────
     /// Load from array: dst, base_slot, index_register.

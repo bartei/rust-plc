@@ -177,6 +177,7 @@ pub enum DataType {
     Elementary(ElementaryType),
     Array(Box<ArrayType>),
     String(StringType),
+    Ref(Box<DataType>),
     UserDefined(QualifiedName),
 }
 
@@ -423,6 +424,7 @@ pub struct VariableAccess {
 pub enum AccessPart {
     Identifier(Identifier),
     Index(Vec<Expression>),
+    Deref,
 }
 
 // =============================================================================
@@ -446,6 +448,8 @@ pub enum LiteralKind {
     Date(String),
     Tod(String),
     Dt(String),
+    /// Null pointer literal
+    Null,
     /// Typed literal, e.g. `INT#5`
     Typed {
         ty: ElementaryType,

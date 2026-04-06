@@ -617,6 +617,48 @@ impl Vm {
                 Instruction::StoreField(_slot, _offset, _val) => {
                     // TODO: implement struct storage
                 }
+
+                // Pointer operations
+                Instruction::MakeRefLocal(dst, slot) => {
+                    // scope_tag 0 = local in current frame
+                    self.reg_set(dst, Value::Ref(0, slot));
+                }
+                Instruction::MakeRefGlobal(dst, slot) => {
+                    // scope_tag 1 = global
+                    self.reg_set(dst, Value::Ref(1, slot));
+                }
+                Instruction::LoadNull(dst) => {
+                    self.reg_set(dst, Value::Null);
+                }
+                Instruction::Deref(dst, ptr_reg) => {
+                    let ptr = self.reg_get(ptr_reg).clone();
+                    let val = match ptr {
+                        Value::Ref(0, slot) => {
+                            // Local variable
+                            self.local_get(slot).clone()
+                        }
+                        Value::Ref(1, slot) => {
+                            // Global variable
+                            self.globals.get(slot as usize).cloned().unwrap_or(Value::Void)
+                        }
+                        Value::Null => Value::Int(0), // null deref returns default
+                        _ => Value::Int(0),
+                    };
+                    self.reg_set(dst, val);
+                }
+                Instruction::DerefStore(ptr_reg, val_reg) => {
+                    let ptr = self.reg_get(ptr_reg).clone();
+                    let val = self.reg_get(val_reg).clone();
+                    match ptr {
+                        Value::Ref(0, slot) => {
+                            self.local_set(slot, val);
+                        }
+                        Value::Ref(1, slot) => {
+                            self.globals[slot as usize] = val;
+                        }
+                        _ => {} // null deref is a no-op
+                    }
+                }
             }
         }
     }

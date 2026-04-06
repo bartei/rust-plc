@@ -741,3 +741,140 @@ END_PROGRAM
     assert_eq!(forced.get("X"), Some(&Value::Int(42)));
     assert_eq!(forced.get("Y"), Some(&Value::Bool(true)));
 }
+
+// =============================================================================
+// Pointers (REF_TO and ^)
+// =============================================================================
+
+#[test]
+fn pointer_read_via_deref() {
+    let val = run_function(
+        r#"
+FUNCTION Calc : INT
+VAR_INPUT
+    dummy : INT;
+END_VAR
+VAR
+    x : INT := 42;
+    ptr : REF_TO INT;
+END_VAR
+    ptr := REF(x);
+    Calc := ptr^;
+END_FUNCTION
+"#,
+        "Calc",
+    );
+    assert_eq!(val, Value::Int(42));
+}
+
+#[test]
+fn pointer_write_via_deref() {
+    let source = r#"
+VAR_GLOBAL
+    g_result : INT;
+END_VAR
+
+PROGRAM Main
+VAR
+    x : INT := 10;
+    ptr : REF_TO INT;
+END_VAR
+    ptr := REF(x);
+    ptr^ := 99;
+    g_result := x;
+END_PROGRAM
+"#;
+    let engine = run_program(source, 1);
+    assert_eq!(engine.vm().get_global("g_result"), Some(&Value::Int(99)));
+}
+
+#[test]
+fn pointer_null_default() {
+    let val = run_function(
+        r#"
+FUNCTION Calc : INT
+VAR_INPUT
+    dummy : INT;
+END_VAR
+VAR
+    ptr : REF_TO INT;
+END_VAR
+    Calc := ptr^;
+END_FUNCTION
+"#,
+        "Calc",
+    );
+    // NULL pointer deref returns 0
+    assert_eq!(val, Value::Int(0));
+}
+
+#[test]
+fn pointer_null_literal() {
+    let source = r#"
+VAR_GLOBAL
+    g_result : INT;
+END_VAR
+
+PROGRAM Main
+VAR
+    x : INT := 42;
+    ptr : REF_TO INT;
+END_VAR
+    ptr := REF(x);
+    ptr := NULL;
+    g_result := ptr^;
+END_PROGRAM
+"#;
+    let engine = run_program(source, 1);
+    // After setting to NULL, deref returns 0
+    assert_eq!(engine.vm().get_global("g_result"), Some(&Value::Int(0)));
+}
+
+#[test]
+fn pointer_to_global() {
+    let source = r#"
+VAR_GLOBAL
+    g_value : INT;
+    g_result : INT;
+END_VAR
+
+PROGRAM Main
+VAR
+    ptr : REF_TO INT;
+END_VAR
+    g_value := 55;
+    ptr := REF(g_value);
+    g_result := ptr^;
+END_PROGRAM
+"#;
+    let engine = run_program(source, 1);
+    assert_eq!(engine.vm().get_global("g_result"), Some(&Value::Int(55)));
+}
+
+#[test]
+fn pointer_modify_original_via_deref() {
+    let source = r#"
+VAR_GLOBAL
+    g_a : INT;
+    g_b : INT;
+END_VAR
+
+PROGRAM Main
+VAR
+    a : INT := 10;
+    b : INT := 20;
+    ptr : REF_TO INT;
+END_VAR
+    ptr := REF(a);
+    ptr^ := ptr^ + 5;
+    g_a := a;
+
+    ptr := REF(b);
+    ptr^ := ptr^ * 2;
+    g_b := b;
+END_PROGRAM
+"#;
+    let engine = run_program(source, 1);
+    assert_eq!(engine.vm().get_global("g_a"), Some(&Value::Int(15))); // 10 + 5
+    assert_eq!(engine.vm().get_global("g_b"), Some(&Value::Int(40))); // 20 * 2
+}

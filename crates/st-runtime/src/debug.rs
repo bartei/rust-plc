@@ -287,6 +287,8 @@ pub fn format_value(value: &Value) -> String {
                 format!("T#{ms}ms")
             }
         }
+        Value::Ref(scope, slot) => format!("REF({scope}:{slot})"),
+        Value::Null => "NULL".to_string(),
         Value::Void => "VOID".to_string(),
     }
 }
@@ -301,6 +303,7 @@ pub fn format_var_type(ty: VarType) -> &'static str {
         VarType::String => "STRING",
         VarType::Time => "TIME",
         VarType::FbInstance(_) => "FB_INSTANCE",
+        VarType::Ref => "REF_TO",
     }
 }
 

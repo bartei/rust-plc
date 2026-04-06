@@ -492,6 +492,9 @@ fn type_display(dt: &st_syntax::ast::DataType) -> String {
         st_syntax::ast::DataType::String(s) => {
             if s.wide { "WSTRING".to_string() } else { "STRING".to_string() }
         }
+        st_syntax::ast::DataType::Ref(inner) => {
+            format!("REF_TO {}", type_display(inner))
+        }
         st_syntax::ast::DataType::UserDefined(qn) => qn.as_str(),
     }
 }
