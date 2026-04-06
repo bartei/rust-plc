@@ -834,66 +834,8 @@ impl<'a> FunctionCompiler<'a> {
 }
 
 /// Parse a TIME literal string like "T#5s", "T#100ms", "T#1h2m3s" into milliseconds.
+/// Parse a TIME literal string like "T#5s", "T#100ms", "T#1h2m3s" into milliseconds.
 fn parse_time_literal(s: &str) -> i64 {
-    // Strip prefix: T#, TIME#, t#, time#, LT#, LTIME#
-    let raw = s
-        .trim()
-        .to_uppercase();
-    let body = raw
-        .strip_prefix("LTIME#")
-        .or_else(|| raw.strip_prefix("TIME#"))
-        .or_else(|| raw.strip_prefix("LT#"))
-        .or_else(|| raw.strip_prefix("T#"))
-        .unwrap_or(&raw);
-
-    let mut total_ms: i64 = 0;
-    let mut num_buf = String::new();
-
-    for ch in body.chars() {
-        if ch.is_ascii_digit() || ch == '.' || ch == '_' {
-            if ch != '_' {
-                num_buf.push(ch);
-            }
-        } else {
-            let num: f64 = num_buf.parse().unwrap_or(0.0);
-            num_buf.clear();
-
-            // Look ahead for multi-char units
-            match ch {
-                'H' => total_ms += (num * 3_600_000.0) as i64,
-                'M' => {
-                    // Could be M (minutes) or MS (milliseconds)
-                    // MS is handled as 'M' then 'S' — but we need lookahead
-                    // Since we process char by char and 'S' comes next for 'MS',
-                    // we'll handle 'M' as minutes here. The pattern T#100ms
-                    // would have 'M' then 'S' — let's just check the common patterns.
-                    total_ms += (num * 60_000.0) as i64;
-                }
-                'S' => {
-                    // If previous was 'M' (from "ms"), this means milliseconds
-                    // But we already added as minutes. Fix: check if total was just updated
-                    // Actually, the common format is T#100ms where 'ms' is lowercase in source.
-                    // After uppercasing: T#100MS. So 'M' gets minutes, 'S' gets seconds.
-                    // This is wrong. Let me use a regex-like approach instead.
-                    total_ms += (num * 1_000.0) as i64;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // Handle trailing number without unit (assume ms)
-    if !num_buf.is_empty() {
-        let num: f64 = num_buf.parse().unwrap_or(0.0);
-        total_ms += num as i64;
-    }
-
-    // The char-by-char approach above doesn't handle "ms" correctly.
-    // Let's use a proper regex-like parser instead.
-    parse_time_proper(s)
-}
-
-fn parse_time_proper(s: &str) -> i64 {
     let raw = s.trim();
     // Strip prefix
     let body = if let Some(rest) = raw.strip_prefix("T#").or_else(|| raw.strip_prefix("t#")) {
