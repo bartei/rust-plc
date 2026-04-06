@@ -3,9 +3,10 @@
 //! These test the DAP server by driving it in-process via the `run_dap`
 //! function with piped stdin/stdout, sending DAP JSON messages and
 //! verifying responses.
+#![allow(dead_code)]
 
 use serde_json::{json, Value};
-use std::io::{Cursor, Read, Write};
+use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
 /// A buffer that acts as both Read and Write for in-process testing.
@@ -65,12 +66,7 @@ impl TestBuffer {
 }
 
 fn find_double_crlf(data: &[u8]) -> Option<usize> {
-    for i in 0..data.len().saturating_sub(3) {
-        if data[i] == b'\r' && data[i + 1] == b'\n' && data[i + 2] == b'\r' && data[i + 3] == b'\n' {
-            return Some(i);
-        }
-    }
-    None
+    (0..data.len().saturating_sub(3)).find(|&i| data[i] == b'\r' && data[i + 1] == b'\n' && data[i + 2] == b'\r' && data[i + 3] == b'\n')
 }
 
 /// Helper: build a DAP request message.
@@ -496,8 +492,7 @@ END_PROGRAM
         );
         assert!(
             resp.unwrap()["success"].as_bool().unwrap_or(false),
-            "Response {seq} failed: {:?}",
-            resp
+            "Response {seq} failed: {resp:?}"
         );
     }
 }

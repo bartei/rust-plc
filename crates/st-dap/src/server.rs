@@ -441,7 +441,7 @@ impl DapSession {
     fn handle_unforce_command(&mut self, seq: i64, var_name: &str) -> Response {
         if let Some(ref mut vm) = self.vm {
             vm.unforce_variable(var_name);
-            let result = format!("Unforced {}", var_name);
+            let result = format!("Unforced {var_name}");
             self.pending_events.push(console_output(&result));
             ok(seq, ResponseBody::Evaluate(dap::responses::EvaluateResponse {
                 result,

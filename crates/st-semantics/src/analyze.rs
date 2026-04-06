@@ -62,7 +62,8 @@ impl Analyzer {
         let real_ty = Ty::Elementary(ElementaryType::Real);
         let bool_ty = Ty::Elementary(ElementaryType::Bool);
 
-        // Helper to register a single-arg intrinsic function
+        // Helper to register a single-arg intrinsic function (scoped to release borrow)
+        {
         let mut reg = |name: &str, param_ty: &Ty, ret_ty: &Ty| {
             self.symbols.define(
                 global,
@@ -128,9 +129,7 @@ impl Analyzer {
             reg(name, &int_ty, &bool_ty);
         }
         reg("REAL_TO_BOOL", &real_ty, &bool_ty);
-
-        // Drop the closure before using self.symbols again
-        drop(reg);
+        } // end closure scope
 
         // REF() intrinsic — takes any variable, returns a reference
         self.symbols.define(

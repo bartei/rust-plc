@@ -512,12 +512,12 @@ mod tests {
         new_layout.slots.push(VarSlot { name: "y".into(), ty: VarType::Real, offset: 8, size: 8, retain: false });
         new_layout.slots.push(VarSlot { name: "z".into(), ty: VarType::Bool, offset: 16, size: 1, retain: false });
 
-        let old_locals = vec![Value::Int(42), Value::Real(3.14)];
+        let old_locals = vec![Value::Int(42), Value::Real(1.5)];
         let new_locals = migrate_locals(&old_locals, &old_layout, &new_layout);
 
         assert_eq!(new_locals.len(), 3);
         assert_eq!(new_locals[0], Value::Int(42));     // preserved
-        assert_eq!(new_locals[1], Value::Real(3.14));  // preserved
+        assert_eq!(new_locals[1], Value::Real(1.5));  // preserved
         assert_eq!(new_locals[2], Value::Bool(false));  // new default
     }
 

@@ -54,6 +54,12 @@ pub enum PauseReason {
     None,
 }
 
+impl Default for DebugState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DebugState {
     pub fn new() -> Self {
         Self {
@@ -108,7 +114,7 @@ impl DebugState {
 
                 // Find any instruction whose source map overlaps this line
                 for func in &module.functions {
-                    for (_, sm) in func.source_map.iter().enumerate() {
+                    for sm in &func.source_map {
                         if sm.byte_offset >= line_start
                             && sm.byte_offset < line_end
                             && sm.byte_offset > 0
@@ -415,7 +421,7 @@ mod tests {
         assert_eq!(format_value(&Value::Bool(false)), "FALSE");
         assert_eq!(format_value(&Value::Int(42)), "42");
         assert_eq!(format_value(&Value::UInt(100)), "100");
-        assert_eq!(format_value(&Value::Real(3.14)), "3.140000");
+        assert_eq!(format_value(&Value::Real(1.5)), "1.500000");
         assert_eq!(format_value(&Value::String("hello".into())), "'hello'");
         assert_eq!(format_value(&Value::Time(5000)), "T#5s");
         assert_eq!(format_value(&Value::Time(100)), "T#100ms");

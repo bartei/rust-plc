@@ -196,9 +196,8 @@ fn is_excluded(name: &str, path: &Path, exclude: &[String]) -> bool {
             if name == dir_name {
                 return true;
             }
-        } else if pattern.starts_with("*.") {
+        } else if let Some(ext) = pattern.strip_prefix("*.") {
             // Extension pattern
-            let ext = &pattern[2..];
             if path.extension().and_then(|e| e.to_str()) == Some(ext) {
                 return true;
             }
@@ -228,7 +227,7 @@ fn resolve_source_globs(root: &Path, patterns: &[String]) -> Result<Vec<PathBuf>
         if pattern_str.contains('*') {
             // Glob pattern
             let matches = glob::glob(&pattern_str)
-                .map_err(|e| format!("Invalid glob pattern '{}': {e}", pattern))?;
+                .map_err(|e| format!("Invalid glob pattern '{pattern}': {e}"))?;
             for entry in matches {
                 let path = entry.map_err(|e| format!("Glob error: {e}"))?;
                 if path.is_file() {
