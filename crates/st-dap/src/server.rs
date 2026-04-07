@@ -212,6 +212,24 @@ impl DapSession {
             let sources = st_syntax::project::load_project_sources(&project)
                 .map_err(|e| format!("Cannot load sources: {e}"))?;
 
+            // Store the main file source for breakpoint/stack-trace line mapping.
+            // Find the file that matches self.source_path (the file the debugger was
+            // launched from), or the first file containing a PROGRAM.
+            let source_path_canonical = std::fs::canonicalize(&self.source_path).ok();
+            for (path, content) in &sources {
+                let path_canonical = std::fs::canonicalize(path).ok();
+                if path_canonical == source_path_canonical {
+                    self.source = content.clone();
+                    break;
+                }
+            }
+            // Fallback: use the last file (usually main.st, since files are sorted)
+            if self.source.is_empty() {
+                if let Some((_, content)) = sources.last() {
+                    self.source = content.clone();
+                }
+            }
+
             let stdlib = st_syntax::multi_file::builtin_stdlib();
             let mut all_sources: Vec<&str> = stdlib.to_vec();
             let owned: Vec<String> = sources.into_iter().map(|(_, content)| content).collect();
