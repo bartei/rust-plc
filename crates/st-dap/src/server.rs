@@ -177,29 +177,32 @@ impl DapSession {
     fn load_project(&mut self) -> Result<st_syntax::lower::LowerResult, String> {
         let path = std::path::Path::new(&self.source_path);
 
-        // Try to discover a project (walks up to find plc-project.yaml)
-        let project_dir = if path.is_file() {
-            path.parent()
-        } else {
-            Some(path)
-        };
-
-        // Check if there's a plc-project.yaml in the file's directory or parent
-        let yaml_found = project_dir.is_some_and(|dir| {
-            let mut check = dir.to_path_buf();
+        // Walk up from the file to find plc-project.yaml
+        let project_root = {
+            let start = if path.is_file() {
+                path.parent().unwrap_or(path)
+            } else {
+                path
+            };
+            let mut check = start.to_path_buf();
+            let mut found = None;
             loop {
-                if check.join("plc-project.yaml").exists() || check.join("plc-project.yml").exists() {
-                    return true;
+                if check.join("plc-project.yaml").exists()
+                    || check.join("plc-project.yml").exists()
+                {
+                    found = Some(check.clone());
+                    break;
                 }
                 if !check.pop() {
-                    return false;
+                    break;
                 }
             }
-        });
+            found
+        };
 
-        if yaml_found || path.is_dir() {
-            // Multi-file project mode
-            let project = st_syntax::project::discover_project(Some(path))
+        if let Some(ref root) = project_root {
+            // Multi-file project mode — pass the project ROOT directory
+            let project = st_syntax::project::discover_project(Some(root))
                 .map_err(|e| format!("Project discovery failed: {e}"))?;
 
             self.pending_events.push(console_output(&format!(
