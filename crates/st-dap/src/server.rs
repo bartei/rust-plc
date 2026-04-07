@@ -333,8 +333,10 @@ impl DapSession {
             let module = vm.module().clone();
             if let Some(ref source_bps) = args.breakpoints {
                 let lines: Vec<u32> = source_bps.iter().map(|bp| bp.line as u32).collect();
+                eprintln!("[DAP] SetBreakpoints: lines={lines:?}, source len={}", self.source.len());
                 vm.debug_mut().clear_breakpoints();
                 let results = vm.debug_mut().set_line_breakpoints(&module, &self.source, &lines);
+                eprintln!("[DAP] Breakpoint results: {results:?}");
 
                 for (i, result) in results.iter().enumerate() {
                     breakpoints.push(Breakpoint {

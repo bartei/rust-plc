@@ -92,28 +92,39 @@ impl DebugState {
 
     /// Set breakpoints from source line numbers by resolving via source map.
     /// Returns the actual byte offsets where breakpoints were set.
+    ///
+    /// Only considers functions whose source map offsets fall within the
+    /// given source text length. This prevents false matches from other
+    /// files in a multi-file project (each file has its own byte offsets).
     pub fn set_line_breakpoints(
         &mut self,
         module: &Module,
         source: &str,
         lines: &[u32],
     ) -> Vec<Option<usize>> {
-        // Build line → byte offset mapping
+        let source_len = source.len();
         let line_offsets = compute_line_offsets(source);
 
         lines
             .iter()
             .map(|&line| {
-                // DAP lines are 1-indexed, line_offsets is 0-indexed
                 let line_idx = (line as usize).saturating_sub(1);
                 let line_start = line_offsets.get(line_idx).copied()?;
                 let line_end = line_offsets
                     .get(line_idx + 1)
                     .copied()
-                    .unwrap_or(source.len());
+                    .unwrap_or(source_len);
 
-                // Find any instruction whose source map overlaps this line
+                // Only search functions whose source map offsets are within
+                // this file's byte range (filters out other files' functions)
                 for func in &module.functions {
+                    let belongs_to_this_file = func.source_map.iter().any(|sm| {
+                        sm.byte_offset > 0 && sm.byte_end <= source_len
+                    });
+                    if !belongs_to_this_file {
+                        continue;
+                    }
+
                     for sm in &func.source_map {
                         if sm.byte_offset >= line_start
                             && sm.byte_offset < line_end
