@@ -407,26 +407,29 @@ and delivers the first two implementations: Modbus TCP and Modbus RTU/ASCII.
 ### Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    ST Program                            │
-│   sensor := INPUT_REG_0;                                │
-│   OUTPUT_COIL_3 := motor_on;                            │
-└──────────────┬──────────────────────────┬───────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                    ST Program                             │
+│   IF rack_left.DI_0 THEN                                 │
+│       rack_right.DO_3 := TRUE;                           │
+│   END_IF;                                                │
+│   pump_vfd.SPEED_REF := 45.0;                            │
+└──────────────┬──────────────────────────┬────────────────┘
                │ Read Inputs              │ Write Outputs
-┌──────────────▼──────────────────────────▼───────────────┐
-│              Communication Manager                       │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  │
-│  │  Modbus TCP  │  │ Modbus RTU   │  │  (future)     │  │
-│  │  Extension   │  │  Extension   │  │  Profinet     │  │
-│  └──────┬───────┘  └──────┬───────┘  └───────────────┘  │
-│         │                 │                              │
-│  ┌──────▼───────┐  ┌──────▼───────┐                     │
-│  │  Device      │  │  Device      │  Device profiles    │
-│  │  Profiles    │  │  Profiles    │  are reusable YAML  │
-│  │  abb_acs580  │  │  io_board_16 │  configs for known  │
-│  │  et200sp     │  │  temp_sensor │  hardware            │
-│  └──────────────┘  └──────────────┘                     │
-└──────────────────────────────────────────────────────────┘
+               │ (struct fields ← regs)   │ (struct fields → regs)
+┌──────────────▼──────────────────────────▼────────────────┐
+│              Communication Manager                        │
+│  ┌──────────────┐  ┌──────────────┐  ┌────────────────┐  │
+│  │  Modbus TCP  │  │ Modbus RTU   │  │  (future)      │  │
+│  │  Extension   │  │  Extension   │  │  Profinet      │  │
+│  └──────┬───────┘  └──────┬───────┘  └────────────────┘  │
+│         │                 │                               │
+│  ┌──────▼───────┐  ┌──────▼───────┐  Device profiles     │
+│  │  Device      │  │  Device      │  define STRUCT types  │
+│  │  Profiles    │  │  Profiles    │  + register maps.     │
+│  │  wago_750    │  │  abb_acs580  │  YAML name → global   │
+│  │  et200sp     │  │  danfoss_fc  │  struct instance.     │
+│  └──────────────┘  └──────────────┘                       │
+└───────────────────────────────────────────────────────────┘
                │                 │
          TCP/IP network    RS-485 serial
                │                 │
@@ -462,8 +465,8 @@ pub trait CommExtension: Send + Sync {
     /// Acyclic request: on-demand read/write (diagnostics, parameter access).
     fn acyclic_request(&mut self, request: AcyclicRequest) -> Result<AcyclicResponse, CommError>;
 
-    /// List all I/O variables this extension provides (for auto-generation of VAR_GLOBAL).
-    fn io_variables(&self) -> Vec<IoVariable>;
+    /// Return the loaded device profile (defines struct schema + register map).
+    fn device_profile(&self) -> &DeviceProfile;
 
     /// Start/stop the communication channel.
     fn start(&mut self) -> Result<(), CommError>;
@@ -477,33 +480,40 @@ pub trait CommExtension: Send + Sync {
 
 ### Configuration in plc-project.yaml
 
+The YAML is the **single source of truth** between hardware configuration and software
+symbol mapping. Each communication entry defines a **named instance** of a device profile.
+The `name` field becomes the global variable name in ST — giving a clear, unambiguous
+correlation between physical hardware and code.
+
 ```yaml
 name: BottleFillingLine
-target: host   # runs on the computer, no cross-compilation
+target: host
 
 communications:
-  # Modbus TCP connection to a remote I/O module
-  - name: io_rack_1
+  # Two identical I/O racks — same profile, different addresses.
+  # Each becomes its own global struct instance.
+  - name: rack_left             # ← global variable name in ST
     protocol: modbus-tcp
     host: 192.168.1.100
     port: 502
     unit_id: 1
-    mode: cyclic              # read/write every scan cycle
-    cycle_time: 10ms          # minimum interval between polls
+    mode: cyclic
+    cycle_time: 10ms
     timeout: 500ms
-    # Device profile: pre-defined register map for this hardware
     device_profile: wago_750_352
-    # Or manual register mapping:
-    mapping:
-      inputs:
-        - { register: 0, count: 8, type: coil, alias_prefix: DI_ }
-        - { register: 0, count: 4, type: input_register, alias_prefix: AI_ }
-      outputs:
-        - { register: 0, count: 8, type: coil, alias_prefix: DO_ }
-        - { register: 0, count: 2, type: holding_register, alias_prefix: AO_ }
 
-  # Modbus RTU connection to a VFD on RS-485
-  - name: vfd_pump1
+  - name: rack_right            # ← second instance, same profile
+    protocol: modbus-tcp
+    host: 192.168.1.101
+    port: 502
+    unit_id: 1
+    mode: cyclic
+    cycle_time: 10ms
+    timeout: 500ms
+    device_profile: wago_750_352
+
+  # VFD on RS-485 — profile defines speed, torque, status fields
+  - name: pump_vfd
     protocol: modbus-rtu
     port: /dev/ttyUSB0
     baud: 19200
@@ -511,66 +521,193 @@ communications:
     stop_bits: 1
     unit_id: 3
     mode: cyclic
-    device_profile: abb_acs580   # knows register addresses for speed, torque, status
-    # Profile auto-generates: VFD_PUMP1_SPEED_REF, VFD_PUMP1_SPEED_ACT,
-    #                         VFD_PUMP1_RUN, VFD_PUMP1_FAULT, etc.
+    device_profile: abb_acs580
 
   # Acyclic-only connection for parameter access
   - name: plc_neighbor
     protocol: modbus-tcp
     host: 192.168.1.200
     port: 502
-    mode: acyclic             # only on-demand, not every cycle
+    mode: acyclic
 ```
 
-This generates auto-included ST globals:
-```st
-(* Auto-generated from communication config — DO NOT EDIT *)
-VAR_GLOBAL
-    (* io_rack_1: Modbus TCP, wago_750_352 *)
-    DI_0 : BOOL;   DI_1 : BOOL;   DI_2 : BOOL;   DI_3 : BOOL;
-    DI_4 : BOOL;   DI_5 : BOOL;   DI_6 : BOOL;   DI_7 : BOOL;
-    AI_0 : INT;    AI_1 : INT;    AI_2 : INT;    AI_3 : INT;
-    DO_0 : BOOL;   DO_1 : BOOL;   DO_2 : BOOL;   DO_3 : BOOL;
-    AO_0 : INT;    AO_1 : INT;
+This auto-generates struct types from device profiles and named global instances:
 
-    (* vfd_pump1: Modbus RTU, abb_acs580 profile *)
-    VFD_PUMP1_RUN        : BOOL;    (* control word bit 0 *)
-    VFD_PUMP1_SPEED_REF  : REAL;    (* Hz, holding register 1 *)
-    VFD_PUMP1_SPEED_ACT  : REAL;    (* Hz, input register 2 *)
-    VFD_PUMP1_CURRENT    : REAL;    (* A, input register 3 *)
-    VFD_PUMP1_FAULT      : BOOL;    (* status word bit 3 *)
-    VFD_PUMP1_READY      : BOOL;    (* status word bit 0 *)
+```st
+(* Auto-generated from device profiles — DO NOT EDIT *)
+
+(* Struct type generated from profile: wago_750_352 *)
+TYPE Wago750352 : STRUCT
+    DI_0 : BOOL;  DI_1 : BOOL;  DI_2 : BOOL;  DI_3 : BOOL;
+    DI_4 : BOOL;  DI_5 : BOOL;  DI_6 : BOOL;  DI_7 : BOOL;
+    AI_0 : INT;   AI_1 : INT;   AI_2 : INT;   AI_3 : INT;
+    DO_0 : BOOL;  DO_1 : BOOL;  DO_2 : BOOL;  DO_3 : BOOL;
+    AO_0 : INT;   AO_1 : INT;
+END_STRUCT;
+
+(* Struct type generated from profile: abb_acs580 *)
+TYPE AbbAcs580 : STRUCT
+    RUN        : BOOL;     (* control word bit 0, output *)
+    STOP       : BOOL;     (* control word bit 1, output *)
+    FAULT_RST  : BOOL;     (* control word bit 7, output *)
+    READY      : BOOL;     (* status word bit 0, input *)
+    RUNNING    : BOOL;     (* status word bit 1, input *)
+    FAULT      : BOOL;     (* status word bit 3, input *)
+    SPEED_REF  : REAL;     (* holding register 1, 0.1 Hz, output *)
+    SPEED_ACT  : REAL;     (* input register 2, 0.1 Hz, input *)
+    CURRENT    : REAL;     (* input register 3, 0.1 A, input *)
+    TORQUE     : REAL;     (* input register 4, 0.1 Nm, input *)
+    POWER      : REAL;     (* input register 5, 0.1 kW, input *)
+END_STRUCT;
+END_TYPE
+
+(* Global instances — names from plc-project.yaml *)
+VAR_GLOBAL
+    rack_left  : Wago750352;   (* 192.168.1.100, unit 1 *)
+    rack_right : Wago750352;   (* 192.168.1.101, unit 1 *)
+    pump_vfd   : AbbAcs580;    (* /dev/ttyUSB0, unit 3 *)
 END_VAR
 ```
 
+User code is clear, portable, and hardware-agnostic:
+
+```st
+PROGRAM Main
+VAR
+    motor_on : BOOL;
+END_VAR
+    (* Unambiguous: which rack, which channel *)
+    IF rack_left.DI_0 AND NOT rack_left.DI_7 THEN
+        rack_right.DO_3 := TRUE;
+    END_IF;
+
+    (* VFD control — readable field names from the profile *)
+    pump_vfd.RUN := motor_on;
+    pump_vfd.SPEED_REF := 45.0;
+
+    IF pump_vfd.FAULT THEN
+        pump_vfd.FAULT_RST := TRUE;
+    END_IF;
+
+    (* Swap hardware? Change YAML, code stays the same. *)
+END_PROGRAM
+```
+
+**Key benefits of the struct-based approach:**
+- **No name collisions** — two identical cards don't fight over `DI_0`
+- **Self-documenting** — `rack_left.DI_3` is unambiguous in code
+- **Portability** — change `device_profile` or connection params in YAML, code unchanged
+- **Reusable profiles** — define `wago_750_352.yaml` once, share across projects
+- **Type safety** — the compiler knows which fields exist on each device
+- **YAML as single source of truth** — hardware config and symbol mapping in one place
+
 ### Device Profile System
 
-Device profiles are reusable YAML files describing the register map of specific hardware.
-They can be shared between projects and published as a community library.
+A device profile is a reusable YAML file that defines **both** the struct schema (fields
+visible in ST code) **and** the register map (how the communication runtime reads/writes
+the physical device). Profiles can be shared between projects and published as a community
+library.
+
+Each profile defines:
+1. **Struct type name** — becomes the TYPE name in generated ST code
+2. **Fields** — each field has a name, ST data type, direction, and register mapping
+3. **Register mapping** — Modbus register address, type, bit position, scaling
 
 ```yaml
 # profiles/abb_acs580.yaml
-name: ABB ACS580 Variable Frequency Drive
+name: AbbAcs580
 vendor: ABB
 protocol: modbus-rtu
 description: "Standard Modbus register map for ABB ACS580 series VFDs"
 
-registers:
-  control:
-    - { name: RUN,       register: 0, bit: 0, type: coil, direction: output }
-    - { name: STOP,      register: 0, bit: 1, type: coil, direction: output }
-    - { name: FAULT_RST, register: 0, bit: 7, type: coil, direction: output }
-  status:
-    - { name: READY,     register: 0, bit: 0, type: discrete_input, direction: input }
-    - { name: RUNNING,   register: 0, bit: 1, type: discrete_input, direction: input }
-    - { name: FAULT,     register: 0, bit: 3, type: discrete_input, direction: input }
-  analog:
-    - { name: SPEED_REF, register: 1, type: holding_register, scale: 0.1, unit: Hz, direction: output }
-    - { name: SPEED_ACT, register: 2, type: input_register, scale: 0.1, unit: Hz, direction: input }
-    - { name: CURRENT,   register: 3, type: input_register, scale: 0.1, unit: A, direction: input }
-    - { name: TORQUE,    register: 4, type: input_register, scale: 0.1, unit: "Nm", direction: input }
-    - { name: POWER,     register: 5, type: input_register, scale: 0.1, unit: kW, direction: input }
+fields:
+  # Control outputs (ST writes → Modbus writes)
+  - name: RUN
+    type: BOOL
+    direction: output
+    register: { address: 0, bit: 0, kind: coil }
+
+  - name: STOP
+    type: BOOL
+    direction: output
+    register: { address: 0, bit: 1, kind: coil }
+
+  - name: FAULT_RST
+    type: BOOL
+    direction: output
+    register: { address: 0, bit: 7, kind: coil }
+
+  # Status inputs (Modbus reads → ST reads)
+  - name: READY
+    type: BOOL
+    direction: input
+    register: { address: 0, bit: 0, kind: discrete_input }
+
+  - name: RUNNING
+    type: BOOL
+    direction: input
+    register: { address: 0, bit: 1, kind: discrete_input }
+
+  - name: FAULT
+    type: BOOL
+    direction: input
+    register: { address: 0, bit: 3, kind: discrete_input }
+
+  # Analog I/O (scaled values)
+  - name: SPEED_REF
+    type: REAL
+    direction: output
+    register: { address: 1, kind: holding_register, scale: 0.1, unit: Hz }
+
+  - name: SPEED_ACT
+    type: REAL
+    direction: input
+    register: { address: 2, kind: input_register, scale: 0.1, unit: Hz }
+
+  - name: CURRENT
+    type: REAL
+    direction: input
+    register: { address: 3, kind: input_register, scale: 0.1, unit: A }
+
+  - name: TORQUE
+    type: REAL
+    direction: input
+    register: { address: 4, kind: input_register, scale: 0.1, unit: Nm }
+
+  - name: POWER
+    type: REAL
+    direction: input
+    register: { address: 5, kind: input_register, scale: 0.1, unit: kW }
+```
+
+A generic I/O module profile shows the pattern for digital/analog boards:
+
+```yaml
+# profiles/wago_750_352.yaml
+name: Wago750352
+vendor: WAGO
+protocol: modbus-tcp
+description: "WAGO 750-352 fieldbus coupler with 8 DI, 4 AI, 4 DO, 2 AO"
+
+fields:
+  - { name: DI_0, type: BOOL, direction: input,  register: { address: 0, bit: 0, kind: coil } }
+  - { name: DI_1, type: BOOL, direction: input,  register: { address: 0, bit: 1, kind: coil } }
+  - { name: DI_2, type: BOOL, direction: input,  register: { address: 0, bit: 2, kind: coil } }
+  - { name: DI_3, type: BOOL, direction: input,  register: { address: 0, bit: 3, kind: coil } }
+  - { name: DI_4, type: BOOL, direction: input,  register: { address: 0, bit: 4, kind: coil } }
+  - { name: DI_5, type: BOOL, direction: input,  register: { address: 0, bit: 5, kind: coil } }
+  - { name: DI_6, type: BOOL, direction: input,  register: { address: 0, bit: 6, kind: coil } }
+  - { name: DI_7, type: BOOL, direction: input,  register: { address: 0, bit: 7, kind: coil } }
+  - { name: AI_0, type: INT,  direction: input,  register: { address: 0, kind: input_register } }
+  - { name: AI_1, type: INT,  direction: input,  register: { address: 1, kind: input_register } }
+  - { name: AI_2, type: INT,  direction: input,  register: { address: 2, kind: input_register } }
+  - { name: AI_3, type: INT,  direction: input,  register: { address: 3, kind: input_register } }
+  - { name: DO_0, type: BOOL, direction: output, register: { address: 0, bit: 0, kind: coil } }
+  - { name: DO_1, type: BOOL, direction: output, register: { address: 0, bit: 1, kind: coil } }
+  - { name: DO_2, type: BOOL, direction: output, register: { address: 0, bit: 2, kind: coil } }
+  - { name: DO_3, type: BOOL, direction: output, register: { address: 0, bit: 3, kind: coil } }
+  - { name: AO_0, type: INT,  direction: output, register: { address: 0, kind: holding_register } }
+  - { name: AO_1, type: INT,  direction: output, register: { address: 1, kind: holding_register } }
 ```
 
 ### Extension Crate Structure
@@ -617,36 +754,43 @@ st-comm-api/                 # Shared trait + types (lightweight, no I/O)
 ### Scan Cycle Integration
 
 ```
-┌───────────────────────────────────────────────┐
-│              Engine Scan Cycle                  │
-│                                                 │
-│  1. comm_manager.read_inputs()                  │
-│     → Modbus TCP: read coils + registers        │
-│     → Modbus RTU: read device registers         │
-│     → Map raw data → ST global variables        │
-│                                                 │
-│  2. vm.scan_cycle("Main")                       │
-│     → Execute user's ST program                 │
-│     → Program reads DI_0, writes DO_0, etc.     │
-│                                                 │
-│  3. comm_manager.write_outputs()                │
-│     → Map ST global variables → raw data        │
-│     → Modbus TCP: write coils + registers        │
-│     → Modbus RTU: write device registers        │
-│                                                 │
-│  4. comm_manager.process_acyclic()              │
-│     → Handle queued on-demand requests          │
-└───────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────┐
+│              Engine Scan Cycle                       │
+│                                                     │
+│  1. comm_manager.read_inputs()                      │
+│     → For each cyclic device:                       │
+│       → Read Modbus registers from physical device  │
+│       → Map register values → struct fields         │
+│       → Write struct fields into VM globals          │
+│       (e.g., rack_left.DI_0, pump_vfd.SPEED_ACT)    │
+│                                                     │
+│  2. vm.scan_cycle("Main")                           │
+│     → Execute user's ST program                     │
+│     → Program reads rack_left.DI_0, writes          │
+│       pump_vfd.SPEED_REF, etc.                      │
+│                                                     │
+│  3. comm_manager.write_outputs()                    │
+│     → For each cyclic device:                       │
+│       → Read struct fields from VM globals           │
+│       → Map struct fields → register values         │
+│       → Write Modbus registers to physical device   │
+│       (only output-direction fields are written)     │
+│                                                     │
+│  4. comm_manager.process_acyclic()                  │
+│     → Handle queued on-demand requests              │
+└────────────────────────────────────────────────────┘
 ```
 
 ### Implementation Plan
 
 - [ ] **`st-comm-api` crate** (trait + types):
   - [ ] `CommExtension` trait (configure, read_inputs, write_outputs, acyclic, start/stop)
-  - [ ] `IoVariable` struct (name, type, direction, address)
+  - [ ] `DeviceProfile` struct (name, vendor, fields with register mappings)
+  - [ ] `ProfileField` struct (name, ST type, direction, register address/kind/bit/scale)
   - [ ] `CommError`, `CommDiagnostics`, `AcyclicRequest/Response` types
-  - [ ] `DeviceProfile` YAML schema and parser
-  - [ ] Config-to-ST VAR_GLOBAL generator
+  - [ ] Device profile YAML parser (profile → struct schema + register map)
+  - [ ] Profile-to-ST code generator (profile → TYPE struct + VAR_GLOBAL instances)
+  - [ ] Project YAML parser (communications section → list of named device instances)
 - [ ] **`st-comm-modbus-tcp` crate**:
   - [ ] Modbus TCP client (socket connection, retry, timeout)
   - [ ] Read coils, discrete inputs, holding registers, input registers
@@ -665,7 +809,9 @@ st-comm-api/                 # Shared trait + types (lightweight, no I/O)
 - [ ] **Communication Manager** (in `st-runtime`):
   - [ ] Load and initialize extensions from plc-project.yaml config
   - [ ] Integrate into scan cycle: read_inputs → execute → write_outputs → acyclic
-  - [ ] Map extension IoVariables to VM global variable slots
+  - [ ] Map device profile struct fields ↔ VM global struct instance slots
+  - [ ] Direction-aware I/O: only read `input` fields, only write `output` fields
+  - [ ] Register value scaling (raw register ↔ engineering units via `scale` factor)
   - [ ] Connection monitoring and automatic reconnection
   - [ ] Diagnostics exposed via monitor server
 - [ ] **Engine integration**:
