@@ -213,9 +213,10 @@ impl LanguageServer for Backend {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.clone();
-        let doc = Document::new(
+        let doc = Document::new_with_uri(
             params.text_document.text,
             Some(params.text_document.version),
+            uri.as_str(),
         );
         self.publish_diagnostics(&uri, &doc).await;
         self.documents.write().await.insert(uri, doc);
@@ -230,7 +231,11 @@ impl LanguageServer for Backend {
                 doc.update(change.text, Some(params.text_document.version));
                 self.publish_diagnostics(&uri, doc).await;
             } else {
-                let doc = Document::new(change.text, Some(params.text_document.version));
+                let doc = Document::new_with_uri(
+                    change.text,
+                    Some(params.text_document.version),
+                    uri.as_str(),
+                );
                 self.publish_diagnostics(&uri, &doc).await;
                 docs.insert(uri, doc);
             }

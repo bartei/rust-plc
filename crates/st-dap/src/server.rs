@@ -97,6 +97,7 @@ struct DapSession {
     pending_events: Vec<Event>,
     should_exit: bool,
     next_var_ref: i64,
+    entry_point_override: Option<String>,
 }
 
 impl DapSession {
@@ -107,6 +108,7 @@ impl DapSession {
             vm: None,
             pending_events: Vec::new(),
             should_exit: false,
+            entry_point_override: None,
             next_var_ref: 1000,
         }
     }
@@ -170,17 +172,81 @@ impl DapSession {
         }
     }
 
+    /// Load and parse the project — detects multi-file projects by walking
+    /// up from the source file to find plc-project.yaml.
+    fn load_project(&mut self) -> Result<st_syntax::lower::LowerResult, String> {
+        let path = std::path::Path::new(&self.source_path);
+
+        // Try to discover a project (walks up to find plc-project.yaml)
+        let project_dir = if path.is_file() {
+            path.parent()
+        } else {
+            Some(path)
+        };
+
+        // Check if there's a plc-project.yaml in the file's directory or parent
+        let yaml_found = project_dir.is_some_and(|dir| {
+            let mut check = dir.to_path_buf();
+            loop {
+                if check.join("plc-project.yaml").exists() || check.join("plc-project.yml").exists() {
+                    return true;
+                }
+                if !check.pop() {
+                    return false;
+                }
+            }
+        });
+
+        if yaml_found || path.is_dir() {
+            // Multi-file project mode
+            let project = st_syntax::project::discover_project(Some(path))
+                .map_err(|e| format!("Project discovery failed: {e}"))?;
+
+            self.pending_events.push(console_output(&format!(
+                "Project '{}': {} source file(s)", project.name, project.source_files.len()
+            )));
+
+            let sources = st_syntax::project::load_project_sources(&project)
+                .map_err(|e| format!("Cannot load sources: {e}"))?;
+
+            let stdlib = st_syntax::multi_file::builtin_stdlib();
+            let mut all_sources: Vec<&str> = stdlib.to_vec();
+            let owned: Vec<String> = sources.into_iter().map(|(_, content)| content).collect();
+            for s in &owned {
+                all_sources.push(s.as_str());
+            }
+
+            if let Some(ref ep) = project.entry_point {
+                self.entry_point_override = Some(ep.clone());
+            }
+
+            Ok(st_syntax::multi_file::parse_multi(&all_sources))
+        } else {
+            // Single-file mode
+            self.source = std::fs::read_to_string(&self.source_path)
+                .map_err(|e| format!("Cannot read '{}': {e}", self.source_path))?;
+
+            // Include stdlib
+            let stdlib = st_syntax::multi_file::builtin_stdlib();
+            let mut all_sources: Vec<&str> = stdlib.to_vec();
+            all_sources.push(&self.source);
+
+            Ok(st_syntax::multi_file::parse_multi(&all_sources))
+        }
+    }
+
     fn handle_launch(&mut self, seq: i64) -> Response {
         self.pending_events.push(console_output(&format!(
             "Loading: {}", self.source_path
         )));
 
-        self.source = match std::fs::read_to_string(&self.source_path) {
-            Ok(s) => s,
-            Err(e) => return err(seq, &format!("Cannot read '{}': {e}", self.source_path)),
+        // Try to discover a multi-file project from the source path.
+        // Walk up from the file to find a plc-project.yaml, or detect a directory.
+        let parse_result = match self.load_project() {
+            Ok(result) => result,
+            Err(msg) => return err(seq, &msg),
         };
 
-        let parse_result = st_syntax::parse(&self.source);
         if !parse_result.errors.is_empty() {
             let msg = format!("{} parse error(s) found", parse_result.errors.len());
             self.pending_events.push(console_output(&msg));
@@ -199,7 +265,7 @@ impl DapSession {
         )));
 
         if !module.functions.iter().any(|f| f.kind == PouKind::Program) {
-            return err(seq, "No PROGRAM found in source file");
+            return err(seq, "No PROGRAM found in source file(s)");
         }
 
         let config = VmConfig {
@@ -210,13 +276,14 @@ impl DapSession {
         vm.debug_mut().resume(StepMode::StepIn, 0);
 
         // Start the VM — it will immediately halt on the first instruction
-        let program_name = vm
-            .module()
-            .functions
-            .iter()
-            .find(|f| f.kind == PouKind::Program)
-            .map(|f| f.name.clone())
-            .unwrap();
+        let program_name = self.entry_point_override.clone().unwrap_or_else(|| {
+            vm.module()
+                .functions
+                .iter()
+                .find(|f| f.kind == PouKind::Program)
+                .map(|f| f.name.clone())
+                .unwrap()
+        });
         let _ = vm.run(&program_name); // Err(Halt) expected
 
         self.vm = Some(vm);
