@@ -12,5 +12,9 @@
     "crates/st-grammar/src/parser.c": true,
     "crates/st-grammar/src/grammar.json": true,
     "crates/st-grammar/src/node-types.json": true
+  },
+  "yaml.schemas": {
+    "./schemas/plc-project.schema.json": "plc-project.yaml",
+    "./schemas/device-profile.schema.json": "profiles/*.yaml"
   }
 }

@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/bartei/rust-plc/schemas/device-profile.schema.json",
+  "title": "Device Profile",
+  "description": "Device profile for communication hardware. Defines the ST struct type (fields) and the register map (how each field maps to a protocol register).",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Struct type name in generated ST code (e.g., 'Wago750352', 'AbbAcs580'). Must be a valid IEC 61131-3 identifier.",
+      "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+    },
+    "vendor": {
+      "type": "string",
+      "description": "Device vendor/manufacturer name.",
+      "examples": ["WAGO", "ABB", "Siemens", "Danfoss", "Phoenix Contact"]
+    },
+    "protocol": {
+      "type": "string",
+      "description": "Primary protocol this profile is designed for. The profile may work with compatible protocols (e.g., modbus-tcp and modbus-rtu share register maps).",
+      "enum": ["modbus-tcp", "modbus-rtu", "modbus-ascii", "generic"]
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of the device."
+    },
+    "fields": {
+      "type": "array",
+      "description": "Process I/O fields. Each field becomes a member of the generated ST struct, and maps to a specific register/address on the device.",
+      "items": {
+        "$ref": "#/$defs/field"
+      },
+      "minItems": 1
+    }
+  },
+  "required": ["name", "fields"],
+  "additionalProperties": false,
+  "$defs": {
+    "field": {
+      "type": "object",
+      "description": "A single I/O field — maps an ST struct member to a device register.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Field name in the ST struct (e.g., 'DI_0', 'SPEED_REF', 'FAULT'). Must be a valid IEC 61131-3 identifier.",
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+        },
+        "type": {
+          "type": "string",
+          "description": "IEC 61131-3 data type of this field.",
+          "enum": ["BOOL", "SINT", "INT", "DINT", "LINT", "USINT", "UINT", "UDINT", "ULINT", "REAL", "LREAL", "BYTE", "WORD", "DWORD", "LWORD", "STRING", "TIME"]
+        },
+        "direction": {
+          "type": "string",
+          "description": "I/O direction. 'input': read from device (device → PLC). 'output': written to device (PLC → device). 'inout': both directions.",
+          "enum": ["input", "output", "inout"]
+        },
+        "register": {
+          "$ref": "#/$defs/register",
+          "description": "Register mapping — how this field is read/written on the physical device."
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of this field."
+        }
+      },
+      "required": ["name", "type", "direction", "register"],
+      "additionalProperties": false
+    },
+    "register": {
+      "type": "object",
+      "description": "Protocol register mapping for a field.",
+      "properties": {
+        "address": {
+          "type": "integer",
+          "description": "Register address (Modbus: 0-based register number).",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "kind": {
+          "type": "string",
+          "description": "Modbus register type.",
+          "enum": ["coil", "discrete_input", "holding_register", "input_register"]
+        },
+        "bit": {
+          "type": "integer",
+          "description": "Bit position within the register (0-15). Used for BOOL fields packed into a word register.",
+          "minimum": 0,
+          "maximum": 15
+        },
+        "scale": {
+          "type": "number",
+          "description": "Scaling factor: ST_value = raw_register_value * scale. For example, scale=0.1 means register value 450 → ST value 45.0.",
+          "exclusiveMinimum": 0
+        },
+        "offset": {
+          "type": "number",
+          "description": "Offset applied after scaling: ST_value = raw * scale + offset.",
+          "default": 0
+        },
+        "unit": {
+          "type": "string",
+          "description": "Engineering unit (documentation only, not enforced). E.g., 'Hz', 'A', 'Nm', 'kW', 'degC'.",
+          "examples": ["Hz", "A", "Nm", "kW", "degC", "bar", "l/min", "%"]
+        },
+        "byte_order": {
+          "type": "string",
+          "description": "Byte order for multi-byte registers. Most Modbus devices use big-endian.",
+          "enum": ["big-endian", "little-endian"],
+          "default": "big-endian"
+        },
+        "word_count": {
+          "type": "integer",
+          "description": "Number of registers to read for this field (default 1). Use 2 for 32-bit values (DINT, REAL).",
+          "minimum": 1,
+          "maximum": 4,
+          "default": 1
+        }
+      },
+      "required": ["address", "kind"],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/bartei/rust-plc/schemas/plc-project.schema.json",
+  "title": "PLC Project Configuration",
+  "description": "Configuration file for IEC 61131-3 Structured Text PLC projects (plc-project.yaml).",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Project name. Used in CLI output and diagnostics."
+    },
+    "version": {
+      "type": "string",
+      "description": "Project version string (e.g., \"1.0.0\").",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+.*$"
+    },
+    "entryPoint": {
+      "type": "string",
+      "description": "Name of the PROGRAM to execute as the main scan cycle entry point. If omitted, the first PROGRAM found is used.",
+      "default": "Main"
+    },
+    "target": {
+      "type": "string",
+      "description": "Build target platform. 'host' runs on the local machine.",
+      "enum": ["host"],
+      "default": "host"
+    },
+    "sources": {
+      "type": "array",
+      "description": "Explicit list of source file paths or glob patterns. If omitted, all .st/.scl files in the project directory are autodiscovered.",
+      "items": {
+        "type": "string"
+      },
+      "examples": [["main.st", "lib/*.st", "controllers/**/*.st"]]
+    },
+    "libraries": {
+      "type": "array",
+      "description": "Additional library directories whose .st/.scl files are included in compilation.",
+      "items": {
+        "type": "string"
+      },
+      "examples": [["custom_libs/", "../shared_lib/"]]
+    },
+    "exclude": {
+      "type": "array",
+      "description": "File or directory patterns to exclude from autodiscovery. Supports simple globs (test_*.st) and directory names (deprecated/).",
+      "items": {
+        "type": "string"
+      },
+      "examples": [["test_*.st", "deprecated/", "*.bak"]]
+    },
+    "links": {
+      "type": "array",
+      "description": "Communication links — physical transport channels (TCP sockets, serial ports). Each link can serve multiple devices.",
+      "items": {
+        "$ref": "#/$defs/link"
+      }
+    },
+    "devices": {
+      "type": "array",
+      "description": "Communication devices — addressable units on links. Each device becomes a named global struct instance in ST code.",
+      "items": {
+        "$ref": "#/$defs/device"
+      }
+    }
+  },
+  "required": ["name"],
+  "additionalProperties": false,
+  "$defs": {
+    "link": {
+      "type": "object",
+      "description": "A communication link — physical transport layer (serial port, TCP socket).",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Unique link name. Referenced by devices via the 'link' field."
+        },
+        "type": {
+          "type": "string",
+          "description": "Link type: transport protocol.",
+          "enum": ["tcp", "serial", "udp"]
+        },
+        "host": {
+          "type": "string",
+          "description": "TCP/UDP: remote host IP address or hostname.",
+          "examples": ["192.168.1.100", "plc-gateway.local"]
+        },
+        "port": {
+          "description": "TCP/UDP: remote port number. Serial: device path.",
+          "oneOf": [
+            { "type": "integer", "minimum": 1, "maximum": 65535 },
+            { "type": "string" }
+          ],
+          "examples": [502, "/dev/ttyUSB0", "/dev/ttyACM0", "COM3"]
+        },
+        "timeout": {
+          "type": "string",
+          "description": "Response timeout. Duration string (e.g., '500ms', '2s').",
+          "pattern": "^[0-9]+(ms|s|m)$",
+          "default": "500ms"
+        },
+        "baud": {
+          "type": "integer",
+          "description": "Serial: baud rate.",
+          "enum": [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200],
+          "default": 9600
+        },
+        "parity": {
+          "type": "string",
+          "description": "Serial: parity setting.",
+          "enum": ["none", "even", "odd"],
+          "default": "none"
+        },
+        "data_bits": {
+          "type": "integer",
+          "description": "Serial: number of data bits.",
+          "enum": [7, 8],
+          "default": 8
+        },
+        "stop_bits": {
+          "type": "integer",
+          "description": "Serial: number of stop bits.",
+          "enum": [1, 2],
+          "default": 1
+        }
+      },
+      "required": ["name", "type"],
+      "additionalProperties": false,
+      "if": {
+        "properties": { "type": { "const": "tcp" } }
+      },
+      "then": {
+        "required": ["name", "type", "host", "port"]
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "type": { "const": "serial" } }
+          },
+          "then": {
+            "required": ["name", "type", "port", "baud"]
+          }
+        }
+      ]
+    },
+    "device": {
+      "type": "object",
+      "description": "A communication device — an addressable unit on a link. The 'name' becomes a global struct variable in ST code.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Global variable name in ST code. Must be a valid IEC 61131-3 identifier (e.g., 'rack_left', 'pump_vfd').",
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+        },
+        "link": {
+          "type": "string",
+          "description": "Name of the link this device communicates over. Must match a link name defined in the 'links' section."
+        },
+        "protocol": {
+          "type": "string",
+          "description": "Application-layer protocol.",
+          "enum": ["modbus-tcp", "modbus-rtu", "modbus-ascii"]
+        },
+        "unit_id": {
+          "type": "integer",
+          "description": "Modbus unit/slave address (1-247).",
+          "minimum": 1,
+          "maximum": 247
+        },
+        "mode": {
+          "type": "string",
+          "description": "I/O mode. 'cyclic': read/write every scan cycle. 'acyclic': on-demand only.",
+          "enum": ["cyclic", "acyclic"],
+          "default": "cyclic"
+        },
+        "cycle_time": {
+          "type": "string",
+          "description": "Minimum interval between I/O updates for this device. Duration string (e.g., '10ms', '100ms', '1s'). Only used when mode is 'cyclic'.",
+          "pattern": "^[0-9]+(ms|s|m)$",
+          "default": "10ms"
+        },
+        "device_profile": {
+          "type": "string",
+          "description": "Name of the device profile YAML file (without .yaml extension). The profile defines the struct type and register map. Searched in: project profiles/ dir, then built-in profiles.",
+          "examples": ["wago_750_352", "abb_acs580", "generic_io_16di", "generic_temp_rtd"]
+        }
+      },
+      "required": ["name", "link", "protocol", "device_profile"],
+      "additionalProperties": false
+    }
+  }
+}
