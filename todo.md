@@ -379,8 +379,8 @@ Spec: [IEC 61131-3 Ed.3 §6.6.5](https://webstore.iec.ch/publication/4552) (offi
   - [x] FB/class field read/write (StoreField/LoadField)
   - [x] Nested instance state isolation (class inside different FB instances)
   - [ ] Online change compatibility with classes
-- [ ] **Documentation:**
-  - [ ] Language reference page for Classes, Methods, Interfaces, Properties
+- [x] **Documentation:**
+  - [x] Language reference page for Classes, Methods, Interfaces, Properties
   - [ ] Migration guide: FUNCTION_BLOCK to CLASS
   - [x] Playground examples
   - [x] Multi-file OOP project example (playground/oop_project)

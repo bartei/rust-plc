@@ -18,6 +18,7 @@
 - [Statements](./language/statements.md)
 - [Functions](./language/functions.md)
 - [Function Blocks](./language/function-blocks.md)
+- [Classes, Methods & Interfaces](./language/classes.md)
 - [User-Defined Types](./language/user-defined-types.md)
 - [Pointers & References](./language/pointers.md)
 - [Standard Library](./language/standard-library.md)
