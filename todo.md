@@ -394,15 +394,46 @@ A PLC is only useful if it can talk to the physical world. This phase establishe
 protocol (Modbus, Profinet, EtherCAT, etc.) is an independent, versioned extension —
 and delivers the first two implementations: Modbus TCP and Modbus RTU/ASCII.
 
+### Competitive Analysis — What We Take From the Best
+
+Based on analysis of CODESYS 3.5, Siemens TIA Portal, Beckhoff TwinCAT 3, Rockwell
+Studio 5000, and Phoenix Contact PLCnext:
+
+| Concept | Inspired By | Our Approach |
+|---------|------------|--------------|
+| **Auto-generated structured tags** | Studio 5000 | Device profiles → ST struct types + named global instances |
+| **Decoupled I/O and PLC namespaces** | TwinCAT linked variables | Struct instances are the link — profile defines I/O shape, YAML name binds it |
+| **Universal device description import** | CODESYS | Profile YAML can be hand-written or generated from GSD/ESI/EDS import tools |
+| **Multi-rate I/O with task binding** | TIA Portal process image partitions | Each device declares its `cycle_time`; comm manager groups by rate |
+| **Shared data space** | PLCnext GDS | Global struct instances ARE the shared data space — VM, comm manager, monitor all access them |
+| **Text-based, git-friendly config** | *None (we're first)* | YAML for project config + device profiles; diffs, code review, CI/CD all work |
+| **Layer separation** | OSI / CODESYS | Links (physical) → Devices (protocol) → Profiles (schema) → Globals (binding) |
+
+**What we do that nobody else does:**
+- **YAML-first configuration** — every competitor uses proprietary binary or heavyweight XML
+  inside IDE project databases. Ours is human-readable, git-diffable, CI/CD-friendly.
+- **Profile = struct type + register map in one file** — competitors separate device description
+  from I/O mapping. We unify them: one YAML file defines both the ST data structure and the
+  register-level wiring. Share a profile, get both the code interface and the hardware mapping.
+- **No IDE required** — configure hardware with a text editor. Every competitor requires their
+  proprietary IDE for hardware configuration.
+- **Cross-protocol profiles** — a device profile defines field names and types independent of
+  transport. The same ABB ACS580 profile works whether you're talking Modbus TCP, Modbus RTU,
+  or (future) PROFINET — only the link and register mapping change.
+
 ### Design Principles
 
-1. **Each protocol is an independent crate** — separately versioned, tested, and maintained
-2. **No framework recompilation** — extensions are loaded via a trait interface at runtime
-3. **Community extensible** — third parties can publish protocol extensions (like an app store)
-4. **Device profiles** — reusable configurations for specific hardware (e.g., ABB ACS580 VFD
-   registers, Siemens ET200 I/O module maps) that simplify setup for end users
-5. **Cyclic + acyclic modes** — like CODESYS, TwinCAT, and Siemens: cyclic I/O happens every
-   scan cycle, acyclic requests (parameter reads, diagnostics) happen on-demand
+1. **OSI-layered architecture** — physical links, protocol devices, and application-level
+   profiles are separate concerns in separate crates
+2. **Each protocol is an independent crate** — separately versioned, tested, and maintained
+3. **No framework recompilation** — extensions are loaded via trait interfaces
+4. **Community extensible** — third parties can publish protocol extensions and device profiles
+5. **Device profiles as struct schemas** — each profile defines an ST struct type + register map;
+   each YAML device entry becomes a named global instance of that struct
+6. **Cyclic + acyclic modes** — cyclic I/O every scan cycle, acyclic on-demand
+7. **Multi-rate I/O** — each device can have its own cycle_time; faster devices update more often
+8. **Diagnostics built in** — every link and device exposes health, error counters, and connection
+   state as additional struct fields (like Studio 5000's module fault bits)
 
 ### Architecture
 
@@ -617,18 +648,33 @@ devices:
     mode: acyclic
 ```
 
-This auto-generates struct types from device profiles and named global instances:
+This auto-generates struct types from device profiles and named global instances.
+Every device struct automatically includes a `_diag` sub-struct with connection
+health fields (inspired by Studio 5000's auto-generated module fault bits and
+TIA Portal's diagnostic integration):
 
 ```st
 (* Auto-generated from device profiles — DO NOT EDIT *)
 
+(* Diagnostics sub-struct — added to every device automatically *)
+TYPE CommDiag : STRUCT
+    connected    : BOOL;      (* TRUE when device is responding *)
+    error        : BOOL;      (* TRUE on communication error *)
+    error_count  : DINT;      (* cumulative error count *)
+    last_update  : TIME;      (* timestamp of last successful I/O *)
+    response_ms  : INT;       (* last response time in ms *)
+END_STRUCT;
+
 (* Struct type generated from profile: wago_750_352 *)
 TYPE Wago750352 : STRUCT
+    (* Process I/O fields — from device profile *)
     DI_0 : BOOL;  DI_1 : BOOL;  DI_2 : BOOL;  DI_3 : BOOL;
     DI_4 : BOOL;  DI_5 : BOOL;  DI_6 : BOOL;  DI_7 : BOOL;
     AI_0 : INT;   AI_1 : INT;   AI_2 : INT;   AI_3 : INT;
     DO_0 : BOOL;  DO_1 : BOOL;  DO_2 : BOOL;  DO_3 : BOOL;
     AO_0 : INT;   AO_1 : INT;
+    (* Connection diagnostics — auto-generated *)
+    _diag : CommDiag;
 END_STRUCT;
 
 (* Struct type generated from profile: abb_acs580 *)
@@ -644,18 +690,21 @@ TYPE AbbAcs580 : STRUCT
     CURRENT    : REAL;     (* input register 3, 0.1 A, input *)
     TORQUE     : REAL;     (* input register 4, 0.1 Nm, input *)
     POWER      : REAL;     (* input register 5, 0.1 kW, input *)
+    _diag      : CommDiag;
 END_STRUCT;
 END_TYPE
 
 (* Global instances — names from plc-project.yaml *)
 VAR_GLOBAL
-    rack_left  : Wago750352;   (* 192.168.1.100, unit 1 *)
-    rack_right : Wago750352;   (* 192.168.1.101, unit 1 *)
-    pump_vfd   : AbbAcs580;    (* /dev/ttyUSB0, unit 3 *)
+    rack_left  : Wago750352;   (* eth_rack_left, unit 1 *)
+    rack_right : Wago750352;   (* eth_rack_right, unit 1 *)
+    pump_vfd   : AbbAcs580;    (* rs485_bus_1, unit 3 *)
+    fan_vfd    : AbbAcs580;    (* rs485_bus_1, unit 4 *)
 END_VAR
 ```
 
-User code is clear, portable, and hardware-agnostic:
+User code is clear, portable, and hardware-agnostic. Diagnostics are
+available without any extra setup — just read the `_diag` fields:
 
 ```st
 PROGRAM Main
@@ -675,6 +724,18 @@ END_VAR
         pump_vfd.FAULT_RST := TRUE;
     END_IF;
 
+    (* Built-in diagnostics — no setup required *)
+    IF NOT rack_left._diag.connected THEN
+        (* rack_left is offline — safe state *)
+        rack_right.DO_0 := FALSE;
+        rack_right.DO_1 := FALSE;
+    END_IF;
+
+    IF pump_vfd._diag.error_count > 10 THEN
+        (* too many comm errors — stop the VFD *)
+        pump_vfd.RUN := FALSE;
+    END_IF;
+
     (* Swap hardware? Change YAML, code stays the same. *)
 END_PROGRAM
 ```
@@ -686,6 +747,43 @@ END_PROGRAM
 - **Reusable profiles** — define `wago_750_352.yaml` once, share across projects
 - **Type safety** — the compiler knows which fields exist on each device
 - **YAML as single source of truth** — hardware config and symbol mapping in one place
+
+### Multi-Rate I/O
+
+Inspired by TIA Portal's process image partitions, each device can declare its own
+`cycle_time`. The Communication Manager groups devices by rate and updates them
+independently. Fast devices (safety I/O, motion) update every cycle; slow devices
+(temperature sensors, energy meters) update less often, reducing bus load:
+
+```yaml
+devices:
+  - name: safety_io
+    cycle_time: 1ms         # every scan cycle
+    device_profile: safety_module
+    # ...
+  - name: temp_sensor
+    cycle_time: 500ms       # every 500th cycle at 1ms scan
+    device_profile: generic_temp_rtd
+    # ...
+```
+
+The comm manager tracks a per-device timer. Input fields of slow devices hold their
+last-known value between updates; `_diag.last_update` lets user code detect staleness.
+
+### Device Description Import (Future)
+
+Inspired by CODESYS's universal import capability. A CLI tool converts standard device
+description files into our YAML profile format:
+
+```bash
+st-cli profile import --format gsdml    device.xml     # PROFINET
+st-cli profile import --format esi      device.xml     # EtherCAT
+st-cli profile import --format eds      device.eds     # CANopen / EtherNet/IP
+```
+
+This generates a `.yaml` profile with the struct fields and register mappings extracted
+from the standard file. Users can then edit the generated YAML to customize field names,
+add scaling, or remove unused channels.
 
 ### Device Profile System
 
@@ -916,12 +1014,16 @@ link crate — all existing device crates work unchanged.
   - [ ] Map device profile struct fields ↔ VM global struct instance slots
   - [ ] Direction-aware I/O: only read `input` fields, only write `output` fields
   - [ ] Register value scaling (raw register ↔ engineering units via `scale` factor)
-  - [ ] Connection monitoring and automatic reconnection
-  - [ ] Diagnostics exposed via monitor server
+  - [ ] Multi-rate scheduling: per-device `cycle_time` with independent update timers
+  - [ ] Auto-generate `CommDiag` fields for every device (connected, error, error_count, etc.)
+  - [ ] Connection monitoring and automatic reconnection with backoff
+  - [ ] Diagnostics exposed via monitor server + WebSocket
 - [ ] **Engine integration**:
   - [ ] `st-cli run` loads link/device config and starts communication
   - [ ] `st-cli comm-status` shows link health and device connection state
   - [ ] `st-cli comm-test` sends a test read to verify connectivity
+  - [ ] `st-cli profile import` converts GSD/GSDML/ESI/EDS → YAML profile
+  - [ ] `st-cli profile validate` checks a device profile YAML for errors
 - [ ] **Bundled device profiles**:
   - [ ] Generic Modbus I/O (coils + registers, 8/16/32 channel variants)
   - [ ] ABB ACS580 VFD
@@ -929,7 +1031,7 @@ link crate — all existing device crates work unchanged.
   - [ ] WAGO 750-352 I/O coupler
   - [ ] Generic temperature sensor (RTD/thermocouple via analog input)
 - [ ] **Documentation**:
-  - [ ] Communication architecture guide (link/device layering explained)
+  - [ ] Communication architecture guide (link/device layering, multi-rate, diagnostics)
   - [ ] "Creating a Link Extension" tutorial
   - [ ] "Creating a Device Extension" tutorial
   - [ ] "Creating a Device Profile" guide
