@@ -98,6 +98,10 @@ struct DapSession {
     should_exit: bool,
     next_var_ref: i64,
     entry_point_override: Option<String>,
+    /// Maps function name → (source file path, source content) for multi-file debugging.
+    func_source_map: std::collections::HashMap<String, (String, String)>,
+    /// Source files loaded from the project: (path, content).
+    project_files: Vec<(String, String)>,
 }
 
 impl DapSession {
@@ -109,6 +113,8 @@ impl DapSession {
             pending_events: Vec::new(),
             should_exit: false,
             entry_point_override: None,
+            func_source_map: std::collections::HashMap::new(),
+            project_files: Vec::new(),
             next_var_ref: 1000,
         }
     }
@@ -230,6 +236,11 @@ impl DapSession {
                 }
             }
 
+            // Store project files for function→file mapping later
+            self.project_files = sources.iter()
+                .map(|(p, c)| (p.to_string_lossy().to_string(), c.clone()))
+                .collect();
+
             let stdlib = st_syntax::multi_file::builtin_stdlib();
             let mut all_sources: Vec<&str> = stdlib.to_vec();
             let owned: Vec<String> = sources.into_iter().map(|(_, content)| content).collect();
@@ -284,6 +295,39 @@ impl DapSession {
         self.pending_events.push(console_output(&format!(
             "Compiled: {func_count} POU(s), {instr_count} instructions"
         )));
+
+        // Build function → source file mapping for multi-file stack traces.
+        // Each function's source_map byte offsets are relative to the file it was parsed from.
+        // Match by checking which project file's length accommodates the function's offsets.
+        self.func_source_map.clear();
+        if !self.project_files.is_empty() {
+            for func in &module.functions {
+                // Find the max byte offset in this function's source map
+                let max_offset = func.source_map.iter()
+                    .map(|sm| sm.byte_end)
+                    .max()
+                    .unwrap_or(0);
+                if max_offset == 0 {
+                    continue;
+                }
+                // Find which project file this function belongs to
+                for (path, content) in &self.project_files {
+                    if max_offset <= content.len() {
+                        // Verify: check that at least one non-zero offset falls within this source
+                        let matches = func.source_map.iter().any(|sm| {
+                            sm.byte_offset > 0 && sm.byte_offset < content.len()
+                        });
+                        if matches {
+                            self.func_source_map.insert(
+                                func.name.clone(),
+                                (path.clone(), content.clone()),
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        }
 
         if !module.functions.iter().any(|f| f.kind == PouKind::Program) {
             return err(seq, "No PROGRAM found in source file(s)");
@@ -359,19 +403,37 @@ impl DapSession {
 
         if let Some(ref vm) = self.vm {
             for (i, frame) in vm.stack_frames().iter().enumerate() {
-                let (line, _) = byte_offset_to_line_col(&self.source, frame.source_offset);
-                stack_frames.push(StackFrame {
-                    id: i as i64,
-                    name: frame.func_name.clone(),
-                    source: Some(Source {
-                        name: Some(
+                // Resolve the correct source file for this function
+                let (source_text, source_path, source_name) =
+                    if let Some((path, content)) = self.func_source_map.get(&frame.func_name) {
+                        (
+                            content.as_str(),
+                            path.clone(),
+                            std::path::Path::new(path)
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string(),
+                        )
+                    } else {
+                        (
+                            self.source.as_str(),
+                            self.source_path.clone(),
                             std::path::Path::new(&self.source_path)
                                 .file_name()
                                 .unwrap_or_default()
                                 .to_string_lossy()
                                 .to_string(),
-                        ),
-                        path: Some(self.source_path.clone()),
+                        )
+                    };
+
+                let (line, _) = byte_offset_to_line_col(source_text, frame.source_offset);
+                stack_frames.push(StackFrame {
+                    id: i as i64,
+                    name: frame.func_name.clone(),
+                    source: Some(Source {
+                        name: Some(source_name),
+                        path: Some(source_path),
                         ..Default::default()
                     }),
                     line: line as i64,
@@ -633,11 +695,10 @@ impl DapSession {
                     let frame_desc = vm.stack_frames()
                         .first()
                         .map(|f| {
-                            let mut line = 1usize;
-                            for (i, b) in self.source.bytes().enumerate() {
-                                if i >= f.source_offset { break; }
-                                if b == b'\n' { line += 1; }
-                            }
+                            let src = self.func_source_map.get(&f.func_name)
+                                .map(|(_, c)| c.as_str())
+                                .unwrap_or(&self.source);
+                            let (line, _) = byte_offset_to_line_col(src, f.source_offset);
                             format!("{} line {line}", f.func_name)
                         })
                         .unwrap_or_else(|| "<unknown>".to_string());
@@ -679,11 +740,10 @@ impl DapSession {
                                 let frame_desc = vm.stack_frames()
                                     .first()
                                     .map(|f| {
-                                        let mut line = 1usize;
-                                        for (i, b) in self.source.bytes().enumerate() {
-                                            if i >= f.source_offset { break; }
-                                            if b == b'\n' { line += 1; }
-                                        }
+                                        let src = self.func_source_map.get(&f.func_name)
+                                            .map(|(_, c)| c.as_str())
+                                            .unwrap_or(&self.source);
+                                        let (line, _) = byte_offset_to_line_col(src, f.source_offset);
                                         format!("{} line {line}", f.func_name)
                                     })
                                     .unwrap_or_else(|| "<unknown>".to_string());
