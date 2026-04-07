@@ -406,77 +406,105 @@ and delivers the first two implementations: Modbus TCP and Modbus RTU/ASCII.
 
 ### Architecture
 
+Follows OSI-inspired layer separation: **links** (Layer 1-2: physical transport) are
+separate from **devices** (Layer 7: application protocol). A single link can carry
+multiple devices (e.g., multiple Modbus slaves on one RS-485 bus).
+
 ```
-┌──────────────────────────────────────────────────────────┐
-│                    ST Program                             │
-│   IF rack_left.DI_0 THEN                                 │
-│       rack_right.DO_3 := TRUE;                           │
-│   END_IF;                                                │
-│   pump_vfd.SPEED_REF := 45.0;                            │
-└──────────────┬──────────────────────────┬────────────────┘
-               │ Read Inputs              │ Write Outputs
-               │ (struct fields ← regs)   │ (struct fields → regs)
-┌──────────────▼──────────────────────────▼────────────────┐
-│              Communication Manager                        │
-│  ┌──────────────┐  ┌──────────────┐  ┌────────────────┐  │
-│  │  Modbus TCP  │  │ Modbus RTU   │  │  (future)      │  │
-│  │  Extension   │  │  Extension   │  │  Profinet      │  │
-│  └──────┬───────┘  └──────┬───────┘  └────────────────┘  │
-│         │                 │                               │
-│  ┌──────▼───────┐  ┌──────▼───────┐  Device profiles     │
-│  │  Device      │  │  Device      │  define STRUCT types  │
-│  │  Profiles    │  │  Profiles    │  + register maps.     │
-│  │  wago_750    │  │  abb_acs580  │  YAML name → global   │
-│  │  et200sp     │  │  danfoss_fc  │  struct instance.     │
-│  └──────────────┘  └──────────────┘                       │
-└───────────────────────────────────────────────────────────┘
-               │                 │
-         TCP/IP network    RS-485 serial
-               │                 │
-         ┌─────▼─────┐    ┌─────▼─────┐
-         │  Modbus   │    │  Modbus   │
-         │  Slave    │    │  RTU      │
-         │  Device   │    │  Device   │
-         └───────────┘    └───────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                     ST Program (Layer 7)                      │
+│   IF rack_left.DI_0 THEN rack_right.DO_3 := TRUE; END_IF;   │
+│   pump_vfd.SPEED_REF := 45.0;                               │
+│   fan_vfd.RUN := TRUE;  (* same bus, different address *)    │
+└──────────────┬───────────────────────────┬──────────────────┘
+               │ Read Inputs               │ Write Outputs
+               │ (struct fields ← regs)    │ (struct fields → regs)
+┌──────────────▼───────────────────────────▼──────────────────┐
+│         Communication Manager (orchestrator)                 │
+│                                                              │
+│  Device Layer (protocol + profiles)                          │
+│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐            │
+│  │ rack_left   │ │ pump_vfd    │ │ fan_vfd     │            │
+│  │ Modbus TCP  │ │ Modbus RTU  │ │ Modbus RTU  │            │
+│  │ unit_id=1   │ │ unit_id=3   │ │ unit_id=4   │            │
+│  │ wago_750    │ │ abb_acs580  │ │ abb_acs580  │            │
+│  └──────┬──────┘ └──────┬──────┘ └──────┬──────┘            │
+│         │               │               │                    │
+│  Link Layer (physical transport)        │                    │
+│  ┌──────▼──────┐ ┌──────▼───────────────▼──────┐            │
+│  │ eth_rack_l  │ │ rs485_bus_1                  │            │
+│  │ TCP         │ │ /dev/ttyUSB0, 19200 8E1      │            │
+│  │ 192.168.1.  │ │ (shared by pump + fan VFDs)  │            │
+│  │ 100:502     │ │                              │            │
+│  └──────┬──────┘ └──────────────┬───────────────┘            │
+└─────────┼───────────────────────┼────────────────────────────┘
+          │                       │
+    TCP/IP network          RS-485 bus
+          │                       │
+    ┌─────▼─────┐     ┌─────▼────┐ ┌─────▼────┐
+    │  WAGO     │     │  ABB     │ │  ABB     │
+    │  750-352  │     │  ACS580  │ │  ACS580  │
+    │  I/O rack │     │  pump    │ │  fan     │
+    └───────────┘     └──────────┘ └──────────┘
 ```
 
-### Communication Extension Trait
+### Trait Architecture (Layered)
+
+The trait design mirrors the link/device separation. Link traits manage the physical
+transport. Device traits manage the protocol and register mapping. The Communication
+Manager composes them.
 
 ```rust
-/// Every communication protocol implements this trait.
-/// Extensions are independent crates (e.g., `st-comm-modbus-tcp`).
-pub trait CommExtension: Send + Sync {
-    /// Extension metadata.
+/// Link layer: manages a physical transport channel.
+/// One link can serve multiple devices (e.g., RS-485 bus with multiple slaves).
+pub trait CommLink: Send + Sync {
     fn name(&self) -> &str;
-    fn version(&self) -> &str;
+    fn link_type(&self) -> &str;  // "tcp", "serial", "udp", etc.
+
+    /// Open the physical channel with the configured settings.
+    fn open(&mut self) -> Result<(), CommError>;
+    fn close(&mut self) -> Result<(), CommError>;
+    fn is_open(&self) -> bool;
+
+    /// Raw data exchange (used by device layer).
+    fn send(&mut self, data: &[u8]) -> Result<(), CommError>;
+    fn receive(&mut self, buffer: &mut [u8], timeout_ms: u32) -> Result<usize, CommError>;
+
+    fn diagnostics(&self) -> LinkDiagnostics;
+}
+
+/// Device layer: protocol-specific communication with a single addressable unit.
+/// Reads/writes device registers and maps them to/from struct fields.
+pub trait CommDevice: Send + Sync {
+    fn name(&self) -> &str;
     fn protocol(&self) -> &str;  // "modbus-tcp", "modbus-rtu", "profinet", etc.
 
-    /// Initialize the extension with its configuration.
+    /// Configure with the device section from plc-project.yaml.
     fn configure(&mut self, config: &serde_yaml::Value) -> Result<(), String>;
 
-    /// Cyclic I/O: called by the engine BEFORE each scan cycle.
-    /// Reads physical inputs and writes them to the provided variable map.
-    fn read_inputs(&mut self, inputs: &mut HashMap<String, Value>) -> Result<(), CommError>;
+    /// Bind to a link (the device uses this link for all I/O).
+    fn bind_link(&mut self, link: Arc<Mutex<dyn CommLink>>) -> Result<(), CommError>;
 
-    /// Cyclic I/O: called by the engine AFTER each scan cycle.
-    /// Reads the variable map and writes physical outputs.
-    fn write_outputs(&mut self, outputs: &HashMap<String, Value>) -> Result<(), CommError>;
-
-    /// Acyclic request: on-demand read/write (diagnostics, parameter access).
-    fn acyclic_request(&mut self, request: AcyclicRequest) -> Result<AcyclicResponse, CommError>;
-
-    /// Return the loaded device profile (defines struct schema + register map).
+    /// Return the device profile (struct schema + register map).
     fn device_profile(&self) -> &DeviceProfile;
 
-    /// Start/stop the communication channel.
-    fn start(&mut self) -> Result<(), CommError>;
-    fn stop(&mut self) -> Result<(), CommError>;
+    /// Cyclic I/O: read input registers → struct field values.
+    fn read_inputs(&mut self) -> Result<HashMap<String, Value>, CommError>;
 
-    /// Health/status.
+    /// Cyclic I/O: struct field values → write output registers.
+    fn write_outputs(&mut self, outputs: &HashMap<String, Value>) -> Result<(), CommError>;
+
+    /// Acyclic request: on-demand read/write.
+    fn acyclic_request(&mut self, request: AcyclicRequest) -> Result<AcyclicResponse, CommError>;
+
     fn is_connected(&self) -> bool;
-    fn diagnostics(&self) -> CommDiagnostics;
+    fn diagnostics(&self) -> DeviceDiagnostics;
 }
 ```
+
+The Communication Manager creates links from the `links:` section and devices from the
+`devices:` section, binding each device to its declared link. Multiple devices sharing
+a link use coordinated access (mutex/queue) to avoid bus collisions.
 
 ### Configuration in plc-project.yaml
 
@@ -485,49 +513,107 @@ symbol mapping. Each communication entry defines a **named instance** of a devic
 The `name` field becomes the global variable name in ST — giving a clear, unambiguous
 correlation between physical hardware and code.
 
+The YAML separates **links** (physical/transport layer) from **devices** (application
+layer), following OSI layering principles. A link defines the shared transport — a
+serial bus or a TCP endpoint. Devices are the addressable units on that link.
+
 ```yaml
 name: BottleFillingLine
 target: host
 
-communications:
-  # Two identical I/O racks — same profile, different addresses.
-  # Each becomes its own global struct instance.
-  - name: rack_left             # ← global variable name in ST
-    protocol: modbus-tcp
+# ─── Links: physical/transport layer ─────────────────────────
+# Each link is a communication channel with its own physical settings.
+# Multiple devices can share a single link (same bus/connection).
+links:
+  # Ethernet link — one TCP endpoint per remote host
+  - name: eth_rack_left
+    type: tcp
     host: 192.168.1.100
     port: 502
-    unit_id: 1
-    mode: cyclic
-    cycle_time: 10ms
     timeout: 500ms
-    device_profile: wago_750_352
 
-  - name: rack_right            # ← second instance, same profile
-    protocol: modbus-tcp
+  - name: eth_rack_right
+    type: tcp
     host: 192.168.1.101
     port: 502
-    unit_id: 1
-    mode: cyclic
-    cycle_time: 10ms
     timeout: 500ms
-    device_profile: wago_750_352
 
-  # VFD on RS-485 — profile defines speed, torque, status fields
-  - name: pump_vfd
-    protocol: modbus-rtu
+  # RS-485 serial bus — one port, shared by all slaves on the wire
+  - name: rs485_bus_1
+    type: serial
     port: /dev/ttyUSB0
     baud: 19200
     parity: even
+    data_bits: 8
     stop_bits: 1
+    timeout: 200ms
+
+  # Second serial bus (different physical settings = different wire)
+  - name: rs485_bus_2
+    type: serial
+    port: /dev/ttyUSB1
+    baud: 9600
+    parity: none
+    data_bits: 8
+    stop_bits: 2
+    timeout: 500ms
+
+  # TCP link for acyclic parameter access
+  - name: eth_neighbor
+    type: tcp
+    host: 192.168.1.200
+    port: 502
+
+# ─── Devices: application/protocol layer ─────────────────────
+# Each device is an addressable unit on a link. The `name` becomes
+# the global struct instance name in ST code.
+devices:
+  # Two identical I/O racks on separate TCP links
+  - name: rack_left              # ← VAR_GLOBAL rack_left : Wago750352;
+    link: eth_rack_left
+    protocol: modbus-tcp
+    unit_id: 1
+    mode: cyclic
+    cycle_time: 10ms
+    device_profile: wago_750_352
+
+  - name: rack_right             # ← VAR_GLOBAL rack_right : Wago750352;
+    link: eth_rack_right
+    protocol: modbus-tcp
+    unit_id: 1
+    mode: cyclic
+    cycle_time: 10ms
+    device_profile: wago_750_352
+
+  # Two VFDs on the SAME RS-485 bus — different slave addresses
+  - name: pump_vfd               # ← VAR_GLOBAL pump_vfd : AbbAcs580;
+    link: rs485_bus_1
+    protocol: modbus-rtu
     unit_id: 3
     mode: cyclic
     device_profile: abb_acs580
 
-  # Acyclic-only connection for parameter access
+  - name: fan_vfd                # ← VAR_GLOBAL fan_vfd : AbbAcs580;
+    link: rs485_bus_1             # same bus! different address
+    protocol: modbus-rtu
+    unit_id: 4
+    mode: cyclic
+    device_profile: abb_acs580
+
+  # Temperature sensor on a different serial bus (9600 baud)
+  - name: temp_sensor
+    link: rs485_bus_2
+    protocol: modbus-rtu
+    unit_id: 1
+    mode: cyclic
+    cycle_time: 100ms
+    device_profile: generic_temp_rtd
+
+  # Acyclic-only connection for on-demand parameter reads
   - name: plc_neighbor
+    link: eth_neighbor
     protocol: modbus-tcp
-    host: 192.168.1.200
-    port: 502
+    unit_id: 1
     mode: acyclic
 ```
 
@@ -712,44 +798,54 @@ fields:
 
 ### Extension Crate Structure
 
-Each communication extension is a standalone Rust crate:
+The crate layout mirrors the layer separation. Link implementations and device/protocol
+implementations are separate. Device profiles are protocol-agnostic YAML.
 
 ```
-st-comm-modbus-tcp/          # Independent crate, own version, own tests
-├── Cargo.toml               # depends on st-comm-api (the trait crate)
-├── src/
-│   ├── lib.rs               # implements CommExtension trait
-│   ├── client.rs            # Modbus TCP socket management
-│   ├── registers.rs         # Register read/write logic
-│   └── profile_loader.rs    # Device profile YAML parser
-├── profiles/                # Bundled device profiles
-│   ├── wago_750_352.yaml
-│   ├── schneider_tm3.yaml
-│   └── generic_io.yaml
-└── tests/
-    ├── connection_tests.rs
-    ├── register_tests.rs
-    └── profile_tests.rs
-
-st-comm-modbus-rtu/
-├── Cargo.toml
-├── src/
-│   ├── lib.rs
-│   ├── serial.rs            # RS-485/RS-232 management
-│   └── framing.rs           # RTU/ASCII frame encoding
-├── profiles/
-│   ├── abb_acs580.yaml
-│   ├── siemens_g120.yaml
-│   └── danfoss_fc302.yaml
-└── tests/
-
-st-comm-api/                 # Shared trait + types (lightweight, no I/O)
+st-comm-api/                    # Shared traits + types (lightweight, no I/O)
 ├── Cargo.toml
 └── src/
-    ├── lib.rs               # CommExtension trait
-    ├── types.rs             # Value, IoVariable, CommError, etc.
-    └── profile.rs           # DeviceProfile schema
+    ├── lib.rs                  # CommLink + CommDevice traits
+    ├── types.rs                # Value, CommError, LinkDiagnostics, etc.
+    └── profile.rs              # DeviceProfile schema + YAML parser
+
+st-comm-link-tcp/               # Link: TCP socket implementation
+├── Cargo.toml                  # depends on st-comm-api
+├── src/
+│   └── lib.rs                  # implements CommLink for TCP
+└── tests/
+
+st-comm-link-serial/            # Link: serial port (RS-485/RS-232)
+├── Cargo.toml
+├── src/
+│   └── lib.rs                  # implements CommLink for serial
+└── tests/
+
+st-comm-modbus/                 # Device: Modbus protocol (TCP + RTU framing)
+├── Cargo.toml                  # depends on st-comm-api (NOT on link crates)
+├── src/
+│   ├── lib.rs                  # implements CommDevice for Modbus
+│   ├── tcp_framing.rs          # MBAP header framing (for TCP links)
+│   ├── rtu_framing.rs          # RTU framing + CRC-16 (for serial links)
+│   ├── ascii_framing.rs        # ASCII framing + LRC (for serial links)
+│   └── registers.rs            # Coil/register read/write logic
+└── tests/
+
+profiles/                       # Device profiles (shared across protocols)
+├── wago_750_352.yaml           # WAGO I/O coupler
+├── abb_acs580.yaml             # ABB VFD
+├── siemens_g120.yaml           # Siemens VFD
+├── danfoss_fc302.yaml          # Danfoss VFD
+├── generic_io_16di.yaml        # Generic 16-ch digital input
+├── generic_temp_rtd.yaml       # Generic RTD temperature sensor
+└── README.md                   # How to create a device profile
 ```
+
+**Why this structure?** A Modbus device doesn't care whether it's on TCP or serial —
+the protocol framing changes, but the register map is the same. The `st-comm-modbus`
+crate detects the link type and selects the appropriate framing (MBAP for TCP, RTU/ASCII
+for serial). Adding a new transport (e.g., UDP, Bluetooth serial) only requires a new
+link crate — all existing device crates work unchanged.
 
 ### Scan Cycle Integration
 
@@ -783,31 +879,39 @@ st-comm-api/                 # Shared trait + types (lightweight, no I/O)
 
 ### Implementation Plan
 
-- [ ] **`st-comm-api` crate** (trait + types):
-  - [ ] `CommExtension` trait (configure, read_inputs, write_outputs, acyclic, start/stop)
+- [ ] **`st-comm-api` crate** (shared traits + types):
+  - [ ] `CommLink` trait (open, close, send, receive, diagnostics)
+  - [ ] `CommDevice` trait (configure, bind_link, read_inputs, write_outputs, acyclic)
   - [ ] `DeviceProfile` struct (name, vendor, fields with register mappings)
   - [ ] `ProfileField` struct (name, ST type, direction, register address/kind/bit/scale)
-  - [ ] `CommError`, `CommDiagnostics`, `AcyclicRequest/Response` types
+  - [ ] `CommError`, `LinkDiagnostics`, `DeviceDiagnostics` types
+  - [ ] `AcyclicRequest`/`AcyclicResponse` types
   - [ ] Device profile YAML parser (profile → struct schema + register map)
   - [ ] Profile-to-ST code generator (profile → TYPE struct + VAR_GLOBAL instances)
-  - [ ] Project YAML parser (communications section → list of named device instances)
-- [ ] **`st-comm-modbus-tcp` crate**:
-  - [ ] Modbus TCP client (socket connection, retry, timeout)
+  - [ ] Project YAML parser (links + devices sections)
+- [ ] **`st-comm-link-tcp` crate** (TCP link):
+  - [ ] TCP socket management (connect, reconnect, timeout)
+  - [ ] Implements `CommLink` trait
+  - [ ] Unit tests with mock TCP listener
+- [ ] **`st-comm-link-serial` crate** (serial link):
+  - [ ] Serial port management (RS-485/RS-232, baud, parity, data bits, stop bits)
+  - [ ] Implements `CommLink` trait
+  - [ ] Unit tests with mock serial port / PTY pair
+- [ ] **`st-comm-modbus` crate** (Modbus protocol — works over any link):
+  - [ ] Implements `CommDevice` trait for Modbus
+  - [ ] TCP framing: MBAP header (auto-selected when link is TCP)
+  - [ ] RTU framing: CRC-16, silence detection (auto-selected when link is serial)
+  - [ ] ASCII framing: LRC (optional, for serial links)
   - [ ] Read coils, discrete inputs, holding registers, input registers
   - [ ] Write single/multiple coils, single/multiple registers
   - [ ] Cyclic polling with configurable interval
-  - [ ] Device profile loading and register mapping
-  - [ ] Unit tests with mock TCP server
-  - [ ] Integration tests with real Modbus simulator
-- [ ] **`st-comm-modbus-rtu` crate**:
-  - [ ] Serial port management (RS-485/RS-232, baud, parity, stop bits)
-  - [ ] RTU framing (CRC-16 calculation, silence detection)
-  - [ ] ASCII framing (LRC calculation)
-  - [ ] Same register read/write API as TCP variant
-  - [ ] Device profile loading
-  - [ ] Unit tests with mock serial port
+  - [ ] Device profile field ↔ register mapping with scaling
+  - [ ] Unit tests with mock link
+  - [ ] Integration tests with Modbus simulator
 - [ ] **Communication Manager** (in `st-runtime`):
-  - [ ] Load and initialize extensions from plc-project.yaml config
+  - [ ] Parse `links:` and `devices:` sections from plc-project.yaml
+  - [ ] Create link instances, bind devices to their declared links
+  - [ ] Coordinate bus access for shared links (mutex/queue for serial buses)
   - [ ] Integrate into scan cycle: read_inputs → execute → write_outputs → acyclic
   - [ ] Map device profile struct fields ↔ VM global struct instance slots
   - [ ] Direction-aware I/O: only read `input` fields, only write `output` fields
@@ -815,30 +919,31 @@ st-comm-api/                 # Shared trait + types (lightweight, no I/O)
   - [ ] Connection monitoring and automatic reconnection
   - [ ] Diagnostics exposed via monitor server
 - [ ] **Engine integration**:
-  - [ ] `st-cli run` loads communication config and starts extensions
-  - [ ] `st-cli comm-status` shows connection health
+  - [ ] `st-cli run` loads link/device config and starts communication
+  - [ ] `st-cli comm-status` shows link health and device connection state
   - [ ] `st-cli comm-test` sends a test read to verify connectivity
 - [ ] **Bundled device profiles**:
-  - [ ] Generic Modbus I/O (coils + registers)
+  - [ ] Generic Modbus I/O (coils + registers, 8/16/32 channel variants)
   - [ ] ABB ACS580 VFD
   - [ ] Siemens G120 VFD
   - [ ] WAGO 750-352 I/O coupler
   - [ ] Generic temperature sensor (RTD/thermocouple via analog input)
 - [ ] **Documentation**:
-  - [ ] Communication extension architecture guide
-  - [ ] "Creating a Communication Extension" tutorial
+  - [ ] Communication architecture guide (link/device layering explained)
+  - [ ] "Creating a Link Extension" tutorial
+  - [ ] "Creating a Device Extension" tutorial
   - [ ] "Creating a Device Profile" guide
-  - [ ] Modbus TCP quickstart
-  - [ ] Modbus RTU quickstart
-  - [ ] Playground example: Modbus TCP I/O with simulated devices
-- [ ] **Future protocol extensions** (separate crates, independent development):
-  - [ ] `st-comm-profinet` — PROFINET I/O
-  - [ ] `st-comm-ethercat` — EtherCAT
-  - [ ] `st-comm-canopen` — CANopen / CAN bus
-  - [ ] `st-comm-opcua` — OPC UA client
-  - [ ] `st-comm-mqtt` — MQTT publish/subscribe
-  - [ ] `st-comm-s7` — Siemens S7 protocol
-  - [ ] `st-comm-ethernet-ip` — EtherNet/IP (Allen-Bradley)
+  - [ ] Modbus quickstart (TCP + RTU examples)
+  - [ ] Playground example: Modbus I/O with simulated devices
+- [ ] **Future extensions** (separate crates, independent development):
+  - [ ] `st-comm-link-udp` — UDP link (for protocols using UDP transport)
+  - [ ] `st-comm-profinet` — PROFINET I/O device extension
+  - [ ] `st-comm-ethercat` — EtherCAT device extension
+  - [ ] `st-comm-canopen` — CANopen / CAN bus device extension
+  - [ ] `st-comm-opcua` — OPC UA client device extension
+  - [ ] `st-comm-mqtt` — MQTT publish/subscribe device extension
+  - [ ] `st-comm-s7` — Siemens S7 protocol device extension
+  - [ ] `st-comm-ethernet-ip` — EtherNet/IP (Allen-Bradley) device extension
 
 ---
 
