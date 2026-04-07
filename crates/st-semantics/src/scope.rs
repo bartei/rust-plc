@@ -31,7 +31,43 @@ pub enum SymbolKind {
     Function { return_type: Ty, params: Vec<ParamDef> },
     FunctionBlock { params: Vec<ParamDef>, outputs: Vec<ParamDef> },
     Program { params: Vec<ParamDef> },
+    Class {
+        params: Vec<ParamDef>,
+        outputs: Vec<ParamDef>,
+        /// All VAR (internal) fields of the class.
+        vars: Vec<ParamDef>,
+        methods: Vec<MethodDef>,
+        base_class: Option<String>,
+        interfaces: Vec<String>,
+        is_abstract: bool,
+        is_final: bool,
+    },
+    Interface {
+        methods: Vec<MethodDef>,
+        base_interfaces: Vec<String>,
+    },
     Type,
+}
+
+/// Method definition for classes and interfaces.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MethodDef {
+    pub name: String,
+    pub return_type: Ty,
+    pub params: Vec<ParamDef>,
+    pub access: AccessLevel,
+    pub is_abstract: bool,
+    pub is_final: bool,
+    pub is_override: bool,
+}
+
+/// Access level for class members.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessLevel {
+    Public,
+    Private,
+    Protected,
+    Internal,
 }
 
 /// Parameter definition for functions/FBs.
@@ -182,15 +218,38 @@ impl SymbolTable {
         }
     }
 
-    /// Resolve a POU (function, FB, or program) from the global scope.
+    /// Resolve a POU (function, FB, class, or program) from the global scope.
     pub fn resolve_pou(&self, name: &str) -> Option<&Symbol> {
         let global = self.scope(self.global_scope_id());
         let sym = global.lookup_local(name)?;
         match &sym.kind {
             SymbolKind::Function { .. }
             | SymbolKind::FunctionBlock { .. }
+            | SymbolKind::Class { .. }
             | SymbolKind::Program { .. } => Some(sym),
             _ => None,
+        }
+    }
+
+    /// Resolve a class from the global scope.
+    pub fn resolve_class(&self, name: &str) -> Option<&Symbol> {
+        let global = self.scope(self.global_scope_id());
+        let sym = global.lookup_local(name)?;
+        if matches!(sym.kind, SymbolKind::Class { .. }) {
+            Some(sym)
+        } else {
+            None
+        }
+    }
+
+    /// Resolve an interface from the global scope.
+    pub fn resolve_interface(&self, name: &str) -> Option<&Symbol> {
+        let global = self.scope(self.global_scope_id());
+        let sym = global.lookup_local(name)?;
+        if matches!(sym.kind, SymbolKind::Interface { .. }) {
+            Some(sym)
+        } else {
+            None
         }
     }
 

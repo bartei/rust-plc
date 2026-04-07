@@ -37,6 +37,8 @@ pub enum TopLevelItem {
     Program(ProgramDecl),
     Function(FunctionDecl),
     FunctionBlock(FunctionBlockDecl),
+    Class(ClassDecl),
+    Interface(InterfaceDecl),
     TypeDeclaration(TypeDeclarationBlock),
     GlobalVarDeclaration(VarBlock),
 }
@@ -68,6 +70,77 @@ pub struct FunctionBlockDecl {
     pub var_blocks: Vec<VarBlock>,
     pub body: Vec<Statement>,
     pub range: TextRange,
+}
+
+// =============================================================================
+// OOP extensions (IEC 61131-3 Ed.3)
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClassDecl {
+    pub name: Identifier,
+    pub base_class: Option<String>,
+    pub interfaces: Vec<String>,
+    pub is_abstract: bool,
+    pub is_final: bool,
+    pub var_blocks: Vec<VarBlock>,
+    pub methods: Vec<MethodDecl>,
+    pub properties: Vec<PropertyDecl>,
+    pub range: TextRange,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MethodDecl {
+    pub access: AccessSpecifier,
+    pub name: Identifier,
+    pub return_type: Option<DataType>,
+    pub var_blocks: Vec<VarBlock>,
+    pub body: Vec<Statement>,
+    pub is_abstract: bool,
+    pub is_final: bool,
+    pub is_override: bool,
+    pub range: TextRange,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterfaceDecl {
+    pub name: Identifier,
+    pub base_interfaces: Vec<String>,
+    pub methods: Vec<MethodPrototype>,
+    pub range: TextRange,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MethodPrototype {
+    pub name: Identifier,
+    pub return_type: Option<DataType>,
+    pub var_blocks: Vec<VarBlock>,
+    pub range: TextRange,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PropertyDecl {
+    pub access: AccessSpecifier,
+    pub name: Identifier,
+    pub ty: DataType,
+    pub get_body: Option<PropertyAccessor>,
+    pub set_body: Option<PropertyAccessor>,
+    pub range: TextRange,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PropertyAccessor {
+    pub var_blocks: Vec<VarBlock>,
+    pub body: Vec<Statement>,
+    pub range: TextRange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccessSpecifier {
+    Public,
+    Private,
+    Protected,
+    Internal,
 }
 
 // =============================================================================
@@ -342,6 +415,8 @@ pub enum Expression {
     Unary(Box<UnaryExpr>),
     Binary(Box<BinaryExpr>),
     Parenthesized(Box<Expression>),
+    This(TextRange),
+    Super(TextRange),
 }
 
 impl Expression {
@@ -353,6 +428,7 @@ impl Expression {
             Self::Unary(u) => u.range,
             Self::Binary(b) => b.range,
             Self::Parenthesized(e) => e.range(),
+            Self::This(r) | Self::Super(r) => *r,
         }
     }
 }

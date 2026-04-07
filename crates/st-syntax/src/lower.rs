@@ -97,6 +97,12 @@ impl<'a> LowerCtx<'a> {
                         self.lower_type_declaration(child),
                     ));
                 }
+                kind::CLASS_DECLARATION => {
+                    items.push(TopLevelItem::Class(self.lower_class(child)));
+                }
+                kind::INTERFACE_DECLARATION => {
+                    items.push(TopLevelItem::Interface(self.lower_interface(child)));
+                }
                 kind::GLOBAL_VAR_DECLARATION => {
                     items.push(TopLevelItem::GlobalVarDeclaration(
                         self.lower_global_var_block(child),
@@ -156,6 +162,172 @@ impl<'a> LowerCtx<'a> {
             var_blocks,
             body,
             range: self.range(node),
+        }
+    }
+
+    // =========================================================================
+    // OOP extensions
+    // =========================================================================
+
+    fn lower_class(&mut self, node: Node) -> ClassDecl {
+        let name = self.field_identifier(node, "name");
+        let is_abstract = node.child_by_field_name("abstract").is_some();
+        let is_final = node.child_by_field_name("final").is_some();
+        let base_class = node
+            .child_by_field_name("base")
+            .map(|n| self.text(n).to_string());
+
+        // Collect IMPLEMENTS interface list via field name
+        let mut interfaces = Vec::new();
+        let mut cursor_iface = node.walk();
+        for child in node.children_by_field_name("interfaces", &mut cursor_iface) {
+            if child.kind() == kind::IDENTIFIER {
+                interfaces.push(self.text(child).to_string());
+            }
+        }
+
+        let var_blocks = self.collect_var_blocks(node);
+
+        let mut methods = Vec::new();
+        let mut properties = Vec::new();
+        let mut cursor2 = node.walk();
+        for child in node.children(&mut cursor2) {
+            match child.kind() {
+                kind::METHOD_DECLARATION => methods.push(self.lower_method(child)),
+                kind::PROPERTY_DECLARATION => properties.push(self.lower_property(child)),
+                _ => {}
+            }
+        }
+
+        ClassDecl {
+            name,
+            base_class,
+            interfaces,
+            is_abstract,
+            is_final,
+            var_blocks,
+            methods,
+            properties,
+            range: self.range(node),
+        }
+    }
+
+    fn lower_method(&mut self, node: Node) -> MethodDecl {
+        let access = node
+            .child_by_field_name("access")
+            .map(|n| self.parse_access_specifier(self.text(n)))
+            .unwrap_or(AccessSpecifier::Public);
+        let is_abstract = node.child_by_field_name("abstract").is_some();
+        let is_final = node.child_by_field_name("final").is_some();
+        let is_override = node.child_by_field_name("override").is_some();
+        let name = self.field_identifier(node, "name");
+        let return_type = node
+            .child_by_field_name("return_type")
+            .map(|n| self.lower_data_type(n));
+        let var_blocks = self.collect_var_blocks(node);
+        let body = self.field_statements(node, "body");
+
+        MethodDecl {
+            access,
+            name,
+            return_type,
+            var_blocks,
+            body,
+            is_abstract,
+            is_final,
+            is_override,
+            range: self.range(node),
+        }
+    }
+
+    fn lower_interface(&mut self, node: Node) -> InterfaceDecl {
+        let name = self.field_identifier(node, "name");
+
+        // Collect EXTENDS base interface names via field name
+        let mut base_interfaces = Vec::new();
+        let mut cursor_base = node.walk();
+        for child in node.children_by_field_name("base", &mut cursor_base) {
+            if child.kind() == kind::IDENTIFIER {
+                base_interfaces.push(self.text(child).to_string());
+            }
+        }
+
+        let mut methods = Vec::new();
+        let mut cursor2 = node.walk();
+        for child in node.children(&mut cursor2) {
+            if child.kind() == kind::METHOD_PROTOTYPE {
+                methods.push(self.lower_method_prototype(child));
+            }
+        }
+
+        InterfaceDecl {
+            name,
+            base_interfaces,
+            methods,
+            range: self.range(node),
+        }
+    }
+
+    fn lower_method_prototype(&mut self, node: Node) -> MethodPrototype {
+        let name = self.field_identifier(node, "name");
+        let return_type = node
+            .child_by_field_name("return_type")
+            .map(|n| self.lower_data_type(n));
+        let var_blocks = self.collect_var_blocks(node);
+
+        MethodPrototype {
+            name,
+            return_type,
+            var_blocks,
+            range: self.range(node),
+        }
+    }
+
+    fn lower_property(&mut self, node: Node) -> PropertyDecl {
+        let access = node
+            .child_by_field_name("access")
+            .map(|n| self.parse_access_specifier(self.text(n)))
+            .unwrap_or(AccessSpecifier::Public);
+        let name = self.field_identifier(node, "name");
+        let ty = node
+            .child_by_field_name("type")
+            .map(|n| self.lower_data_type(n))
+            .unwrap_or(DataType::Elementary(ElementaryType::Int));
+
+        let get_body = node
+            .child_by_field_name("get")
+            .map(|n| self.lower_property_accessor(n));
+        let set_body = node
+            .child_by_field_name("set")
+            .map(|n| self.lower_property_accessor(n));
+
+        PropertyDecl {
+            access,
+            name,
+            ty,
+            get_body,
+            set_body,
+            range: self.range(node),
+        }
+    }
+
+    fn lower_property_accessor(&mut self, node: Node) -> PropertyAccessor {
+        let var_blocks = self.collect_var_blocks(node);
+        let body = self.field_statements(node, "body");
+        PropertyAccessor {
+            var_blocks,
+            body,
+            range: self.range(node),
+        }
+    }
+
+    fn parse_access_specifier(&self, text: &str) -> AccessSpecifier {
+        match text.to_uppercase().as_str() {
+            "PUBLIC" => AccessSpecifier::Public,
+            "PRIVATE" => AccessSpecifier::Private,
+            "PROTECTED" => AccessSpecifier::Protected,
+            "INTERNAL" => AccessSpecifier::Internal,
+            _ => AccessSpecifier::Public,
         }
     }
 
@@ -758,6 +930,8 @@ impl<'a> LowerCtx<'a> {
                 kind: LiteralKind::Null,
                 range: self.range(node),
             }),
+            kind::THIS_EXPRESSION => Expression::This(self.range(node)),
+            kind::SUPER_EXPRESSION => Expression::Super(self.range(node)),
             kind::VARIABLE_ACCESS => Expression::Variable(self.lower_variable_access(node)),
             kind::FUNCTION_CALL => {
                 Expression::FunctionCall(Box::new(self.lower_function_call(node)))

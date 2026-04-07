@@ -70,8 +70,10 @@ pub struct Vm {
     forced_variables: std::collections::HashMap<String, Value>,
     /// Cumulative elapsed time in nanoseconds (updated by engine each cycle).
     elapsed_time_ms: i64,
-    /// FB instance storage: (caller_func_index, instance_slot) → locals.
-    fb_instances: std::collections::HashMap<(u16, u16), Vec<Value>>,
+    /// FB/class instance storage: (caller_identity, instance_slot) → locals.
+    /// caller_identity encodes both the function index and the caller's own
+    /// instance position to distinguish nested instances (e.g. class inside FB).
+    fb_instances: std::collections::HashMap<(u32, u16), Vec<Value>>,
 }
 
 impl Vm {
@@ -605,8 +607,7 @@ impl Vm {
                 }
                 Instruction::LoadField(dst, instance_slot, field_idx) => {
                     // Read a field from an FB instance's retained state
-                    let caller_func = func_index;
-                    let instance_key = (caller_func, instance_slot);
+                    let instance_key = (self.caller_identity(), instance_slot);
                     let val = self.fb_instances
                         .get(&instance_key)
                         .and_then(|locals| locals.get(field_idx as usize))
@@ -614,18 +615,36 @@ impl Vm {
                         .unwrap_or(Value::Int(0));
                     self.reg_set(dst, val);
                 }
-                Instruction::StoreField(_slot, _offset, _val) => {
-                    // TODO: implement struct storage
+                Instruction::StoreField(instance_slot, field_idx, val_reg) => {
+                    // Write a field to an FB/class instance's retained state
+                    let instance_key = (self.caller_identity(), instance_slot);
+                    let val = self.reg_get(val_reg).clone();
+                    let entry = self.fb_instances
+                        .entry(instance_key)
+                        .or_insert_with(|| {
+                            // No state exists yet — create with enough capacity
+                            vec![Value::default(); field_idx as usize + 1]
+                        });
+                    // Extend if needed (rare, but safe)
+                    while entry.len() <= field_idx as usize {
+                        entry.push(Value::default());
+                    }
+                    entry[field_idx as usize] = val;
                 }
 
                 // Pointer operations
+                // Encoding: Ref(scope_tag, slot)
+                //   scope_tag 0 = global
+                //   scope_tag >= 2 = call stack frame (frame_index = scope_tag - 2)
+                //   (tag 1 was previously "global" — now 0; tag 1 reserved for future use)
                 Instruction::MakeRefLocal(dst, slot) => {
-                    // scope_tag 0 = local in current frame
-                    self.reg_set(dst, Value::Ref(0, slot));
+                    // Encode the current call stack index so the pointer works
+                    // correctly even when passed to other functions.
+                    let frame_tag = (self.call_stack.len() as u16 - 1) + 2;
+                    self.reg_set(dst, Value::Ref(frame_tag, slot));
                 }
                 Instruction::MakeRefGlobal(dst, slot) => {
-                    // scope_tag 1 = global
-                    self.reg_set(dst, Value::Ref(1, slot));
+                    self.reg_set(dst, Value::Ref(0, slot));
                 }
                 Instruction::LoadNull(dst) => {
                     self.reg_set(dst, Value::Null);
@@ -634,14 +653,23 @@ impl Vm {
                     let ptr = self.reg_get(ptr_reg).clone();
                     let val = match ptr {
                         Value::Ref(0, slot) => {
-                            // Local variable
-                            self.local_get(slot).clone()
-                        }
-                        Value::Ref(1, slot) => {
                             // Global variable
                             self.globals.get(slot as usize).cloned().unwrap_or(Value::Void)
                         }
-                        Value::Null => Value::Int(0), // null deref returns default
+                        Value::Ref(tag, slot) if tag >= 2 => {
+                            // Local variable in a specific call stack frame
+                            let frame_idx = (tag - 2) as usize;
+                            if let Some(frame) = self.call_stack.get(frame_idx) {
+                                frame.locals.get(slot as usize).cloned().unwrap_or(Value::Int(0))
+                            } else {
+                                Value::Int(0)
+                            }
+                        }
+                        Value::Ref(1, slot) => {
+                            // Legacy: treat tag=1 as global for backward compatibility
+                            self.globals.get(slot as usize).cloned().unwrap_or(Value::Void)
+                        }
+                        Value::Null => Value::Int(0),
                         _ => Value::Int(0),
                     };
                     self.reg_set(dst, val);
@@ -651,13 +679,92 @@ impl Vm {
                     let val = self.reg_get(val_reg).clone();
                     match ptr {
                         Value::Ref(0, slot) => {
-                            self.local_set(slot, val);
+                            self.globals[slot as usize] = val;
+                        }
+                        Value::Ref(tag, slot) if tag >= 2 => {
+                            let frame_idx = (tag - 2) as usize;
+                            if let Some(frame) = self.call_stack.get_mut(frame_idx) {
+                                if (slot as usize) < frame.locals.len() {
+                                    frame.locals[slot as usize] = val;
+                                }
+                            }
                         }
                         Value::Ref(1, slot) => {
-                            self.globals[slot as usize] = val;
+                            // Legacy: tag=1 as global
+                            if (slot as usize) < self.globals.len() {
+                                self.globals[slot as usize] = val;
+                            }
                         }
                         _ => {} // null deref is a no-op
                     }
+                }
+                Instruction::CallMethod { instance_slot, class_func_index, func_index, dst, args } => {
+                    // Method call for class instances.
+                    // Method locals layout: [method_class_vars... | method_vars... | return_var?]
+                    // The method's class vars match the method's DEFINING class, which may
+                    // be a parent of the actual instance class.
+                    let method_func = &self.module.functions[func_index as usize];
+                    let class_func = &self.module.functions[class_func_index as usize];
+                    let register_count = method_func.register_count as usize;
+                    let instance_var_count = class_func.locals.slots.len();
+
+                    // Figure out how many class vars the METHOD expects
+                    // (the method was compiled with its defining class's var layout)
+                    let method_class_var_count = self.find_method_class_var_count(func_index, class_func_index);
+
+                    // Initialize all method locals to defaults
+                    let mut locals: Vec<Value> = method_func
+                        .locals
+                        .slots
+                        .iter()
+                        .map(|s| Value::default_for_type(s.ty))
+                        .collect();
+
+                    // Get or create instance state
+                    let instance_key = (self.caller_identity(), instance_slot);
+
+                    if let Some(saved) = self.fb_instances.get(&instance_key) {
+                        // Restore saved state: copy the portion that matches method's class vars
+                        let n = method_class_var_count.min(saved.len()).min(locals.len());
+                        locals[..n].clone_from_slice(&saved[..n]);
+                    } else {
+                        // First use: initialize instance via class init code
+                        let mut instance_state = vec![Value::default(); instance_var_count];
+                        self.init_class_instance(class_func_index, &mut instance_state, instance_var_count);
+                        // Copy the matching portion into method locals
+                        let n = method_class_var_count.min(instance_state.len()).min(locals.len());
+                        locals[..n].clone_from_slice(&instance_state[..n]);
+                        // Save the full instance state for future calls
+                        self.fb_instances.insert(instance_key, instance_state);
+                    }
+
+                    // Apply method arguments (offset past the method's class vars)
+                    for (param_slot, arg_reg) in &args {
+                        let actual_slot = method_class_var_count as u16 + *param_slot;
+                        let val = self.reg_get(*arg_reg).clone();
+                        if (actual_slot as usize) < locals.len() {
+                            locals[actual_slot as usize] = val;
+                        }
+                    }
+
+                    if self.call_stack.len() >= self.config.max_call_depth {
+                        return Err(VmError::StackOverflow(self.config.max_call_depth));
+                    }
+
+                    // Set return_reg on the CALLER frame (like call_function does)
+                    if let Some(caller) = self.call_stack.last_mut() {
+                        caller.return_reg = Some(dst);
+                    }
+
+                    self.call_stack.push(CallFrame {
+                        func_index,
+                        registers: vec![Value::default(); register_count.max(1)],
+                        locals,
+                        pc: 0,
+                        return_reg: None,
+                        instance_slot: Some(instance_slot),
+                    });
+                    continue;
                 }
             }
         }
@@ -693,17 +800,50 @@ impl Vm {
                         .insert(frame.func_index, frame.locals.clone());
                 }
                 st_ir::PouKind::FunctionBlock => {
-                    // Save FB instance state keyed by (caller, instance_slot)
+                    // Save FB instance state keyed by (caller_identity, instance_slot)
                     if let Some(slot) = frame.instance_slot {
                         if self.call_stack.len() >= 2 {
-                            let caller_idx = self.call_stack[self.call_stack.len() - 2].func_index;
+                            let caller_id = self.caller_identity_at(self.call_stack.len() - 2);
                             self.fb_instances
-                                .insert((caller_idx, slot), frame.locals.clone());
+                                .insert((caller_id, slot), frame.locals.clone());
                         }
                     }
                 }
                 st_ir::PouKind::Function => {
                     // Functions don't retain state
+                }
+                st_ir::PouKind::Method => {
+                    // Methods write back only their defining class's vars into the instance state.
+                    // This preserves vars from sibling/parent classes that this method doesn't see.
+                    if let Some(slot) = frame.instance_slot {
+                        if self.call_stack.len() >= 2 {
+                            let caller_id = self.caller_identity_at(self.call_stack.len() - 2);
+                            let instance_key = (caller_id, slot);
+                            let method_class_count = self.find_method_class_var_count(
+                                frame.func_index,
+                                0, // not used in current impl
+                            );
+                            if let Some(state) = self.fb_instances.get_mut(&instance_key) {
+                                // Merge: only overwrite the slots this method owns
+                                let n = method_class_count.min(state.len()).min(frame.locals.len());
+                                state[..n].clone_from_slice(&frame.locals[..n]);
+                            } else {
+                                // No existing state — save what we have
+                                let save: Vec<Value> = frame.locals[..method_class_count.min(frame.locals.len())].to_vec();
+                                self.fb_instances.insert(instance_key, save);
+                            }
+                        }
+                    }
+                }
+                st_ir::PouKind::Class => {
+                    // Classes retain state like FBs
+                    if let Some(slot) = frame.instance_slot {
+                        if self.call_stack.len() >= 2 {
+                            let caller_id = self.caller_identity_at(self.call_stack.len() - 2);
+                            self.fb_instances
+                                .insert((caller_id, slot), frame.locals.clone());
+                        }
+                    }
                 }
             }
         }
@@ -720,8 +860,7 @@ impl Vm {
             return Err(VmError::StackOverflow(self.config.max_call_depth));
         }
 
-        let caller_func_index = self.call_stack.last().map(|f| f.func_index).unwrap_or(0);
-        let instance_key = (caller_func_index, instance_slot);
+        let instance_key = (self.caller_identity(), instance_slot);
 
         let func = self
             .module
@@ -732,6 +871,7 @@ impl Vm {
         let register_count = func.register_count as usize;
 
         // Load retained instance locals, or create fresh ones
+        let expected_len = func.locals.slots.len();
         let mut locals: Vec<Value> = self
             .fb_instances
             .get(&instance_key)
@@ -743,6 +883,14 @@ impl Vm {
                     .map(|s| Value::default_for_type(s.ty))
                     .collect()
             });
+        // Ensure locals is at least as long as the function expects
+        // (StoreField may have created a shorter state)
+        while locals.len() < expected_len {
+            let ty = func.locals.slots.get(locals.len())
+                .map(|s| s.ty)
+                .unwrap_or(VarType::Int);
+            locals.push(Value::default_for_type(ty));
+        }
 
         // Apply input arguments on top of retained state
         for &(param_slot, arg_reg) in args {
@@ -762,6 +910,70 @@ impl Vm {
         });
 
         Ok(())
+    }
+
+    /// Compute a unique identity for the current caller frame.
+    /// Combines func_index with the caller's own instance_slot to distinguish
+    /// nested instances (e.g., class inside different FB instances).
+    fn caller_identity(&self) -> u32 {
+        if let Some(frame) = self.call_stack.last() {
+            let func_id = frame.func_index as u32;
+            let inst_id = frame.instance_slot.unwrap_or(0xFFFF) as u32;
+            // Combine: upper 16 bits = instance_slot, lower 16 = func_index
+            (inst_id << 16) | func_id
+        } else {
+            0
+        }
+    }
+
+    /// Same but for a specific stack depth (for the caller of the current frame).
+    fn caller_identity_at(&self, stack_depth: usize) -> u32 {
+        if let Some(frame) = self.call_stack.get(stack_depth) {
+            let func_id = frame.func_index as u32;
+            let inst_id = frame.instance_slot.unwrap_or(0xFFFF) as u32;
+            (inst_id << 16) | func_id
+        } else {
+            0
+        }
+    }
+
+    /// Determine how many class vars a method expects in its locals.
+    /// A method compiled for class X has X's full inherited var chain in its locals.
+    /// This is determined by finding the method's defining class function.
+    fn find_method_class_var_count(&self, method_func_index: u16, instance_class_index: u16) -> usize {
+        let method_name = &self.module.functions[method_func_index as usize].name;
+        // Method name is "ClassName.MethodName" — extract the class name
+        if let Some(dot_pos) = method_name.find('.') {
+            let defining_class = &method_name[..dot_pos];
+            // Find the defining class's function to get its var count
+            if let Some((_, cls_func)) = self.module.find_function(defining_class) {
+                return cls_func.locals.slots.len();
+            }
+        }
+        // Fallback: use the instance class's var count
+        self.module.functions[instance_class_index as usize].locals.slots.len()
+    }
+
+    /// Initialize class instance vars by interpreting the class function's init code.
+    /// This runs the LoadConst+StoreLocal pairs that set default values.
+    fn init_class_instance(&self, class_func_index: u16, locals: &mut [Value], class_var_count: usize) {
+        let class_func = &self.module.functions[class_func_index as usize];
+        // Simple interpreter for init code: look for LoadConst+StoreLocal pairs
+        let mut registers: Vec<Value> = vec![Value::default(); 256];
+        for instr in &class_func.instructions {
+            match instr {
+                Instruction::LoadConst(dst, val) => {
+                    registers[*dst as usize] = val.clone();
+                }
+                Instruction::StoreLocal(slot, src) => {
+                    if (*slot as usize) < class_var_count && (*slot as usize) < locals.len() {
+                        locals[*slot as usize] = registers[*src as usize].clone();
+                    }
+                }
+                Instruction::RetVoid | Instruction::Ret(_) => break,
+                _ => {}
+            }
+        }
     }
 
     fn jump_to(&mut self, label: Label) -> Result<(), VmError> {
@@ -856,6 +1068,17 @@ impl Vm {
         let lv = self.reg_get(l);
         let rv = self.reg_get(r);
         match (lv, rv) {
+            // Pointer/Null comparisons: only equality matters
+            (Value::Null, Value::Null) => int_cmp(0, 0),
+            (Value::Ref(..), Value::Null) | (Value::Null, Value::Ref(..)) => {
+                // Ref vs Null: they are NOT equal
+                int_cmp(1, 0) // 1 != 0 for NE, 1 == 0 false for EQ
+            }
+            (Value::Ref(t1, s1), Value::Ref(t2, s2)) => {
+                // Two refs: compare by identity (same scope + slot)
+                let same = t1 == t2 && s1 == s2;
+                if same { int_cmp(0, 0) } else { int_cmp(1, 0) }
+            }
             (Value::Real(_), _) | (_, Value::Real(_)) => {
                 real_cmp(lv.as_real(), rv.as_real())
             }

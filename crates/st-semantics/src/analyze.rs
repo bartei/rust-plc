@@ -20,6 +20,7 @@ pub fn analyze(source_file: &SourceFile) -> AnalysisResult {
         current_scope: ScopeId(0),
         in_loop: false,
         current_pou_return_type: None,
+        current_class: None,
     };
     analyzer.register_intrinsics();
     analyzer.analyze_source_file(source_file);
@@ -36,6 +37,8 @@ struct Analyzer {
     current_scope: ScopeId,
     in_loop: bool,
     current_pou_return_type: Option<Ty>,
+    /// Name of the class we're currently analyzing (for THIS/SUPER context).
+    current_class: Option<String>,
 }
 
 impl Analyzer {
@@ -262,6 +265,108 @@ impl Analyzer {
                     );
                 }
             }
+            TopLevelItem::Class(cls) => {
+                let params = self.collect_params_by_kind(&cls.var_blocks, |k| {
+                    matches!(k, VarKind::VarInput | VarKind::VarInOut)
+                });
+                let outputs = self.collect_params_by_kind(&cls.var_blocks, |k| {
+                    matches!(k, VarKind::VarOutput)
+                });
+                let vars = self.collect_params_by_kind(&cls.var_blocks, |k| {
+                    matches!(k, VarKind::Var | VarKind::VarTemp)
+                });
+                let methods: Vec<MethodDef> = cls.methods.iter().map(|m| {
+                    let m_params = self.collect_params_by_kind(&m.var_blocks, |k| {
+                        matches!(k, VarKind::VarInput | VarKind::VarInOut)
+                    });
+                    let ret_ty = m.return_type.as_ref()
+                        .map(|dt| self.resolve_data_type(dt))
+                        .unwrap_or(Ty::Void);
+                    MethodDef {
+                        name: m.name.name.clone(),
+                        return_type: ret_ty,
+                        params: m_params,
+                        access: match m.access {
+                            AccessSpecifier::Public => AccessLevel::Public,
+                            AccessSpecifier::Private => AccessLevel::Private,
+                            AccessSpecifier::Protected => AccessLevel::Protected,
+                            AccessSpecifier::Internal => AccessLevel::Internal,
+                        },
+                        is_abstract: m.is_abstract,
+                        is_final: m.is_final,
+                        is_override: m.is_override,
+                    }
+                }).collect();
+
+                let prev = self.symbols.define(
+                    global,
+                    Symbol {
+                        name: cls.name.name.clone(),
+                        ty: Ty::Class { name: cls.name.name.clone() },
+                        kind: SymbolKind::Class {
+                            params,
+                            outputs,
+                            vars,
+                            methods,
+                            base_class: cls.base_class.clone(),
+                            interfaces: cls.interfaces.clone(),
+                            is_abstract: cls.is_abstract,
+                            is_final: cls.is_final,
+                        },
+                        range: cls.range,
+                        used: false,
+                        assigned: false,
+                    },
+                );
+                if prev.is_some() {
+                    self.error(
+                        DiagnosticCode::DuplicateDeclaration,
+                        format!("duplicate class declaration '{}'", cls.name.name),
+                        cls.name.range,
+                    );
+                }
+            }
+            TopLevelItem::Interface(iface) => {
+                let methods: Vec<MethodDef> = iface.methods.iter().map(|m| {
+                    let m_params = self.collect_params_by_kind(&m.var_blocks, |k| {
+                        matches!(k, VarKind::VarInput | VarKind::VarInOut)
+                    });
+                    let ret_ty = m.return_type.as_ref()
+                        .map(|dt| self.resolve_data_type(dt))
+                        .unwrap_or(Ty::Void);
+                    MethodDef {
+                        name: m.name.name.clone(),
+                        return_type: ret_ty,
+                        params: m_params,
+                        access: AccessLevel::Public,
+                        is_abstract: false,
+                        is_final: false,
+                        is_override: false,
+                    }
+                }).collect();
+
+                let prev = self.symbols.define(
+                    global,
+                    Symbol {
+                        name: iface.name.name.clone(),
+                        ty: Ty::Interface { name: iface.name.name.clone() },
+                        kind: SymbolKind::Interface {
+                            methods,
+                            base_interfaces: iface.base_interfaces.clone(),
+                        },
+                        range: iface.range,
+                        used: false,
+                        assigned: false,
+                    },
+                );
+                if prev.is_some() {
+                    self.error(
+                        DiagnosticCode::DuplicateDeclaration,
+                        format!("duplicate interface declaration '{}'", iface.name.name),
+                        iface.name.range,
+                    );
+                }
+            }
             TopLevelItem::Program(p) => {
                 let params = self.collect_params(&p.var_blocks);
                 let prev = self.symbols.define(
@@ -345,8 +450,331 @@ impl Analyzer {
                 self.analyze_statements(&fb.body);
                 self.current_scope = saved;
             }
+            TopLevelItem::Class(cls) => {
+                self.analyze_class(cls);
+            }
+            TopLevelItem::Interface(iface) => {
+                self.analyze_interface(iface);
+            }
             TopLevelItem::TypeDeclaration(_) | TopLevelItem::GlobalVarDeclaration(_) => {
                 // Already handled in pass 1
+            }
+        }
+    }
+
+    // =========================================================================
+    // Class / Interface analysis
+    // =========================================================================
+
+    fn analyze_class(&mut self, cls: &ClassDecl) {
+        let scope = self
+            .symbols
+            .create_scope(self.symbols.global_scope_id(), cls.name.name.clone());
+        let saved_scope = self.current_scope;
+        let saved_class = self.current_class.clone();
+        self.current_scope = scope;
+        self.current_class = Some(cls.name.name.clone());
+        self.current_pou_return_type = None;
+
+        // Validate base class
+        if let Some(ref base_name) = cls.base_class {
+            match self.symbols.resolve_class(base_name) {
+                Some(sym) => {
+                    if let SymbolKind::Class { is_final, .. } = &sym.kind {
+                        if *is_final {
+                            self.error(
+                                DiagnosticCode::CannotExtendFinalClass,
+                                format!("cannot extend FINAL class '{base_name}'"),
+                                cls.name.range,
+                            );
+                        }
+                    }
+                }
+                None => {
+                    self.error(
+                        DiagnosticCode::UndeclaredType,
+                        format!("undeclared base class '{base_name}'"),
+                        cls.name.range,
+                    );
+                }
+            }
+        }
+
+        // Validate interfaces
+        for iface_name in &cls.interfaces {
+            if self.symbols.resolve_interface(iface_name).is_none() {
+                self.error(
+                    DiagnosticCode::UndeclaredType,
+                    format!("undeclared interface '{iface_name}'"),
+                    cls.name.range,
+                );
+            }
+        }
+
+        // Check interface conformance — all interface methods must be implemented
+        for iface_name in &cls.interfaces {
+            if let Some(sym) = self.symbols.resolve_interface(iface_name) {
+                if let SymbolKind::Interface { methods: iface_methods, .. } = &sym.kind {
+                    let iface_methods = iface_methods.clone();
+                    for im in &iface_methods {
+                        let implemented = cls.methods.iter().any(|m| {
+                            m.name.name.eq_ignore_ascii_case(&im.name)
+                        });
+                        if !implemented {
+                            self.error(
+                                DiagnosticCode::InterfaceNotImplemented,
+                                format!(
+                                    "class '{}' does not implement method '{}' from interface '{}'",
+                                    cls.name.name, im.name, iface_name
+                                ),
+                                cls.name.range,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check abstract methods in non-abstract class
+        if !cls.is_abstract {
+            for m in &cls.methods {
+                if m.is_abstract {
+                    self.error(
+                        DiagnosticCode::AbstractMethodInNonAbstractClass,
+                        format!(
+                            "abstract method '{}' in non-abstract class '{}'",
+                            m.name.name, cls.name.name
+                        ),
+                        m.name.range,
+                    );
+                }
+            }
+        }
+
+        // Define inherited var blocks from parent classes (walk hierarchy)
+        self.define_inherited_vars(scope, &cls.base_class);
+
+        // Define var blocks in class scope
+        for vb in &cls.var_blocks {
+            self.define_var_block(scope, vb);
+        }
+
+        // Analyze methods
+        for method in &cls.methods {
+            self.analyze_method(method, &cls.name.name, &cls.base_class);
+        }
+
+        // Analyze properties
+        for prop in &cls.properties {
+            self.analyze_property(prop);
+        }
+
+        self.current_scope = saved_scope;
+        self.current_class = saved_class;
+    }
+
+    fn analyze_method(
+        &mut self,
+        method: &MethodDecl,
+        class_name: &str,
+        base_class: &Option<String>,
+    ) {
+        let method_scope = self
+            .symbols
+            .create_scope(self.current_scope, method.name.name.clone());
+        let saved = self.current_scope;
+        self.current_scope = method_scope;
+
+        let ret_ty = method.return_type.as_ref()
+            .map(|dt| self.resolve_data_type(dt));
+        self.current_pou_return_type = ret_ty.clone();
+
+        // Define return variable if method has return type
+        if let Some(ref ret) = ret_ty {
+            self.symbols.define(
+                method_scope,
+                Symbol {
+                    name: method.name.name.clone(),
+                    ty: ret.clone(),
+                    kind: SymbolKind::Variable(VarKind::Var),
+                    range: method.name.range,
+                    used: true,
+                    assigned: false,
+                },
+            );
+        }
+
+        // Validate OVERRIDE
+        if method.is_override {
+            if let Some(base_name) = base_class {
+                let base_has_method = self.symbols.resolve_class(base_name)
+                    .and_then(|sym| {
+                        if let SymbolKind::Class { methods, .. } = &sym.kind {
+                            methods.iter().find(|m| m.name.eq_ignore_ascii_case(&method.name.name)).cloned()
+                        } else {
+                            None
+                        }
+                    });
+                match base_has_method {
+                    Some(base_method) => {
+                        if base_method.is_final {
+                            self.error(
+                                DiagnosticCode::CannotOverrideFinalMethod,
+                                format!(
+                                    "cannot override FINAL method '{}' from base class '{}'",
+                                    method.name.name, base_name
+                                ),
+                                method.name.range,
+                            );
+                        }
+                    }
+                    None => {
+                        self.error(
+                            DiagnosticCode::InvalidOverride,
+                            format!(
+                                "method '{}' marked OVERRIDE but no matching method in base class '{}'",
+                                method.name.name, base_name
+                            ),
+                            method.name.range,
+                        );
+                    }
+                }
+            } else {
+                self.error(
+                    DiagnosticCode::InvalidOverride,
+                    format!(
+                        "method '{}' marked OVERRIDE but class '{}' has no base class",
+                        method.name.name, class_name
+                    ),
+                    method.name.range,
+                );
+            }
+        }
+
+        for vb in &method.var_blocks {
+            self.define_var_block(method_scope, vb);
+        }
+
+        // Abstract methods have no body to analyze
+        if !method.is_abstract {
+            self.analyze_statements(&method.body);
+        }
+
+        self.current_scope = saved;
+        self.current_pou_return_type = None;
+    }
+
+    fn analyze_property(&mut self, prop: &PropertyDecl) {
+        let prop_ty = self.resolve_data_type(&prop.ty);
+
+        if let Some(ref getter) = prop.get_body {
+            let get_scope = self
+                .symbols
+                .create_scope(self.current_scope, format!("{}.GET", prop.name.name));
+            let saved = self.current_scope;
+            self.current_scope = get_scope;
+            // Define the property name as a return variable
+            self.symbols.define(
+                get_scope,
+                Symbol {
+                    name: prop.name.name.clone(),
+                    ty: prop_ty.clone(),
+                    kind: SymbolKind::Variable(VarKind::Var),
+                    range: prop.name.range,
+                    used: true,
+                    assigned: false,
+                },
+            );
+            for vb in &getter.var_blocks {
+                self.define_var_block(get_scope, vb);
+            }
+            self.analyze_statements(&getter.body);
+            self.current_scope = saved;
+        }
+
+        if let Some(ref setter) = prop.set_body {
+            let set_scope = self
+                .symbols
+                .create_scope(self.current_scope, format!("{}.SET", prop.name.name));
+            let saved = self.current_scope;
+            self.current_scope = set_scope;
+            // Define implicit input variable for setter
+            self.symbols.define(
+                set_scope,
+                Symbol {
+                    name: prop.name.name.clone(),
+                    ty: prop_ty.clone(),
+                    kind: SymbolKind::Variable(VarKind::VarInput),
+                    range: prop.name.range,
+                    used: false,
+                    assigned: true,
+                },
+            );
+            for vb in &setter.var_blocks {
+                self.define_var_block(set_scope, vb);
+            }
+            self.analyze_statements(&setter.body);
+            self.current_scope = saved;
+        }
+    }
+
+    /// Define variables from parent classes into a class scope.
+    /// Walks up the inheritance chain and defines all ancestor vars.
+    fn define_inherited_vars(&mut self, scope_id: ScopeId, base_class: &Option<String>) {
+        // Collect the chain bottom-up, then define top-down so overrides work correctly
+        let mut chain = Vec::new();
+        let mut current = base_class.clone();
+        while let Some(ref cls_name) = current {
+            if let Some(sym) = self.symbols.resolve_class(cls_name) {
+                if let SymbolKind::Class { params, outputs, vars, base_class: parent, .. } = &sym.kind {
+                    chain.push((params.clone(), outputs.clone(), vars.clone()));
+                    current = parent.clone();
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        // Define from root ancestor down
+        for (params, outputs, vars) in chain.into_iter().rev() {
+            for p in params.iter().chain(outputs.iter()).chain(vars.iter()) {
+                // Only define if not already defined (avoid duplicates from diamond)
+                if self.symbols.scope(scope_id).lookup_local(&p.name).is_none() {
+                    self.symbols.define(scope_id, Symbol {
+                        name: p.name.clone(),
+                        ty: p.ty.clone(),
+                        kind: SymbolKind::Variable(p.var_kind),
+                        range: TextRange::new(0, 0),
+                        used: true,
+                        assigned: true,
+                    });
+                }
+            }
+        }
+    }
+
+    fn analyze_interface(&mut self, iface: &InterfaceDecl) {
+        // Validate base interfaces exist
+        for base_name in &iface.base_interfaces {
+            if self.symbols.resolve_interface(base_name).is_none() {
+                self.error(
+                    DiagnosticCode::UndeclaredType,
+                    format!("undeclared base interface '{base_name}'"),
+                    iface.name.range,
+                );
+            }
+        }
+
+        // Validate method prototypes (just check types resolve)
+        for method in &iface.methods {
+            if let Some(ref ret_dt) = method.return_type {
+                self.resolve_data_type(ret_dt);
+            }
+            for vb in &method.var_blocks {
+                for decl in &vb.declarations {
+                    self.resolve_data_type(&decl.ty);
+                }
             }
         }
     }
@@ -676,6 +1104,48 @@ impl Analyzer {
             Expression::Unary(u) => self.check_unary(u),
             Expression::Binary(b) => self.check_binary(b),
             Expression::Parenthesized(inner) => self.check_expression(inner),
+            Expression::This(range) => {
+                if let Some(ref class_name) = self.current_class {
+                    Ty::Class { name: class_name.clone() }
+                } else {
+                    self.error(
+                        DiagnosticCode::InvalidThisContext,
+                        "THIS is only valid inside a class method",
+                        *range,
+                    );
+                    Ty::Unknown
+                }
+            }
+            Expression::Super(range) => {
+                if let Some(ref class_name) = self.current_class {
+                    // Look up base class
+                    let base = self.symbols.resolve_class(class_name)
+                        .and_then(|sym| {
+                            if let SymbolKind::Class { base_class, .. } = &sym.kind {
+                                base_class.clone()
+                            } else {
+                                None
+                            }
+                        });
+                    if let Some(base_name) = base {
+                        Ty::Class { name: base_name }
+                    } else {
+                        self.error(
+                            DiagnosticCode::InvalidSuperContext,
+                            "SUPER requires a base class (no EXTENDS clause)",
+                            *range,
+                        );
+                        Ty::Unknown
+                    }
+                } else {
+                    self.error(
+                        DiagnosticCode::InvalidSuperContext,
+                        "SUPER is only valid inside a class method",
+                        *range,
+                    );
+                    Ty::Unknown
+                }
+            }
         }
     }
 
@@ -763,6 +1233,33 @@ impl Analyzer {
                                                 id.range,
                                             );
                                             return Ty::Unknown;
+                                        }
+                                    }
+                                } else {
+                                    return Ty::Unknown;
+                                }
+                            }
+                            Ty::Class { name } => {
+                                // Class instance field/method access
+                                if let Some(sym) = self.symbols.resolve_class(name) {
+                                    if let SymbolKind::Class { params, outputs, methods, .. } = &sym.kind {
+                                        // Check methods first
+                                        if let Some(m) = methods.iter().find(|m| m.name.eq_ignore_ascii_case(&id.name)) {
+                                            current_ty = m.return_type.clone();
+                                        }
+                                        // Then check fields
+                                        else {
+                                            let all_params: Vec<_> = params.iter().chain(outputs.iter()).collect();
+                                            if let Some(p) = all_params.iter().find(|p| p.name.eq_ignore_ascii_case(&id.name)) {
+                                                current_ty = p.ty.clone();
+                                            } else {
+                                                self.error(
+                                                    DiagnosticCode::NoSuchField,
+                                                    format!("no member '{}' on class '{}'", id.name, name),
+                                                    id.range,
+                                                );
+                                                return Ty::Unknown;
+                                            }
                                         }
                                     }
                                 } else {
@@ -857,7 +1354,61 @@ impl Analyzer {
         current_ty
     }
 
+    /// Resolve a method by walking up the class hierarchy.
+    /// Returns (defining_class_name, MethodDef) if found.
+    fn resolve_class_method(&self, class_name: &str, method_name: &str) -> Option<(String, MethodDef)> {
+        let mut current = Some(class_name.to_string());
+        while let Some(ref cls_name) = current {
+            if let Some(sym) = self.symbols.resolve_class(cls_name) {
+                if let SymbolKind::Class { methods, base_class, .. } = &sym.kind {
+                    if let Some(m) = methods.iter().find(|m| m.name.eq_ignore_ascii_case(method_name)) {
+                        return Some((cls_name.clone(), m.clone()));
+                    }
+                    current = base_class.clone();
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        None
+    }
+
     fn check_function_call(&mut self, fc: &FunctionCallExpr) -> Ty {
+        // Handle method calls: instance.Method(args)
+        if fc.name.parts.len() == 2 {
+            let obj_name = &fc.name.parts[0].name;
+            let method_name = &fc.name.parts[1].name;
+            if let Some((_sid, sym)) = self.symbols.resolve(self.current_scope, obj_name) {
+                let sym_ty = sym.ty.clone();
+                match sym_ty.resolved() {
+                    Ty::Class { name: class_name } => {
+                        self.symbols.mark_used(self.current_scope, obj_name);
+                        let class_name = class_name.clone();
+                        // Look up the method on the class (walk inheritance chain)
+                        if let Some((_defining_class, method)) = self.resolve_class_method(&class_name, method_name) {
+                            self.check_call_args(&fc.arguments, &method.params, &format!("{class_name}.{method_name}"), fc.range);
+                            return method.return_type;
+                        } else {
+                            self.error(
+                                DiagnosticCode::NoSuchField,
+                                format!("no method '{method_name}' on class '{class_name}'"),
+                                fc.name.parts[1].range,
+                            );
+                            return Ty::Unknown;
+                        }
+                    }
+                    Ty::FunctionBlock { name: fb_name } => {
+                        // FB method call: fb_instance.method() — currently FBs don't have methods,
+                        // so fall through to normal resolution
+                        let _ = fb_name;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         let name = fc.name.as_str();
         // Clone the resolved symbol info to release the borrow on self.symbols
         let resolved = self
@@ -877,8 +1428,19 @@ impl Analyzer {
                         self.check_call_args(&fc.arguments, &params, &name, fc.range);
                         Ty::Void
                     }
+                    SymbolKind::Class { params, is_abstract, .. } => {
+                        if is_abstract {
+                            self.error(
+                                DiagnosticCode::CannotInstantiateAbstractClass,
+                                format!("cannot instantiate abstract class '{name}'"),
+                                fc.range,
+                            );
+                        }
+                        self.check_call_args(&fc.arguments, &params, &name, fc.range);
+                        Ty::Void
+                    }
                     SymbolKind::Variable(_vk) => {
-                        // Could be calling an FB instance
+                        // Could be calling an FB or class instance
                         match sym_ty.resolved() {
                             Ty::FunctionBlock { name: fb_name } => {
                                 let fb_name = fb_name.clone();
@@ -894,6 +1456,34 @@ impl Analyzer {
                                     })
                                     .unwrap_or_default();
                                 self.check_call_args(&fc.arguments, &params, &fb_name, fc.range);
+                                Ty::Void
+                            }
+                            Ty::Class { name: class_name } => {
+                                let class_name = class_name.clone();
+                                // Check if abstract
+                                if let Some(sym) = self.symbols.resolve_class(&class_name) {
+                                    if let SymbolKind::Class { is_abstract, .. } = &sym.kind {
+                                        if *is_abstract {
+                                            self.error(
+                                                DiagnosticCode::CannotInstantiateAbstractClass,
+                                                format!("cannot instantiate abstract class '{class_name}'"),
+                                                fc.range,
+                                            );
+                                        }
+                                    }
+                                }
+                                let params = self
+                                    .symbols
+                                    .resolve_class(&class_name)
+                                    .and_then(|s| {
+                                        if let SymbolKind::Class { params, .. } = &s.kind {
+                                            Some(params.clone())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .unwrap_or_default();
+                                self.check_call_args(&fc.arguments, &params, &class_name, fc.range);
                                 Ty::Void
                             }
                             _ => {

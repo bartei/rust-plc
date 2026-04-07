@@ -78,6 +78,18 @@ pub mod kind {
     pub const IDENTIFIER: &str = "identifier";
     pub const REF_TYPE: &str = "ref_type";
     pub const NULL_LITERAL: &str = "null_literal";
+
+    // OOP extensions (IEC 61131-3 Ed.3)
+    pub const CLASS_DECLARATION: &str = "class_declaration";
+    pub const METHOD_DECLARATION: &str = "method_declaration";
+    pub const INTERFACE_DECLARATION: &str = "interface_declaration";
+    pub const METHOD_PROTOTYPE: &str = "method_prototype";
+    pub const PROPERTY_DECLARATION: &str = "property_declaration";
+    pub const PROPERTY_GET: &str = "property_get";
+    pub const PROPERTY_SET: &str = "property_set";
+    pub const ACCESS_SPECIFIER: &str = "access_specifier";
+    pub const THIS_EXPRESSION: &str = "this_expression";
+    pub const SUPER_EXPRESSION: &str = "super_expression";
 }
 
 #[cfg(test)]

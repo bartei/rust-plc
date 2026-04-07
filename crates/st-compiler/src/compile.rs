@@ -19,6 +19,8 @@ pub fn compile(source_file: &SourceFile) -> Result<Module, CompileError> {
         functions: Vec::new(),
         globals: MemoryLayout::default(),
         type_defs: Vec::new(),
+        class_bases: std::collections::HashMap::new(),
+        class_var_blocks: std::collections::HashMap::new(),
     };
     // Pass 1: register all POUs so cross-references work
     for item in &source_file.items {
@@ -39,6 +41,10 @@ struct ModuleCompiler {
     functions: Vec<Function>,
     globals: MemoryLayout,
     type_defs: Vec<TypeDef>,
+    /// Maps class name → base class name (for inheritance chain resolution).
+    class_bases: std::collections::HashMap<String, String>,
+    /// Maps class name → var_blocks (for inherited var access in methods).
+    class_var_blocks: std::collections::HashMap<String, Vec<VarBlock>>,
 }
 
 impl ModuleCompiler {
@@ -96,6 +102,49 @@ impl ModuleCompiler {
                     }
                 }
             }
+            TopLevelItem::Class(cls) => {
+                // Record inheritance mapping
+                if let Some(ref base) = cls.base_class {
+                    self.class_bases.insert(
+                        cls.name.name.to_uppercase(),
+                        base.to_uppercase(),
+                    );
+                }
+                // Store var_blocks for inherited var access
+                self.class_var_blocks.insert(
+                    cls.name.name.to_uppercase(),
+                    cls.var_blocks.clone(),
+                );
+                // Register the class itself as a "function block"-like entry
+                self.functions.push(Function {
+                    name: cls.name.name.clone(),
+                    kind: PouKind::Class,
+                    register_count: 0,
+                    instructions: Vec::new(),
+                    label_positions: Vec::new(),
+                    locals: MemoryLayout::default(),
+                    source_map: Vec::new(),
+                    body_start_pc: 0,
+                });
+                // Register each method as a separate function: ClassName.MethodName
+                for method in &cls.methods {
+                    if !method.is_abstract {
+                        self.functions.push(Function {
+                            name: format!("{}.{}", cls.name.name, method.name.name),
+                            kind: PouKind::Method,
+                            register_count: 0,
+                            instructions: Vec::new(),
+                            label_positions: Vec::new(),
+                            locals: MemoryLayout::default(),
+                            source_map: Vec::new(),
+                            body_start_pc: 0,
+                        });
+                    }
+                }
+            }
+            TopLevelItem::Interface(_) => {
+                // Interfaces have no runtime representation
+            }
             TopLevelItem::TypeDeclaration(_) => {
                 // Type defs are used at compile time, not registered as functions
             }
@@ -106,7 +155,7 @@ impl ModuleCompiler {
         match item {
             TopLevelItem::Program(p) => {
                 let func_idx = self.find_func(&p.name.name)?;
-                let mut fc = FunctionCompiler::new(&self.functions, &self.globals);
+                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases);
                 fc.compile_var_blocks(&p.var_blocks);
                 let body_start_pc = fc.current_pc();
                 fc.compile_statements(&p.body)?;
@@ -119,7 +168,7 @@ impl ModuleCompiler {
             }
             TopLevelItem::Function(f) => {
                 let func_idx = self.find_func(&f.name.name)?;
-                let mut fc = FunctionCompiler::new(&self.functions, &self.globals);
+                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases);
                 fc.compile_var_blocks(&f.var_blocks);
                 let ret_ty = Self::var_type_from_ast(&f.return_type);
                 let ret_slot = fc.add_local(&f.name.name, ret_ty);
@@ -136,7 +185,7 @@ impl ModuleCompiler {
             }
             TopLevelItem::FunctionBlock(fb) => {
                 let func_idx = self.find_func(&fb.name.name)?;
-                let mut fc = FunctionCompiler::new(&self.functions, &self.globals);
+                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases);
                 fc.compile_var_blocks(&fb.var_blocks);
                 let body_start_pc = fc.current_pc();
                 fc.compile_statements(&fb.body)?;
@@ -147,9 +196,81 @@ impl ModuleCompiler {
                     body_start_pc,
                 );
             }
+            TopLevelItem::Class(cls) => {
+                // Compile the class body (inherited + own var initializers)
+                let func_idx = self.find_func(&cls.name.name)?;
+                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases);
+                // Inherited vars (with init, so defaults from parent classes are applied)
+                let inherited_for_class = self.collect_inherited_var_blocks(&cls.name.name);
+                for vb in &inherited_for_class {
+                    fc.compile_var_blocks(std::slice::from_ref(vb));
+                }
+                fc.compile_var_blocks(&cls.var_blocks);
+                let body_start_pc = fc.current_pc();
+                fc.emit(Instruction::RetVoid);
+                self.functions[func_idx] = fc.finish(
+                    cls.name.name.clone(),
+                    PouKind::Class,
+                    body_start_pc,
+                );
+
+                // Compile each method — class vars (including inherited) are compiled
+                // first so methods can access all fields in the hierarchy.
+                let inherited_var_blocks = self.collect_inherited_var_blocks(&cls.name.name);
+                for method in &cls.methods {
+                    if method.is_abstract {
+                        continue;
+                    }
+                    let method_name = format!("{}.{}", cls.name.name, method.name.name);
+                    let method_idx = self.find_func(&method_name)?;
+                    let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases);
+                    // First: register inherited var_blocks (ancestor classes)
+                    for vb in &inherited_var_blocks {
+                        fc.register_var_blocks(std::slice::from_ref(vb));
+                    }
+                    // Then: register this class's var_blocks (no init — state from instance)
+                    fc.register_var_blocks(&cls.var_blocks);
+                    // Then: add method's own var_blocks (with init)
+                    fc.compile_var_blocks(&method.var_blocks);
+                    // Define return variable if method has return type
+                    let ret_slot = method.return_type.as_ref().map(|dt| {
+                        let ret_ty = Self::var_type_from_ast(dt);
+                        fc.add_local(&method.name.name, ret_ty)
+                    });
+                    let body_start_pc = fc.current_pc();
+                    fc.compile_statements(&method.body)?;
+                    if let Some(slot) = ret_slot {
+                        let ret_reg = fc.alloc_reg();
+                        fc.emit(Instruction::LoadLocal(ret_reg, slot));
+                        fc.emit(Instruction::Ret(ret_reg));
+                    } else {
+                        fc.emit(Instruction::RetVoid);
+                    }
+                    self.functions[method_idx] = fc.finish(
+                        method_name,
+                        PouKind::Method,
+                        body_start_pc,
+                    );
+                }
+            }
             _ => {}
         }
         Ok(())
+    }
+
+    /// Collect var_blocks from all ancestor classes, root-first.
+    fn collect_inherited_var_blocks(&self, class_name: &str) -> Vec<VarBlock> {
+        let mut chain = Vec::new();
+        let mut current = self.class_bases.get(&class_name.to_uppercase()).cloned();
+        while let Some(ref parent) = current {
+            if let Some(vbs) = self.class_var_blocks.get(parent) {
+                chain.push(vbs.clone());
+            }
+            current = self.class_bases.get(parent).cloned();
+        }
+        // Reverse: root ancestor first
+        chain.reverse();
+        chain.into_iter().flatten().collect()
     }
 
     fn find_func(&self, name: &str) -> Result<usize, CompileError> {
@@ -203,10 +324,16 @@ struct FunctionCompiler<'a> {
     pending_source: Option<TextRange>,
     /// Maps local slot index → FB type name (for resolving FB instance calls).
     fb_type_names: std::collections::HashMap<u16, String>,
+    /// Maps class name (uppercase) → base class name (uppercase) for inheritance.
+    class_bases: &'a std::collections::HashMap<String, String>,
 }
 
 impl<'a> FunctionCompiler<'a> {
-    fn new(module_functions: &'a [Function], globals: &'a MemoryLayout) -> Self {
+    fn new(
+        module_functions: &'a [Function],
+        globals: &'a MemoryLayout,
+        class_bases: &'a std::collections::HashMap<String, String>,
+    ) -> Self {
         Self {
             instructions: Vec::new(),
             source_map: Vec::new(),
@@ -219,6 +346,7 @@ impl<'a> FunctionCompiler<'a> {
             loop_exit_labels: Vec::new(),
             pending_source: None,
             fb_type_names: std::collections::HashMap::new(),
+            class_bases,
         }
     }
 
@@ -300,6 +428,34 @@ impl<'a> FunctionCompiler<'a> {
         self.globals.find_slot(name).map(|(i, _)| i)
     }
 
+    /// Walk the class hierarchy to find a method. Returns the function index.
+    fn find_method_in_hierarchy(&self, class_name: &str, method_name: &str) -> Option<usize> {
+        // Try ClassName.MethodName at each level of the hierarchy
+        let mut current_class = Some(class_name.to_string());
+        while let Some(ref cls) = current_class {
+            let full_name = format!("{cls}.{method_name}");
+            if let Some((idx, _)) = self.module_functions
+                .iter()
+                .enumerate()
+                .find(|(_, f)| f.name.eq_ignore_ascii_case(&full_name))
+            {
+                return Some(idx);
+            }
+            // Find the base class by looking at the class function's name pattern
+            // The class itself is registered; we need to find EXTENDS info.
+            // Since we don't have AST here, check if there's a class function
+            // with this name and look for parent pattern in other functions.
+            // Walk compiled functions looking for parent class patterns.
+            current_class = self.find_base_class(cls);
+        }
+        None
+    }
+
+    /// Find the base class name from the inheritance mapping.
+    fn find_base_class(&self, class_name: &str) -> Option<String> {
+        self.class_bases.get(&class_name.to_uppercase()).cloned()
+    }
+
     fn finish(self, name: String, kind: PouKind, body_start_pc: usize) -> Function {
         Function {
             name,
@@ -318,6 +474,17 @@ impl<'a> FunctionCompiler<'a> {
     // =========================================================================
 
     fn compile_var_blocks(&mut self, var_blocks: &[VarBlock]) {
+        self.compile_var_blocks_inner(var_blocks, true);
+    }
+
+    /// Register var blocks as local slots. If `emit_init` is false, only
+    /// create the slots without emitting initializer code (used for class
+    /// vars in method bodies — init happens once at class instantiation).
+    fn register_var_blocks(&mut self, var_blocks: &[VarBlock]) {
+        self.compile_var_blocks_inner(var_blocks, false);
+    }
+
+    fn compile_var_blocks_inner(&mut self, var_blocks: &[VarBlock], emit_init: bool) {
         for vb in var_blocks {
             for decl in &vb.declarations {
                 let ty = ModuleCompiler::var_type_from_ast(&decl.ty);
@@ -333,9 +500,11 @@ impl<'a> FunctionCompiler<'a> {
                         self.fb_type_names.insert(slot, type_name.clone());
                     }
                     // Emit initializer if present
-                    if let Some(init_expr) = &decl.initial_value {
-                        let reg = self.compile_expression(init_expr);
-                        self.emit(Instruction::StoreLocal(slot, reg));
+                    if emit_init {
+                        if let Some(init_expr) = &decl.initial_value {
+                            let reg = self.compile_expression(init_expr);
+                            self.emit(Instruction::StoreLocal(slot, reg));
+                        }
                     }
                 }
             }
@@ -405,6 +574,30 @@ impl<'a> FunctionCompiler<'a> {
                 let ptr_reg = self.compile_load_variable(&id.name);
                 self.emit_sourced(Instruction::DerefStore(ptr_reg, val_reg), range);
                 return;
+            }
+        }
+
+        // Check for field store: fb_instance.field := value
+        if target.parts.len() >= 2 {
+            if let (Some(AccessPart::Identifier(obj)), Some(AccessPart::Identifier(field))) =
+                (target.parts.first(), target.parts.get(1))
+            {
+                if let Some(slot) = self.find_local(&obj.name) {
+                    if self.fb_type_names.contains_key(&slot) {
+                        let fb_type = self.fb_type_names.get(&slot).unwrap().clone();
+                        let field_idx = self.module_functions
+                            .iter()
+                            .find(|f| f.name.eq_ignore_ascii_case(&fb_type))
+                            .and_then(|f| f.locals.find_slot(&field.name))
+                            .map(|(i, _)| i)
+                            .unwrap_or(0);
+                        self.emit_sourced(
+                            Instruction::StoreField(slot, field_idx, val_reg),
+                            range,
+                        );
+                        return;
+                    }
+                }
             }
         }
 
@@ -655,6 +848,12 @@ impl<'a> FunctionCompiler<'a> {
                 self.compile_function_call_expr(fc)
             }
             Expression::Parenthesized(inner) => self.compile_expression(inner),
+            Expression::This(_) | Expression::Super(_) => {
+                // THIS/SUPER compile to loading the instance slot (slot 0 by convention)
+                let reg = self.alloc_reg();
+                self.emit(Instruction::LoadConst(reg, Value::Int(0)));
+                reg
+            }
         }
     }
 
@@ -677,6 +876,34 @@ impl<'a> FunctionCompiler<'a> {
     fn compile_function_call_expr(&mut self, fc: &FunctionCallExpr) -> Reg {
         let name = fc.name.as_str();
         let dst = self.alloc_reg();
+
+        // Handle method calls: instance.Method(args)
+        if fc.name.parts.len() == 2 {
+            let obj_name = &fc.name.parts[0].name;
+            let method_name = &fc.name.parts[1].name;
+            if let Some(slot) = self.find_local(obj_name) {
+                if let Some(type_name) = self.fb_type_names.get(&slot).cloned() {
+                    // Find the class function index (for instance state management)
+                    let class_func_idx = self.module_functions
+                        .iter()
+                        .position(|f| f.name.eq_ignore_ascii_case(&type_name))
+                        .unwrap_or(0) as u16;
+                    // Walk the class hierarchy to find the method
+                    let func_idx = self.find_method_in_hierarchy(&type_name, method_name);
+                    if let Some(idx) = func_idx {
+                        let args = self.compile_call_args(&fc.arguments);
+                        self.emit(Instruction::CallMethod {
+                            instance_slot: slot,
+                            class_func_index: class_func_idx,
+                            func_index: idx as u16,
+                            dst,
+                            args,
+                        });
+                        return dst;
+                    }
+                }
+            }
+        }
 
         // REF() intrinsic — takes a variable name and returns a reference
         if name.to_uppercase() == "REF" {

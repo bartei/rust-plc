@@ -289,6 +289,22 @@ impl LanguageServer for Backend {
                         format!("FUNCTION_BLOCK({param_list}) => ({out_list})")
                     }
                     st_semantics::scope::SymbolKind::Program { .. } => "PROGRAM".to_string(),
+                    st_semantics::scope::SymbolKind::Class { methods, .. } => {
+                        let method_list = methods
+                            .iter()
+                            .map(|m| m.name.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("CLASS (methods: {method_list})")
+                    }
+                    st_semantics::scope::SymbolKind::Interface { methods, .. } => {
+                        let method_list = methods
+                            .iter()
+                            .map(|m| m.name.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("INTERFACE (methods: {method_list})")
+                    }
                     st_semantics::scope::SymbolKind::Type => format!("TYPE {type_info}"),
                 };
 
@@ -430,6 +446,61 @@ impl LanguageServer for Backend {
                         kind: SymbolKind::CLASS,
                         range: doc.text_range_to_lsp(fb.range),
                         selection_range: doc.text_range_to_lsp(fb.name.range),
+                        children: Some(children),
+                        tags: None,
+                        deprecated: None,
+                    });
+                }
+                st_syntax::ast::TopLevelItem::Class(cls) => {
+                    let mut children = Vec::new();
+                    add_var_symbols(doc, &cls.var_blocks, &mut children);
+                    for method in &cls.methods {
+                        #[allow(deprecated)]
+                        children.push(DocumentSymbol {
+                            name: method.name.name.clone(),
+                            detail: Some("METHOD".to_string()),
+                            kind: SymbolKind::METHOD,
+                            range: doc.text_range_to_lsp(method.range),
+                            selection_range: doc.text_range_to_lsp(method.name.range),
+                            children: None,
+                            tags: None,
+                            deprecated: None,
+                        });
+                    }
+                    #[allow(deprecated)]
+                    symbols.push(DocumentSymbol {
+                        name: cls.name.name.clone(),
+                        detail: Some("CLASS".to_string()),
+                        kind: SymbolKind::CLASS,
+                        range: doc.text_range_to_lsp(cls.range),
+                        selection_range: doc.text_range_to_lsp(cls.name.range),
+                        children: Some(children),
+                        tags: None,
+                        deprecated: None,
+                    });
+                }
+                st_syntax::ast::TopLevelItem::Interface(iface) => {
+                    let mut children = Vec::new();
+                    for method in &iface.methods {
+                        #[allow(deprecated)]
+                        children.push(DocumentSymbol {
+                            name: method.name.name.clone(),
+                            detail: Some("METHOD".to_string()),
+                            kind: SymbolKind::METHOD,
+                            range: doc.text_range_to_lsp(method.range),
+                            selection_range: doc.text_range_to_lsp(method.name.range),
+                            children: None,
+                            tags: None,
+                            deprecated: None,
+                        });
+                    }
+                    #[allow(deprecated)]
+                    symbols.push(DocumentSymbol {
+                        name: iface.name.name.clone(),
+                        detail: Some("INTERFACE".to_string()),
+                        kind: SymbolKind::INTERFACE,
+                        range: doc.text_range_to_lsp(iface.range),
+                        selection_range: doc.text_range_to_lsp(iface.name.range),
                         children: Some(children),
                         tags: None,
                         deprecated: None,
@@ -857,6 +928,8 @@ impl LanguageServer for Backend {
                     st_semantics::types::Ty::Struct { name, .. } => Some(name.clone()),
                     st_semantics::types::Ty::Enum { name, .. } => Some(name.clone()),
                     st_semantics::types::Ty::FunctionBlock { name } => Some(name.clone()),
+                    st_semantics::types::Ty::Class { name } => Some(name.clone()),
+                    st_semantics::types::Ty::Interface { name } => Some(name.clone()),
                     st_semantics::types::Ty::Subrange { name, .. } => Some(name.clone()),
                     st_semantics::types::Ty::Alias { name, .. } => Some(name.clone()),
                     _ => None,
@@ -898,6 +971,12 @@ impl LanguageServer for Backend {
                     }
                     st_syntax::ast::TopLevelItem::FunctionBlock(fb) => {
                         (fb.name.name.clone(), SymbolKind::CLASS, fb.range)
+                    }
+                    st_syntax::ast::TopLevelItem::Class(cls) => {
+                        (cls.name.name.clone(), SymbolKind::CLASS, cls.range)
+                    }
+                    st_syntax::ast::TopLevelItem::Interface(iface) => {
+                        (iface.name.name.clone(), SymbolKind::INTERFACE, iface.range)
                     }
                     st_syntax::ast::TopLevelItem::TypeDeclaration(td) => {
                         if let Some(def) = td.definitions.first() {

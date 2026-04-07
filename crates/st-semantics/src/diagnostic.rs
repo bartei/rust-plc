@@ -94,6 +94,21 @@ pub enum DiagnosticCode {
     AssignmentToConstant,
     AssignmentToInput,
 
+    // OOP / Class
+    AccessViolationPrivate,
+    AccessViolationProtected,
+    CannotInstantiateAbstractClass,
+    CannotExtendFinalClass,
+    CannotOverrideFinalMethod,
+    InterfaceNotImplemented,
+    MethodSignatureMismatch,
+    InvalidOverride,
+    AbstractMethodInNonAbstractClass,
+    InvalidThisContext,
+    InvalidSuperContext,
+    CircularInheritance,
+    DuplicateInterfaceImpl,
+
     // Warnings
     UnusedVariable,
     UnusedParameter,

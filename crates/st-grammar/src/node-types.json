@@ -1,5 +1,10 @@
 [
   {
+    "type": "access_specifier",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "additive_expression",
     "named": true,
     "fields": {
@@ -65,6 +70,14 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
             "named": true
           },
           {
@@ -168,6 +181,14 @@
             "named": true
           },
           {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
+            "named": true
+          },
+          {
             "type": "time_literal",
             "named": true
           },
@@ -257,6 +278,14 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
             "named": true
           },
           {
@@ -360,6 +389,14 @@
             "named": true
           },
           {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
+            "named": true
+          },
+          {
             "type": "time_literal",
             "named": true
           },
@@ -456,6 +493,14 @@
           "named": true
         },
         {
+          "type": "super_expression",
+          "named": true
+        },
+        {
+          "type": "this_expression",
+          "named": true
+        },
+        {
           "type": "time_literal",
           "named": true
         },
@@ -547,6 +592,14 @@
             "named": true
           },
           {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
+            "named": true
+          },
+          {
             "type": "time_literal",
             "named": true
           },
@@ -630,6 +683,14 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
             "named": true
           },
           {
@@ -873,6 +934,14 @@
             "named": true
           },
           {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
+            "named": true
+          },
+          {
             "type": "time_literal",
             "named": true
           },
@@ -995,6 +1064,14 @@
           "named": true
         },
         {
+          "type": "super_expression",
+          "named": true
+        },
+        {
+          "type": "this_expression",
+          "named": true
+        },
+        {
           "type": "time_literal",
           "named": true
         },
@@ -1086,6 +1163,14 @@
             "named": true
           },
           {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
+            "named": true
+          },
+          {
             "type": "time_literal",
             "named": true
           },
@@ -1118,6 +1203,84 @@
         },
         {
           "type": "else_clause",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "class_declaration",
+    "named": true,
+    "fields": {
+      "abstract": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "ABSTRACT",
+            "named": false
+          }
+        ]
+      },
+      "base": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "final": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "FINAL",
+            "named": false
+          }
+        ]
+      },
+      "interfaces": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": ",",
+            "named": false
+          },
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "method_declaration",
+          "named": true
+        },
+        {
+          "type": "property_declaration",
+          "named": true
+        },
+        {
+          "type": "var_block",
           "named": true
         }
       ]
@@ -1189,6 +1352,14 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
             "named": true
           },
           {
@@ -1308,6 +1479,14 @@
             "named": true
           },
           {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
+            "named": true
+          },
+          {
             "type": "time_literal",
             "named": true
           },
@@ -1423,6 +1602,14 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
             "named": true
           },
           {
@@ -1615,6 +1802,14 @@
             "named": true
           },
           {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
+            "named": true
+          },
+          {
             "type": "time_literal",
             "named": true
           },
@@ -1701,6 +1896,14 @@
             "named": true
           },
           {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
+            "named": true
+          },
+          {
             "type": "time_literal",
             "named": true
           },
@@ -1784,6 +1987,14 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
             "named": true
           },
           {
@@ -2143,6 +2354,14 @@
             "named": true
           },
           {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
+            "named": true
+          },
+          {
             "type": "time_literal",
             "named": true
           },
@@ -2185,6 +2404,392 @@
         },
         {
           "type": "elsif_clause",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "interface_declaration",
+    "named": true,
+    "fields": {
+      "base": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": ",",
+            "named": false
+          },
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "method_prototype",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "method_declaration",
+    "named": true,
+    "fields": {
+      "abstract": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "ABSTRACT",
+            "named": false
+          }
+        ]
+      },
+      "access": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "access_specifier",
+            "named": true
+          }
+        ]
+      },
+      "body": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "statement_list",
+            "named": true
+          }
+        ]
+      },
+      "final": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "FINAL",
+            "named": false
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "override": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "OVERRIDE",
+            "named": false
+          }
+        ]
+      },
+      "return_type": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "BOOL",
+            "named": false
+          },
+          {
+            "type": "BYTE",
+            "named": false
+          },
+          {
+            "type": "DATE",
+            "named": false
+          },
+          {
+            "type": "DATE_AND_TIME",
+            "named": false
+          },
+          {
+            "type": "DINT",
+            "named": false
+          },
+          {
+            "type": "DT",
+            "named": false
+          },
+          {
+            "type": "DWORD",
+            "named": false
+          },
+          {
+            "type": "INT",
+            "named": false
+          },
+          {
+            "type": "LDATE",
+            "named": false
+          },
+          {
+            "type": "LDT",
+            "named": false
+          },
+          {
+            "type": "LINT",
+            "named": false
+          },
+          {
+            "type": "LREAL",
+            "named": false
+          },
+          {
+            "type": "LTIME",
+            "named": false
+          },
+          {
+            "type": "LTOD",
+            "named": false
+          },
+          {
+            "type": "LWORD",
+            "named": false
+          },
+          {
+            "type": "REAL",
+            "named": false
+          },
+          {
+            "type": "SINT",
+            "named": false
+          },
+          {
+            "type": "TIME",
+            "named": false
+          },
+          {
+            "type": "TIME_OF_DAY",
+            "named": false
+          },
+          {
+            "type": "TOD",
+            "named": false
+          },
+          {
+            "type": "UDINT",
+            "named": false
+          },
+          {
+            "type": "UINT",
+            "named": false
+          },
+          {
+            "type": "ULINT",
+            "named": false
+          },
+          {
+            "type": "USINT",
+            "named": false
+          },
+          {
+            "type": "WORD",
+            "named": false
+          },
+          {
+            "type": "array_type",
+            "named": true
+          },
+          {
+            "type": "qualified_name",
+            "named": true
+          },
+          {
+            "type": "ref_type",
+            "named": true
+          },
+          {
+            "type": "string_type",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "var_block",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "method_prototype",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "return_type": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "BOOL",
+            "named": false
+          },
+          {
+            "type": "BYTE",
+            "named": false
+          },
+          {
+            "type": "DATE",
+            "named": false
+          },
+          {
+            "type": "DATE_AND_TIME",
+            "named": false
+          },
+          {
+            "type": "DINT",
+            "named": false
+          },
+          {
+            "type": "DT",
+            "named": false
+          },
+          {
+            "type": "DWORD",
+            "named": false
+          },
+          {
+            "type": "INT",
+            "named": false
+          },
+          {
+            "type": "LDATE",
+            "named": false
+          },
+          {
+            "type": "LDT",
+            "named": false
+          },
+          {
+            "type": "LINT",
+            "named": false
+          },
+          {
+            "type": "LREAL",
+            "named": false
+          },
+          {
+            "type": "LTIME",
+            "named": false
+          },
+          {
+            "type": "LTOD",
+            "named": false
+          },
+          {
+            "type": "LWORD",
+            "named": false
+          },
+          {
+            "type": "REAL",
+            "named": false
+          },
+          {
+            "type": "SINT",
+            "named": false
+          },
+          {
+            "type": "TIME",
+            "named": false
+          },
+          {
+            "type": "TIME_OF_DAY",
+            "named": false
+          },
+          {
+            "type": "TOD",
+            "named": false
+          },
+          {
+            "type": "UDINT",
+            "named": false
+          },
+          {
+            "type": "UINT",
+            "named": false
+          },
+          {
+            "type": "ULINT",
+            "named": false
+          },
+          {
+            "type": "USINT",
+            "named": false
+          },
+          {
+            "type": "WORD",
+            "named": false
+          },
+          {
+            "type": "array_type",
+            "named": true
+          },
+          {
+            "type": "qualified_name",
+            "named": true
+          },
+          {
+            "type": "ref_type",
+            "named": true
+          },
+          {
+            "type": "string_type",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "var_block",
           "named": true
         }
       ]
@@ -2256,6 +2861,14 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
             "named": true
           },
           {
@@ -2363,6 +2976,14 @@
             "named": true
           },
           {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
+            "named": true
+          },
+          {
             "type": "time_literal",
             "named": true
           },
@@ -2465,6 +3086,14 @@
             "named": true
           },
           {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
+            "named": true
+          },
+          {
             "type": "time_literal",
             "named": true
           },
@@ -2559,6 +3188,14 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
             "named": true
           },
           {
@@ -2662,6 +3299,14 @@
             "named": true
           },
           {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
+            "named": true
+          },
+          {
             "type": "time_literal",
             "named": true
           },
@@ -2754,6 +3399,14 @@
           "named": true
         },
         {
+          "type": "super_expression",
+          "named": true
+        },
+        {
+          "type": "this_expression",
+          "named": true
+        },
+        {
           "type": "time_literal",
           "named": true
         },
@@ -2842,6 +3495,14 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
             "named": true
           },
           {
@@ -2941,6 +3602,14 @@
             "named": true
           },
           {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
+            "named": true
+          },
+          {
             "type": "time_literal",
             "named": true
           },
@@ -2984,6 +3653,226 @@
         "types": [
           {
             "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "var_block",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "property_declaration",
+    "named": true,
+    "fields": {
+      "access": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "access_specifier",
+            "named": true
+          }
+        ]
+      },
+      "get": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "property_get",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "set": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "property_set",
+            "named": true
+          }
+        ]
+      },
+      "type": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "BOOL",
+            "named": false
+          },
+          {
+            "type": "BYTE",
+            "named": false
+          },
+          {
+            "type": "DATE",
+            "named": false
+          },
+          {
+            "type": "DATE_AND_TIME",
+            "named": false
+          },
+          {
+            "type": "DINT",
+            "named": false
+          },
+          {
+            "type": "DT",
+            "named": false
+          },
+          {
+            "type": "DWORD",
+            "named": false
+          },
+          {
+            "type": "INT",
+            "named": false
+          },
+          {
+            "type": "LDATE",
+            "named": false
+          },
+          {
+            "type": "LDT",
+            "named": false
+          },
+          {
+            "type": "LINT",
+            "named": false
+          },
+          {
+            "type": "LREAL",
+            "named": false
+          },
+          {
+            "type": "LTIME",
+            "named": false
+          },
+          {
+            "type": "LTOD",
+            "named": false
+          },
+          {
+            "type": "LWORD",
+            "named": false
+          },
+          {
+            "type": "REAL",
+            "named": false
+          },
+          {
+            "type": "SINT",
+            "named": false
+          },
+          {
+            "type": "TIME",
+            "named": false
+          },
+          {
+            "type": "TIME_OF_DAY",
+            "named": false
+          },
+          {
+            "type": "TOD",
+            "named": false
+          },
+          {
+            "type": "UDINT",
+            "named": false
+          },
+          {
+            "type": "UINT",
+            "named": false
+          },
+          {
+            "type": "ULINT",
+            "named": false
+          },
+          {
+            "type": "USINT",
+            "named": false
+          },
+          {
+            "type": "WORD",
+            "named": false
+          },
+          {
+            "type": "array_type",
+            "named": true
+          },
+          {
+            "type": "qualified_name",
+            "named": true
+          },
+          {
+            "type": "ref_type",
+            "named": true
+          },
+          {
+            "type": "string_type",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "property_get",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "statement_list",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "var_block",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "property_set",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "statement_list",
             "named": true
           }
         ]
@@ -3222,6 +4111,14 @@
             "named": true
           },
           {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
+            "named": true
+          },
+          {
             "type": "time_literal",
             "named": true
           },
@@ -3260,6 +4157,10 @@
       "required": false,
       "types": [
         {
+          "type": "class_declaration",
+          "named": true
+        },
+        {
           "type": "function_block_declaration",
           "named": true
         },
@@ -3269,6 +4170,10 @@
         },
         {
           "type": "global_var_declaration",
+          "named": true
+        },
+        {
+          "type": "interface_declaration",
           "named": true
         },
         {
@@ -3407,6 +4312,14 @@
             "named": true
           },
           {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
+            "named": true
+          },
+          {
             "type": "time_literal",
             "named": true
           },
@@ -3496,6 +4409,14 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
             "named": true
           },
           {
@@ -3844,6 +4765,14 @@
             "named": true
           },
           {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
+            "named": true
+          },
+          {
             "type": "time_literal",
             "named": true
           },
@@ -3930,6 +4859,14 @@
             "named": true
           },
           {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
+            "named": true
+          },
+          {
             "type": "time_literal",
             "named": true
           },
@@ -3952,6 +4889,16 @@
         ]
       }
     }
+  },
+  {
+    "type": "super_expression",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "this_expression",
+    "named": true,
+    "fields": {}
   },
   {
     "type": "type_declaration",
@@ -4303,6 +5250,14 @@
             "named": true
           },
           {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
+            "named": true
+          },
+          {
             "type": "time_literal",
             "named": true
           },
@@ -4432,6 +5387,14 @@
           "named": true
         },
         {
+          "type": "super_expression",
+          "named": true
+        },
+        {
+          "type": "this_expression",
+          "named": true
+        },
+        {
           "type": "time_literal",
           "named": true
         },
@@ -4520,6 +5483,14 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
             "named": true
           },
           {
@@ -4757,6 +5728,14 @@
             "named": true
           },
           {
+            "type": "super_expression",
+            "named": true
+          },
+          {
+            "type": "this_expression",
+            "named": true
+          },
+          {
             "type": "time_literal",
             "named": true
           },
@@ -4865,6 +5844,10 @@
     "named": false
   },
   {
+    "type": "ABSTRACT",
+    "named": false
+  },
+  {
     "type": "AND",
     "named": false
   },
@@ -4886,6 +5869,10 @@
   },
   {
     "type": "CASE",
+    "named": false
+  },
+  {
+    "type": "CLASS",
     "named": false
   },
   {
@@ -4929,6 +5916,10 @@
     "named": false
   },
   {
+    "type": "END_CLASS",
+    "named": false
+  },
+  {
     "type": "END_FOR",
     "named": false
   },
@@ -4941,7 +5932,19 @@
     "named": false
   },
   {
+    "type": "END_GET",
+    "named": false
+  },
+  {
     "type": "END_IF",
+    "named": false
+  },
+  {
+    "type": "END_INTERFACE",
+    "named": false
+  },
+  {
+    "type": "END_METHOD",
     "named": false
   },
   {
@@ -4949,7 +5952,15 @@
     "named": false
   },
   {
+    "type": "END_PROPERTY",
+    "named": false
+  },
+  {
     "type": "END_REPEAT",
+    "named": false
+  },
+  {
+    "type": "END_SET",
     "named": false
   },
   {
@@ -4973,7 +5984,15 @@
     "named": false
   },
   {
+    "type": "EXTENDS",
+    "named": false
+  },
+  {
     "type": "FALSE",
+    "named": false
+  },
+  {
+    "type": "FINAL",
     "named": false
   },
   {
@@ -4989,11 +6008,27 @@
     "named": false
   },
   {
+    "type": "GET",
+    "named": false
+  },
+  {
     "type": "IF",
     "named": false
   },
   {
+    "type": "IMPLEMENTS",
+    "named": false
+  },
+  {
     "type": "INT",
+    "named": false
+  },
+  {
+    "type": "INTERFACE",
+    "named": false
+  },
+  {
+    "type": "INTERNAL",
     "named": false
   },
   {
@@ -5025,6 +6060,10 @@
     "named": false
   },
   {
+    "type": "METHOD",
+    "named": false
+  },
+  {
     "type": "MOD",
     "named": false
   },
@@ -5045,11 +6084,31 @@
     "named": false
   },
   {
+    "type": "OVERRIDE",
+    "named": false
+  },
+  {
     "type": "PERSISTENT",
     "named": false
   },
   {
+    "type": "PRIVATE",
+    "named": false
+  },
+  {
     "type": "PROGRAM",
+    "named": false
+  },
+  {
+    "type": "PROPERTY",
+    "named": false
+  },
+  {
+    "type": "PROTECTED",
+    "named": false
+  },
+  {
+    "type": "PUBLIC",
     "named": false
   },
   {
@@ -5073,6 +6132,10 @@
     "named": false
   },
   {
+    "type": "SET",
+    "named": false
+  },
+  {
     "type": "SINT",
     "named": false
   },
@@ -5085,7 +6148,15 @@
     "named": false
   },
   {
+    "type": "SUPER",
+    "named": false
+  },
+  {
     "type": "THEN",
+    "named": false
+  },
+  {
+    "type": "THIS",
     "named": false
   },
   {

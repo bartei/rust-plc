@@ -48,6 +48,8 @@ pub enum PouKind {
     Function,
     FunctionBlock,
     Program,
+    Class,
+    Method,
 }
 
 /// Memory layout for a set of variables.
@@ -75,8 +77,9 @@ pub enum VarType {
     Real,   // 64-bit float (covers REAL, LREAL)
     String, // heap-allocated
     Time,   // nanoseconds as i64
-    FbInstance(u16), // index into Module::functions
-    Ref,             // REF_TO pointer
+    FbInstance(u16),    // index into Module::functions
+    ClassInstance(u16), // index into Module::functions (the class)
+    Ref,                // REF_TO pointer
 }
 
 impl VarType {
@@ -86,6 +89,7 @@ impl VarType {
             VarType::Int | VarType::UInt | VarType::Real | VarType::Time => 8,
             VarType::String => 24, // ptr + len + capacity
             VarType::FbInstance(_) => 0, // size determined by the FB's MemoryLayout
+            VarType::ClassInstance(_) => 0, // size determined by the class's MemoryLayout
             VarType::Ref => 4, // scope_tag + slot_index
         }
     }
@@ -146,6 +150,7 @@ impl Value {
             VarType::String => Value::String(String::new()),
             VarType::Time => Value::Time(0),
             VarType::FbInstance(_) => Value::Void,
+            VarType::ClassInstance(_) => Value::Void,
             VarType::Ref => Value::Null,
         }
     }
@@ -265,6 +270,17 @@ pub enum Instruction {
     },
     /// Return from function (return value in register).
     Ret(Reg),
+    /// Call a class method: instance_slot, class func_index, method func_index, args.
+    /// The class_func_index identifies the class for instance state management.
+    /// The method func_index identifies the compiled method body.
+    /// Method locals layout: [class_vars... | method_vars... | return_var?]
+    CallMethod {
+        instance_slot: u16,
+        class_func_index: u16,
+        func_index: u16,
+        dst: Reg,
+        args: Vec<(u16, Reg)>,
+    },
     /// Return void (for programs / FBs).
     RetVoid,
 

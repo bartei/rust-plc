@@ -59,6 +59,8 @@ module.exports = grammar({
           $.program_declaration,
           $.function_declaration,
           $.function_block_declaration,
+          $.class_declaration,
+          $.interface_declaration,
           $.type_declaration,
           $.global_var_declaration
         )
@@ -94,6 +96,95 @@ module.exports = grammar({
         repeat($.var_block),
         field("body", $.statement_list),
         kw("END_FUNCTION_BLOCK")
+      ),
+
+    // =========================================================================
+    // OOP extensions (IEC 61131-3 Ed.3)
+    // =========================================================================
+    class_declaration: ($) =>
+      seq(
+        optional(field("abstract", kw("ABSTRACT"))),
+        optional(field("final", kw("FINAL"))),
+        kw("CLASS"),
+        field("name", $.identifier),
+        optional(seq(kw("EXTENDS"), field("base", $.identifier))),
+        optional(
+          seq(
+            kw("IMPLEMENTS"),
+            field("interfaces", commaSep1($.identifier))
+          )
+        ),
+        repeat($.var_block),
+        repeat(choice($.method_declaration, $.property_declaration)),
+        kw("END_CLASS")
+      ),
+
+    method_declaration: ($) =>
+      seq(
+        optional(field("access", $.access_specifier)),
+        optional(field("abstract", kw("ABSTRACT"))),
+        optional(field("final", kw("FINAL"))),
+        optional(field("override", kw("OVERRIDE"))),
+        kw("METHOD"),
+        field("name", $.identifier),
+        optional(seq(":", field("return_type", $._data_type))),
+        repeat($.var_block),
+        optional(field("body", $.statement_list)),
+        kw("END_METHOD")
+      ),
+
+    interface_declaration: ($) =>
+      seq(
+        kw("INTERFACE"),
+        field("name", $.identifier),
+        optional(seq(kw("EXTENDS"), field("base", commaSep1($.identifier)))),
+        repeat($.method_prototype),
+        kw("END_INTERFACE")
+      ),
+
+    method_prototype: ($) =>
+      seq(
+        kw("METHOD"),
+        field("name", $.identifier),
+        optional(seq(":", field("return_type", $._data_type))),
+        repeat($.var_block),
+        kw("END_METHOD")
+      ),
+
+    property_declaration: ($) =>
+      seq(
+        optional(field("access", $.access_specifier)),
+        kw("PROPERTY"),
+        field("name", $.identifier),
+        ":",
+        field("type", $._data_type),
+        optional(field("get", $.property_get)),
+        optional(field("set", $.property_set)),
+        kw("END_PROPERTY")
+      ),
+
+    property_get: ($) =>
+      seq(
+        kw("GET"),
+        repeat($.var_block),
+        optional(field("body", $.statement_list)),
+        kw("END_GET")
+      ),
+
+    property_set: ($) =>
+      seq(
+        kw("SET"),
+        repeat($.var_block),
+        optional(field("body", $.statement_list)),
+        kw("END_SET")
+      ),
+
+    access_specifier: ($) =>
+      choice(
+        kw("PUBLIC"),
+        kw("PRIVATE"),
+        kw("PROTECTED"),
+        kw("INTERNAL")
       ),
 
     // =========================================================================
@@ -494,10 +585,16 @@ module.exports = grammar({
     _primary_expression: ($) =>
       choice(
         $._literal,
+        $.this_expression,
+        $.super_expression,
         $.variable_access,
         $.function_call,
         $.parenthesized_expression
       ),
+
+    this_expression: ($) => kw("THIS"),
+
+    super_expression: ($) => kw("SUPER"),
 
     parenthesized_expression: ($) =>
       seq("(", $._expression, ")"),

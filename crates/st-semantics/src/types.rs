@@ -102,6 +102,10 @@ pub enum Ty {
     },
     /// A function block instance type.
     FunctionBlock { name: String },
+    /// A class instance type.
+    Class { name: String },
+    /// An interface type.
+    Interface { name: String },
     /// Type alias (resolved to the underlying type).
     Alias { name: String, target: Box<Ty> },
     /// Void — used for programs (no return value).
@@ -181,6 +185,8 @@ impl Ty {
             Ty::Enum { name, .. } => name.clone(),
             Ty::Subrange { name, .. } => name.clone(),
             Ty::FunctionBlock { name } => name.clone(),
+            Ty::Class { name } => name.clone(),
+            Ty::Interface { name } => name.clone(),
             Ty::Alias { name, .. } => name.clone(),
             Ty::Void => "VOID".to_string(),
             Ty::Unknown => "<unknown>".to_string(),
