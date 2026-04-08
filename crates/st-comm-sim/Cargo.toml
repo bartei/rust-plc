@@ -1,0 +1,23 @@
+[package]
+name = "st-comm-sim"
+description = "Simulated communication device with web UI for PLC I/O testing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+st-comm-api = { path = "../st-comm-api" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+st-syntax = { path = "../st-syntax" }
+st-compiler = { path = "../st-compiler" }
+st-runtime = { path = "../st-runtime" }
+st-ir = { path = "../st-ir" }

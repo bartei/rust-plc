@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=../../schemas/plc-project.schema.json
+name: SimulatedIO
+version: "1.0.0"
+entryPoint: Main
+
+# Communication framework configuration.
+# Each device gets a flat set of VAR_GLOBALs named {device}_{field}.
+# A web UI is started for each simulated device on a sequential port,
+# beginning at 8080.
+links:
+  - name: sim_link
+    type: simulated
+
+devices:
+  - name: io_rack
+    link: sim_link
+    protocol: simulated
+    mode: cyclic
+    device_profile: sim_8di_4ai_4do_2ao
+
+  - name: pump_vfd
+    link: sim_link
+    protocol: simulated
+    mode: cyclic
+    device_profile: sim_vfd

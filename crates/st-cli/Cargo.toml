@@ -13,10 +13,13 @@ st-semantics.workspace = true
 st-compiler.workspace = true
 st-ir.workspace = true
 st-runtime.workspace = true
+st-comm-api = { path = "../st-comm-api" }
+st-comm-sim = { path = "../st-comm-sim" }
 st-lsp.workspace = true
 st-dap.workspace = true
 st-monitor.workspace = true
 tokio.workspace = true
+serde_yaml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true

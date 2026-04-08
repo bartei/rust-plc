@@ -1,5 +1,6 @@
 //! Scan cycle engine: runs PLC programs in a cyclic loop.
 
+use crate::comm_manager::CommManager;
 use crate::vm::{Vm, VmConfig, VmError};
 use st_ir::*;
 use std::time::{Duration, Instant};
@@ -55,6 +56,7 @@ pub struct Engine {
     config: EngineConfig,
     stats: CycleStats,
     program_name: String,
+    comm: CommManager,
 }
 
 impl Engine {
@@ -69,7 +71,28 @@ impl Engine {
                 ..Default::default()
             },
             program_name,
+            comm: CommManager::new(),
         }
+    }
+
+    /// Mutable access to the communication manager (for registering devices).
+    pub fn comm_mut(&mut self) -> &mut CommManager {
+        &mut self.comm
+    }
+
+    /// Register a comm device with the engine. Resolves global slots from the
+    /// VM internally so callers don't have to juggle borrows.
+    pub fn register_comm_device(
+        &mut self,
+        device: Box<dyn st_comm_api::CommDevice>,
+        instance_name: &str,
+    ) {
+        self.comm.register_device(device, instance_name, &self.vm);
+    }
+
+    /// Read-only access to the communication manager.
+    pub fn comm(&self) -> &CommManager {
+        &self.comm
     }
 
     /// Run the scan cycle loop. Returns after max_cycles or on error.
@@ -91,7 +114,15 @@ impl Engine {
         self.vm.set_elapsed_time_ms(elapsed_ms);
 
         self.vm.reset_instruction_count();
+
+        // 1. Read all device inputs into VM globals
+        self.comm.read_inputs(&mut self.vm);
+
+        // 2. Execute the user's program
         self.vm.scan_cycle(&self.program_name)?;
+
+        // 3. Write VM globals out to device outputs
+        self.comm.write_outputs(&self.vm);
 
         let elapsed = start.elapsed();
 

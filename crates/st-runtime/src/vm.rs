@@ -163,6 +163,18 @@ impl Vm {
         }
     }
 
+    /// Set a global variable value by slot index.
+    pub fn set_global_by_slot(&mut self, slot: u16, value: Value) {
+        if (slot as usize) < self.globals.len() {
+            self.globals[slot as usize] = value;
+        }
+    }
+
+    /// Get a global variable value by slot index.
+    pub fn get_global_by_slot(&self, slot: u16) -> Option<&Value> {
+        self.globals.get(slot as usize)
+    }
+
     /// Get total instructions executed.
     pub fn instruction_count(&self) -> u64 {
         self.instruction_count

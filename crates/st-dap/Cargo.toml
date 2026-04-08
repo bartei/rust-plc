@@ -15,6 +15,10 @@ st-runtime.workspace = true
 st-ir.workspace = true
 st-syntax.workspace = true
 st-compiler.workspace = true
+st-comm-api = { path = "../st-comm-api" }
+st-comm-sim = { path = "../st-comm-sim" }
 dap.workspace = true
 tracing.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
+tokio.workspace = true

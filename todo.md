@@ -731,51 +731,83 @@ manager → engine integration → then real protocol implementations (Modbus, e
 
 #### Phase 13a: Core API + Simulated Device (build and test the framework)
 
-- [ ] **`st-comm-api` crate** (shared traits + types):
-  - [ ] `CommLink` trait (open, close, send, receive, diagnostics)
-  - [ ] `CommDevice` trait (configure, bind_link, read_inputs, write_outputs, acyclic)
-  - [ ] `DeviceProfile` struct (name, vendor, fields with register mappings)
-  - [ ] `ProfileField` struct (name, ST type, direction, register address/kind/bit/scale)
-  - [ ] `CommError`, `LinkDiagnostics`, `DeviceDiagnostics` types
-  - [ ] `AcyclicRequest`/`AcyclicResponse` types
-  - [ ] Device profile YAML parser (profile → struct schema + register map)
-  - [ ] Profile-to-ST code generator (profile → TYPE struct + VAR_GLOBAL instances)
-  - [ ] Project YAML parser (links + devices sections)
-- [ ] **`st-comm-sim` crate** (simulated device — first CommDevice implementation):
-  - [ ] Implements `CommDevice` trait with in-memory register storage
-  - [ ] Simulated link (no network — direct in-memory reads/writes)
-  - [ ] Web UI server (HTTP + WebSocket, e.g., localhost:8080):
-    - [ ] Toggle digital inputs (DI_0..DI_n) with switches
-    - [ ] Set analog inputs (AI_0..AI_n) with sliders/numeric fields
-    - [ ] Display digital output states (DO_0..DO_n) as indicators
-    - [ ] Display analog output values (AO_0..AO_n)
+Status: **mostly complete** — core framework, simulated device, web UI, scan-cycle
+integration, CLI/DAP wiring, on-disk symbol map, and a working playground are all
+in place on `feature/phase13-comm-framework`. Outstanding items are advanced
+features (multi-rate scheduling, register scaling, diagnostics surface) that
+aren't blocking the first end-to-end demo.
+
+- [x] **`st-comm-api` crate** (shared traits + types):
+  - [x] `CommLink` trait (open, close, send, receive, diagnostics)
+  - [x] `CommDevice` trait (configure, bind_link, read_inputs, write_outputs, acyclic)
+  - [x] `DeviceProfile` struct (name, vendor, fields with register mappings)
+  - [x] `ProfileField` struct (name, ST type, direction, register address/kind/bit/scale)
+  - [x] `CommError`, `LinkDiagnostics`, `DeviceDiagnostics` types
+  - [x] `AcyclicRequest`/`AcyclicResponse` types
+  - [x] Device profile YAML parser (profile → struct schema + register map)
+  - [x] Profile-to-ST code generator (emits flat `{device}_{field}` globals with
+        a column-aligned mapping table in comments — Codesys/TwinCAT-style)
+  - [x] Project YAML parser (`links:` + `devices:` sections)
+  - [x] `write_io_map_file()`: writes `{project_root}/_io_map.st` only if changed
+- [x] **`st-comm-sim` crate** (simulated device — first CommDevice implementation):
+  - [x] Implements `CommDevice` trait with in-memory register storage
+  - [x] Simulated link (no network — direct in-memory reads/writes)
+  - [x] Web UI server (HTTP + JSON polling, one port per device starting at 8080):
+    - [x] Toggle digital inputs (DI_0..DI_n) with switches
+    - [x] Set analog inputs (AI_0..AI_n) with numeric fields
+    - [x] Display digital output states (DO_0..DO_n) as LED indicators
+    - [x] Display analog output values (AO_0..AO_n)
     - [ ] Show device diagnostics (connected, cycle count, last update)
-    - [ ] Real-time updates via WebSocket (value changes push immediately)
-  - [ ] Loads standard device profile YAML (same format as real hardware)
-  - [ ] Multiple simulated devices per project (each gets its own web panel/tab)
-  - [ ] Unit tests: register read/write, profile loading, I/O direction enforcement
-  - [ ] Integration test: full scan cycle with simulated device + ST program
-- [ ] **Communication Manager** (in `st-runtime`):
-  - [ ] Parse `links:` and `devices:` sections from plc-project.yaml
-  - [ ] Create link instances, bind devices to their declared links
-  - [ ] Coordinate bus access for shared links (mutex/queue for serial buses)
-  - [ ] Integrate into scan cycle: read_inputs → execute → write_outputs → acyclic
-  - [ ] Map device profile struct fields ↔ VM global struct instance slots
-  - [ ] Direction-aware I/O: only read `input` fields, only write `output` fields
-  - [ ] Register value scaling (raw register ↔ engineering units via `scale` factor)
-  - [ ] Multi-rate scheduling: per-device `cycle_time` with independent update timers
-  - [ ] Auto-generate `CommDiag` fields for every device (connected, error, error_count, etc.)
+    - ~~Real-time updates via WebSocket~~ → replaced with HTTP polling at 200ms;
+          simpler, no extra deps, plenty fast for desktop simulation
+  - [x] Loads standard device profile YAML (same format as real hardware)
+  - [x] Multiple simulated devices per project (each gets its own web panel)
+  - [x] Unit tests: register read/write, profile loading, I/O direction enforcement
+  - [x] Integration test: full scan cycle with simulated device + ST program
+        (`playground/sim_project` exercises this end-to-end)
+- [x] **Communication Manager** (in `st-runtime/src/comm_manager.rs`):
+  - [x] Parse `links:` and `devices:` sections from plc-project.yaml
+        (handled in CLI/DAP `comm_setup` modules)
+  - [x] Create device instances, register them with the engine's CommManager
+  - [ ] Coordinate bus access for shared links (mutex/queue for serial buses) —
+        deferred to Phase 13b when real links exist
+  - [x] Integrate into scan cycle: `read_inputs` → execute → `write_outputs`
+  - [x] Map device profile fields ↔ VM globals via `{device}_{field}` slots
+  - [x] Direction-aware I/O: only read input fields, only write output fields
+  - [ ] Register value scaling (raw register ↔ engineering units via `scale`)
+  - [ ] Multi-rate scheduling: per-device `cycle_time` with independent timers
+  - [ ] Auto-generate `CommDiag` fields per device (connected, error, etc.)
   - [ ] Connection monitoring and automatic reconnection with backoff
-  - [ ] Diagnostics exposed via monitor server + WebSocket
-- [ ] **Engine integration**:
-  - [ ] `st-cli run` loads link/device config and starts communication
+  - [ ] Diagnostics exposed via monitor server
+- [x] **Engine + CLI + DAP integration**:
+  - [x] `Engine` owns a `CommManager`, calls `read_inputs` / `write_outputs` per scan
+  - [x] `Engine::register_comm_device()` helper to avoid borrow-split at call sites
+  - [x] `Vm::set_global_by_slot` / `get_global_by_slot` for fast slot-based I/O
+  - [x] `st-cli run` loads link/device config, regenerates `_io_map.st`,
+        instantiates sim devices, registers them, and starts web UIs
+  - [x] `st-cli check` regenerates `_io_map.st` so the LSP sees the same globals
+  - [x] `st-cli comm-gen [path]` for explicit regeneration
+  - [x] DAP server does the same setup before launch — debugging the playground
+        from VS Code Just Works (breakpoints, stepping, web UI all live at once)
+  - [x] `read_inputs`/`write_outputs` called at every DAP scan-cycle boundary
   - [ ] `st-cli comm-status` shows link health and device connection state
   - [ ] `st-cli profile validate` checks a device profile YAML for errors
-- [ ] **Bundled device profiles**:
-  - [ ] `sim_8di_4ai_4do_2ao` — 8 digital in, 4 analog in, 4 digital out, 2 analog out
+- [x] **On-disk symbol map (Codesys/TwinCAT-style mapping table)**:
+  - [x] `_io_map.st` is written to project root, regenerated only when contents change
+  - [x] File is gitignored (auto-generated artifact)
+  - [x] Human-readable header per device (link, protocol, mode, vendor, description)
+  - [x] Column-aligned mapping table in comments: GLOBAL | FIELD | DIR | TYPE | REGISTER | UNIT
+  - [x] Picked up by project autodiscovery → LSP, semantic checker, compiler,
+        runtime, and DAP all see the same globals from one source on disk
+- [x] **Bundled device profiles** (`profiles/`):
+  - [x] `sim_8di_4ai_4do_2ao` — 8 DI, 4 AI, 4 DO, 2 AO
   - [ ] `sim_16di_16do` — 16-channel digital I/O
-  - [ ] `sim_vfd` — simulated VFD (run, stop, speed_ref, speed_act, current, fault)
-- [ ] **Playground example**: simulated I/O project with web UI
+  - [x] `sim_vfd` — simulated VFD (run, stop, speed_ref, speed_act, current,
+        torque, power, fault)
+- [x] **Playground example**: `playground/sim_project/` with `plc-project.yaml`
+      wiring `io_rack` (Sim8DI4AI4DO2AO) on port 8080 and `pump_vfd` (SimVfd)
+      on port 8081, plus a `main.st` showing digital passthrough, analog
+      passthrough, and a VFD start/stop interlock
 - [ ] **Documentation**: simulated device quickstart + "How to create a device profile"
 
 #### Phase 13b: Real Protocol Implementations

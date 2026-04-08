@@ -50,9 +50,13 @@ fn generate_and_parse_sim_io_code() {
     let code = generate_st_code(&profiles, &devices);
     eprintln!("Generated ST code:\n{code}");
 
-    // Add a program that uses the generated types
+    // Each profile field becomes a flat global named {device}_{field}
+    assert!(code.contains("io_rack_DI_0 : BOOL;"));
+    assert!(code.contains("io_rack_DO_0 : BOOL;"));
+    assert!(code.contains("io_rack_AI_0 : INT;"));
+
     let full = format!(
-        "{code}\nPROGRAM Main\nVAR x : INT; END_VAR\n    IF io_rack.DI_0 THEN io_rack.DO_0 := TRUE; END_IF;\n    x := io_rack.AI_0;\nEND_PROGRAM\n"
+        "{code}\nPROGRAM Main\nVAR x : INT; END_VAR\n    IF io_rack_DI_0 THEN io_rack_DO_0 := TRUE; END_IF;\n    x := io_rack_AI_0;\nEND_PROGRAM\n"
     );
 
     let result = st_syntax::parse(&full);
@@ -106,9 +110,9 @@ fn generate_and_parse_multi_device_code() {
 
     let full = format!(
         "{code}\nPROGRAM Main\nVAR motor_on : BOOL; END_VAR\n\
-        IF rack_left.DI_0 THEN rack_right.DO_0 := TRUE; END_IF;\n\
-        pump_vfd.RUN := motor_on;\n\
-        pump_vfd.SPEED_REF := 45.0;\n\
+        IF rack_left_DI_0 THEN rack_right_DO_0 := TRUE; END_IF;\n\
+        pump_vfd_RUN := motor_on;\n\
+        pump_vfd_SPEED_REF := 45.0;\n\
         END_PROGRAM\n"
     );
 
@@ -149,8 +153,10 @@ devices:
         profiles.insert(dev.device_profile.clone(), profile);
     }
 
-    // Generate code
+    // Generate code: each profile field becomes a flat global named {device}_{field}
     let code = generate_st_code(&profiles, &config.devices);
-    assert!(code.contains("io_rack : Sim8DI4AI4DO2AO;"));
-    assert!(code.contains("vfd : SimVfd;"));
+    assert!(code.contains("io_rack_DI_0 : BOOL;"));
+    assert!(code.contains("io_rack_AO_1 : INT;"));
+    assert!(code.contains("vfd_SPEED_REF : REAL;"));
+    assert!(code.contains("vfd_RUN : BOOL;"));
 }

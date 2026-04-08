@@ -5,10 +5,14 @@ use dap::prelude::*;
 use dap::requests::Command;
 use dap::responses::{ResponseBody, ResponseMessage};
 use dap::types::*;
+use st_comm_api::CommDevice;
 use st_ir::PouKind;
+use st_runtime::comm_manager::CommManager;
 use st_runtime::debug::{PauseReason, StepMode};
 use st_runtime::vm::{Vm, VmConfig, VmError};
 use std::io::{BufReader, BufWriter, Read, Write};
+
+use crate::comm_setup;
 
 /// Run the DAP server on the given reader/writer.
 pub fn run_dap<R: Read, W: Write>(input: R, output: W, source_path: &str) {
@@ -112,6 +116,10 @@ struct DapSession {
     pending_breakpoints: std::collections::HashMap<String, (String, Vec<u32>)>,
     /// Maps variable reference IDs to scope kinds for Variables requests.
     scope_refs: std::collections::HashMap<i64, ScopeKind>,
+    /// Communication manager for simulated devices (read inputs / write outputs each scan).
+    comm: CommManager,
+    /// Comm setup data (config, profiles, generated source) loaded from plc-project.yaml.
+    comm_setup: Option<comm_setup::CommSetup>,
 }
 
 impl DapSession {
@@ -128,6 +136,8 @@ impl DapSession {
             pending_breakpoints: std::collections::HashMap::new(),
             scope_refs: std::collections::HashMap::new(),
             next_var_ref: 1000,
+            comm: CommManager::new(),
+            comm_setup: None,
         }
     }
 
@@ -225,6 +235,19 @@ impl DapSession {
         };
 
         if let Some(ref root) = project_root {
+            // Load communication configuration BEFORE project discovery so the
+            // auto-generated `_io_map.st` is on disk and gets picked up.
+            self.comm_setup = comm_setup::load_for_project(root)
+                .map_err(|e| format!("Comm config error: {e}"))?;
+            if let Some(ref setup) = self.comm_setup {
+                self.pending_events.push(console_output(&format!(
+                    "Comm: {} link(s), {} device(s) — wrote {}",
+                    setup.config.links.len(),
+                    setup.config.devices.len(),
+                    setup.io_map_path.display(),
+                )));
+            }
+
             // Multi-file project mode — pass the project ROOT directory
             let project = st_syntax::project::discover_project(Some(root))
                 .map_err(|e| format!("Project discovery failed: {e}"))?;
@@ -261,6 +284,8 @@ impl DapSession {
 
             let stdlib = st_syntax::multi_file::builtin_stdlib();
             let mut all_sources: Vec<&str> = stdlib.to_vec();
+            // The comm globals come from `_io_map.st` which is on disk and
+            // already part of `sources` via project autodiscovery.
             let owned: Vec<String> = sources.into_iter().map(|(_, content)| content).collect();
             for s in &owned {
                 all_sources.push(s.as_str());
@@ -370,6 +395,38 @@ impl DapSession {
         let mut vm = Vm::new(module, config);
         vm.debug_mut().resume(StepMode::StepIn, 0);
 
+        // Register simulated devices and start their web UIs (if a comm setup
+        // was loaded from plc-project.yaml).
+        if let Some(ref mut setup) = self.comm_setup {
+            for dev_cfg in &setup.config.devices {
+                let Some(profile) = setup.profiles.get(&dev_cfg.device_profile) else {
+                    continue;
+                };
+                if dev_cfg.protocol != "simulated" {
+                    self.pending_events.push(console_output(&format!(
+                        "[COMM] Skipping device '{}': protocol '{}' not implemented",
+                        dev_cfg.name, dev_cfg.protocol
+                    )));
+                    continue;
+                }
+                let sim_device =
+                    st_comm_sim::SimulatedDevice::new(&dev_cfg.name, profile.clone());
+                let state_handle = sim_device.state_handle();
+                let device_box: Box<dyn CommDevice> = Box::new(sim_device);
+                self.comm.register_device(device_box, &dev_cfg.name, &vm);
+                setup.device_states.push(comm_setup::DeviceState {
+                    name: dev_cfg.name.clone(),
+                    profile: profile.clone(),
+                    state: state_handle,
+                });
+            }
+            self.pending_events.push(console_output(&format!(
+                "[COMM] Registered {} simulated device(s)",
+                setup.device_states.len()
+            )));
+            comm_setup::start_web_uis(setup, 8080);
+        }
+
         // Start the VM — it will immediately halt on the first instruction
         let program_name = self.entry_point_override.clone().unwrap_or_else(|| {
             vm.module()
@@ -379,6 +436,8 @@ impl DapSession {
                 .map(|f| f.name.clone())
                 .unwrap()
         });
+        // Read device inputs into globals before the very first instruction halts.
+        self.comm.read_inputs(&mut vm);
         let _ = vm.run(&program_name); // Err(Halt) expected
 
         self.vm = Some(vm);
@@ -734,10 +793,13 @@ impl DapSession {
     }
 
     fn resume_execution(&mut self, mode: StepMode) {
-        let Some(ref mut vm) = self.vm else {
+        if self.vm.is_none() {
             eprintln!("[DAP] resume_execution: no VM");
             return;
-        };
+        }
+        // Disjoint borrows so we can use both `vm` and `comm` in the loop below.
+        let comm = &mut self.comm;
+        let vm = self.vm.as_mut().unwrap();
 
         let depth = vm.call_depth();
         let current_source_offset = vm.stack_frames()
@@ -766,6 +828,8 @@ impl DapSession {
             let result = if vm.call_depth() > 0 {
                 vm.continue_execution()
             } else {
+                // Start of a fresh scan cycle: pull device inputs into VM globals.
+                comm.read_inputs(vm);
                 vm.debug_mut().resume_with_source(mode, 0, 0);
                 vm.run(&program_name)
             };
@@ -807,13 +871,16 @@ impl DapSession {
                     break;
                 }
                 Ok(_) => {
-                    // Cycle completed — start next cycle
+                    // Cycle completed — push VM globals out to device outputs.
+                    comm.write_outputs(vm);
                     cycles += 1;
 
                     if mode != StepMode::Continue && cycles >= max_cycles {
                         // Step mode reached end of cycle — start next cycle
                         // and stop at the first statement (like a wrap-around)
                         eprintln!("[DAP] Step wrapped to next cycle");
+                        // New scan cycle: read inputs again
+                        comm.read_inputs(vm);
                         vm.debug_mut().resume_with_source(StepMode::StepIn, 0, 0);
                         match vm.run(&program_name) {
                             Err(VmError::Halt) => {

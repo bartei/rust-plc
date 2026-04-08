@@ -21,3 +21,6 @@ crates/st-grammar/build/
 
 # mdBook output
 docs/book/
+
+# Auto-generated communication I/O map (regenerated from plc-project.yaml)
+_io_map.st

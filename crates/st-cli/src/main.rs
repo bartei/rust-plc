@@ -1,3 +1,5 @@
+mod comm_setup;
+
 use std::env;
 use std::path::Path;
 use std::process;
@@ -20,6 +22,7 @@ fn parse_project(project: &st_syntax::project::Project) -> Result<st_syntax::low
     Ok(st_syntax::multi_file::parse_multi(&all))
 }
 
+
 fn print_usage() {
     eprintln!("st-cli: IEC 61131-3 Structured Text toolchain");
     eprintln!();
@@ -31,6 +34,7 @@ fn print_usage() {
     eprintln!("  run [path] [-n N] Compile and execute (N cycles, default 1)");
     eprintln!("  compile <path> -o <output>  Compile to bytecode file");
     eprintln!("  fmt [path]        Format source file(s) in place");
+    eprintln!("  comm-gen [path]   Regenerate _io_map.st from plc-project.yaml + profiles");
     eprintln!("  debug <file>      Start DAP debug server (stdin/stdout)");
     eprintln!("  help              Show this help message");
     eprintln!();
@@ -77,6 +81,27 @@ fn main() {
         }
         "fmt" => {
             run_fmt_cmd(&args);
+        }
+        "comm-gen" => {
+            let target = args.get(2).map(|s| s.as_str()).map(Path::new);
+            let root = resolve_project_root(target);
+            match comm_setup::load_for_project(&root) {
+                Ok(Some(setup)) => {
+                    eprintln!(
+                        "Wrote {} ({} device(s), {} profile(s))",
+                        setup.io_map_path.display(),
+                        setup.config.devices.len(),
+                        setup.profiles.len()
+                    );
+                }
+                Ok(None) => {
+                    eprintln!("No comm devices configured in {}", root.display());
+                }
+                Err(e) => {
+                    eprintln!("Comm config error: {e}");
+                    process::exit(1);
+                }
+            }
         }
         "debug" => {
             if args.len() < 3 {
@@ -132,6 +157,15 @@ fn run_check(path: Option<&str>, args: &[String]) {
         if has_errors { process::exit(1); }
     } else {
         // Project mode
+
+        // Refresh the auto-generated I/O map before discovering files,
+        // so the LSP/check sees the same set of comm globals as `run`.
+        let probe_root = resolve_project_root(target);
+        if let Err(e) = comm_setup::load_for_project(&probe_root) {
+            eprintln!("Comm config error: {e}");
+            process::exit(1);
+        }
+
         let project = match st_syntax::project::discover_project(target) {
             Ok(p) => p,
             Err(e) => {
@@ -187,7 +221,7 @@ fn run_program_cmd(args: &[String]) {
         .map(|p| p.is_file() && matches!(p.extension().and_then(|e| e.to_str()), Some("st" | "scl")))
         .unwrap_or(false);
 
-    let (parse_result, project_name) = if is_single_file {
+    let (parse_result, project_name, mut comm_setup) = if is_single_file {
         let path = target.unwrap();
         let source = match std::fs::read_to_string(path) {
             Ok(s) => s,
@@ -205,9 +239,29 @@ fn run_program_cmd(args: &[String]) {
             }
             process::exit(1);
         }
-        (parse_result, None)
+        (parse_result, None, None)
     } else {
         // Project mode
+
+        // Load comm config FIRST so the auto-generated `_io_map.st` is
+        // present on disk before project autodiscovery walks the directory.
+        // We need the project root for that — find it by walking up.
+        let probe_root = resolve_project_root(target);
+        let comm_setup = match comm_setup::load_for_project(&probe_root) {
+            Ok(setup) => setup,
+            Err(e) => {
+                eprintln!("Comm config error: {e}");
+                process::exit(1);
+            }
+        };
+        if let Some(ref setup) = comm_setup {
+            eprintln!(
+                "[COMM] Generated I/O map: {} ({} device(s))",
+                setup.io_map_path.display(),
+                setup.config.devices.len()
+            );
+        }
+
         let project = match st_syntax::project::discover_project(target) {
             Ok(p) => p,
             Err(e) => {
@@ -233,7 +287,7 @@ fn run_program_cmd(args: &[String]) {
             process::exit(1);
         }
 
-        (parse_result, project.entry_point)
+        (parse_result, project.entry_point, comm_setup)
     };
 
     // Semantic check
@@ -287,6 +341,13 @@ fn run_program_cmd(args: &[String]) {
         ..Default::default()
     };
     let mut engine = st_runtime::Engine::new(module, program_name, config);
+
+    // Register simulated devices and start their web UIs (if any).
+    if let Some(ref mut setup) = comm_setup {
+        comm_setup::register_simulated_devices(setup, &mut engine);
+        comm_setup::start_web_uis(setup, 8080);
+    }
+
     match engine.run() {
         Ok(()) => {
             let stats = engine.stats();
@@ -516,6 +577,44 @@ fn print_diagnostics(
         }
     }
     has_errors
+}
+
+/// Resolve the project root directory from an optional CLI path argument,
+/// the same way `discover_project` would, but returning just the root.
+fn resolve_project_root(target: Option<&Path>) -> std::path::PathBuf {
+    let path = target.unwrap_or_else(|| Path::new("."));
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if canonical.is_dir() {
+        return canonical;
+    }
+    if canonical
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e == "yaml" || e == "yml")
+        .unwrap_or(false)
+    {
+        return canonical
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or(canonical);
+    }
+    // Single .st file: walk up looking for plc-project.yaml
+    let mut cur = canonical.clone();
+    if cur.is_file() {
+        if let Some(parent) = cur.parent() {
+            cur = parent.to_path_buf();
+        }
+    }
+    let mut probe = cur.clone();
+    loop {
+        if probe.join("plc-project.yaml").exists() || probe.join("plc-project.yml").exists() {
+            return probe;
+        }
+        if !probe.pop() {
+            break;
+        }
+    }
+    cur
 }
 
 fn byte_offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
