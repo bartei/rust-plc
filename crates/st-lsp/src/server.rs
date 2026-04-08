@@ -287,7 +287,7 @@ impl LanguageServer for Backend {
         if let Some(change) = params.content_changes.into_iter().last() {
             let mut docs = self.documents.write().await;
             if let Some(doc) = docs.get_mut(&uri) {
-                doc.update(change.text, Some(params.text_document.version));
+                doc.update(change.text, Some(params.text_document.version), Some(uri.as_str()));
                 self.publish_diagnostics(&uri, doc).await;
             } else {
                 let doc = Document::new_with_uri(
@@ -299,6 +299,10 @@ impl LanguageServer for Backend {
                 docs.insert(uri, doc);
             }
         }
+    }
+
+    async fn did_save(&self, _params: DidSaveTextDocumentParams) {
+        // Content already processed via didChange; nothing extra on save.
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {

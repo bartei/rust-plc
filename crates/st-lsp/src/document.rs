@@ -36,9 +36,9 @@ impl Document {
     }
 
     /// Update the document with new source text.
-    pub fn update(&mut self, source: String, version: Option<i32>) {
+    pub fn update(&mut self, source: String, version: Option<i32>, uri: Option<&str>) {
         let (tree, ast, lower_errors, analysis, project_files) =
-            Self::analyze_source_with_uri(&source, None);
+            Self::analyze_source_with_uri(&source, uri);
         self.source = source;
         self.tree = tree;
         self.ast = ast;
