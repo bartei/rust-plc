@@ -62,6 +62,12 @@ END_VAR
         highAlarm.Configure(limit := 800, hyst := 50);
     END_IF;
 
+    controller.Configure();
+
+    IF cycle = 2 THEN
+        controller.Configure();
+    END_IF;
+
     // ── Simulate temperature sensor ──
     // Base trend: ramp up then stabilize
     IF cycle < 30 THEN

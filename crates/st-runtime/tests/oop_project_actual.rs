@@ -12,7 +12,7 @@ fn run_actual_oop_project() {
 
     let sources = st_syntax::project::load_project_sources(&project).unwrap();
     let stdlib = st_syntax::multi_file::builtin_stdlib();
-    let mut all_sources: Vec<&str> = stdlib.iter().copied().collect();
+    let mut all_sources: Vec<&str> = stdlib.to_vec();
     for (_path, content) in &sources {
         all_sources.push(content.as_str());
     }
@@ -69,7 +69,7 @@ fn dump_main_source_map() {
 
     let sources = st_syntax::project::load_project_sources(&project).unwrap();
     let stdlib = st_syntax::multi_file::builtin_stdlib();
-    let mut all_sources: Vec<&str> = stdlib.iter().copied().collect();
+    let mut all_sources: Vec<&str> = stdlib.to_vec();
     
     // Find main.st content and its index
     let mut main_source = "";

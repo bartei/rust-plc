@@ -181,6 +181,115 @@ impl Backend {
         None
     }
 
+    /// Resolve go-to-definition for a method name after a dot.
+    /// E.g., cursor on "Configure" in "controller.Configure()" → find the METHOD
+    /// declaration in the class file.
+    fn resolve_method_definition(
+        &self,
+        doc: &Document,
+        offset: usize,
+    ) -> Option<Location> {
+        let bytes = doc.source.as_bytes();
+        if offset >= bytes.len() {
+            return None;
+        }
+
+        // Extract the word under cursor (the method name)
+        let mut end = offset;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+        let mut start = offset;
+        while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+            start -= 1;
+        }
+        if start == end {
+            return None;
+        }
+        let method_name = std::str::from_utf8(&bytes[start..end]).ok()?;
+
+        // Check if there's a dot before this word
+        let before_word = start.checked_sub(1)?;
+        if bytes[before_word] != b'.' {
+            return None;
+        }
+
+        // Extract the object name before the dot
+        let dot_pos = before_word;
+        let obj_end = dot_pos;
+        let mut obj_start = obj_end;
+        while obj_start > 0 && (bytes[obj_start - 1].is_ascii_alphanumeric() || bytes[obj_start - 1] == b'_') {
+            obj_start -= 1;
+        }
+        if obj_start == obj_end {
+            return None;
+        }
+        let obj_name = std::str::from_utf8(&bytes[obj_start..obj_end]).ok()?;
+
+        // Resolve the object's type
+        let scope_id = self.find_scope_for_offset(doc, dot_pos);
+        let (_sid, sym) = doc.analysis.symbols.resolve(scope_id, obj_name)?;
+
+        let class_name = match sym.ty.resolved() {
+            st_semantics::types::Ty::Class { name } => name.clone(),
+            st_semantics::types::Ty::FunctionBlock { name } => name.clone(),
+            _ => return None,
+        };
+
+        // Find the method in the class hierarchy by searching project files
+        for (path, content) in &doc.project_files {
+            let parse = st_syntax::parse(content);
+            for item in &parse.source_file.items {
+                if let st_syntax::ast::TopLevelItem::Class(cls) = item {
+                    // Check this class and its ancestors
+                    if cls.name.name.eq_ignore_ascii_case(&class_name) || self.class_has_ancestor(doc, &class_name, &cls.name.name) {
+                        for m in &cls.methods {
+                            if m.name.name.eq_ignore_ascii_case(method_name) {
+                                let file_uri = tower_lsp::lsp_types::Url::from_file_path(path).ok()?;
+                                let src = content.as_bytes();
+                                let s = m.range.start.min(src.len());
+                                let mut line = 0u32;
+                                let mut col = 0u32;
+                                for &b in &src[..s] {
+                                    if b == b'\n' { line += 1; col = 0; } else { col += 1; }
+                                }
+                                return Some(Location {
+                                    uri: file_uri,
+                                    range: tower_lsp::lsp_types::Range {
+                                        start: tower_lsp::lsp_types::Position { line, character: col },
+                                        end: tower_lsp::lsp_types::Position { line, character: col },
+                                    },
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Check if `class_name` has `ancestor_name` in its inheritance chain.
+    fn class_has_ancestor(&self, doc: &Document, class_name: &str, ancestor_name: &str) -> bool {
+        let mut current = Some(class_name.to_string());
+        while let Some(ref name) = current {
+            let base = doc.analysis.symbols.resolve_class(name)
+                .and_then(|sym| {
+                    if let st_semantics::scope::SymbolKind::Class { base_class, .. } = &sym.kind {
+                        base_class.clone()
+                    } else {
+                        None
+                    }
+                });
+            match base {
+                Some(b) if b.eq_ignore_ascii_case(ancestor_name) => return true,
+                Some(b) => current = Some(b),
+                None => return false,
+            }
+        }
+        false
+    }
+
     /// Find the innermost scope containing the given offset.
     fn find_scope_for_offset(
         &self,
@@ -407,22 +516,24 @@ impl LanguageServer for Backend {
 
         let offset = doc.position_to_offset(pos);
 
+        // First: check if this is a method name after a dot (e.g., controller.Configure)
+        if let Some(location) = self.resolve_method_definition(doc, offset) {
+            return Ok(Some(GotoDefinitionResponse::Scalar(location)));
+        }
+
+        // Then: standard symbol resolution
         if let Some((word, scope_id)) = self.resolve_at_position(doc, offset) {
             if let Some((_sid, sym)) =
                 doc.analysis.symbols.resolve(scope_id, &word)
             {
                 let sym_range = sym.range;
 
-                // Try cross-file first if we have project files — this is the
-                // most reliable check since it verifies the symbol exists in
-                // that file by parsing it.
                 if !doc.project_files.is_empty() {
                     if let Some(location) = self.resolve_cross_file_location(doc, sym_range) {
                         return Ok(Some(GotoDefinitionResponse::Scalar(location)));
                     }
                 }
 
-                // Fallback: assume it's in the current file
                 if sym_range.end <= doc.source.len() {
                     let range = doc.text_range_to_lsp(sym_range);
                     return Ok(Some(GotoDefinitionResponse::Scalar(Location {

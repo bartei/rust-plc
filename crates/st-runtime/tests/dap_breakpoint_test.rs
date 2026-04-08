@@ -1,6 +1,5 @@
 //! Tests that reproduce the exact DAP breakpoint failure in multi-file projects.
 
-use st_ir::*;
 use st_runtime::debug::*;
 
 /// Build the actual oop_project module and test breakpoint resolution.
@@ -17,7 +16,7 @@ fn breakpoint_resolves_in_multi_file_project() {
 
     let sources = st_syntax::project::load_project_sources(&project).unwrap();
     let stdlib = st_syntax::multi_file::builtin_stdlib();
-    let mut all_sources: Vec<&str> = stdlib.iter().copied().collect();
+    let mut all_sources: Vec<&str> = stdlib.to_vec();
 
     let mut main_source = String::new();
     let mut main_path = String::new();

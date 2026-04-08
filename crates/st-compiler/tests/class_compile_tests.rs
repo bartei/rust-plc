@@ -17,7 +17,7 @@ fn find_func<'a>(module: &'a Module, name: &str) -> &'a st_ir::Function {
         .functions
         .iter()
         .find(|f| f.name.eq_ignore_ascii_case(name))
-        .unwrap_or_else(|| panic!("Function '{}' not found in module", name))
+        .unwrap_or_else(|| panic!("Function '{name}' not found in module"))
 }
 
 // =============================================================================
@@ -118,7 +118,7 @@ END_CLASS
     find_func(&m, "Shape.Name");
     // Abstract method should NOT be compiled
     assert!(
-        m.functions.iter().find(|f| f.name == "Shape.Area").is_none(),
+        !m.functions.iter().any(|f| f.name == "Shape.Area"),
         "Abstract methods should not be compiled"
     );
 }
@@ -168,7 +168,7 @@ END_INTERFACE
 "#);
     // Interfaces should not produce any function entries
     assert!(
-        m.functions.iter().find(|f| f.name.contains("ICountable")).is_none(),
+        !m.functions.iter().any(|f| f.name.contains("ICountable")),
         "Interfaces should not produce function entries"
     );
 }
@@ -318,8 +318,7 @@ END_CLASS
     let last = method.instructions.last().unwrap();
     assert!(
         matches!(last, st_ir::Instruction::Ret(_)),
-        "Return method should end with Ret, got {:?}",
-        last
+        "Return method should end with Ret, got {last:?}"
     );
 }
 

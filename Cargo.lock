@@ -957,6 +957,7 @@ dependencies = [
  "st-ir",
  "st-runtime",
  "st-syntax",
+ "tempfile",
  "tracing",
 ]
 

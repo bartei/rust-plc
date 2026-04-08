@@ -148,15 +148,22 @@ fn dot_completions(doc: &Document, offset: usize) -> Vec<CompletionItem> {
                                 .map(|p| format!("{} : {}", p.name, p.ty.display_name()))
                                 .collect::<Vec<_>>()
                                 .join(", ");
+                            // Build snippet with parameter placeholders
+                            let snippet = if m.params.is_empty() {
+                                format!("{}()$0", m.name)
+                            } else {
+                                let params_snippet = m.params.iter().enumerate()
+                                    .map(|(i, p)| format!("{} := ${}", p.name, i + 1))
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                format!("{}({})$0", m.name, params_snippet)
+                            };
                             items.push(CompletionItem {
                                 label: m.name.clone(),
                                 kind: Some(CompletionItemKind::METHOD),
                                 detail: Some(format!("METHOD({param_list}){ret}")),
-                                insert_text: if m.params.is_empty() {
-                                    Some(format!("{}()", m.name))
-                                } else {
-                                    Some(format!("{}(", m.name))
-                                },
+                                insert_text: Some(snippet),
+                                insert_text_format: Some(tower_lsp::lsp_types::InsertTextFormat::SNIPPET),
                                 ..Default::default()
                             });
                         }
@@ -182,15 +189,21 @@ fn dot_completions(doc: &Document, offset: usize) -> Vec<CompletionItem> {
                                                 } else {
                                                     format!(" : {}", m.return_type.display_name())
                                                 };
+                                                let snippet = if m.params.is_empty() {
+                                                    format!("{}()$0", m.name)
+                                                } else {
+                                                    let ps = m.params.iter().enumerate()
+                                                        .map(|(i, p)| format!("{} := ${}", p.name, i + 1))
+                                                        .collect::<Vec<_>>()
+                                                        .join(", ");
+                                                    format!("{}({})$0", m.name, ps)
+                                                };
                                                 items.push(CompletionItem {
                                                     label: m.name.clone(),
                                                     kind: Some(CompletionItemKind::METHOD),
                                                     detail: Some(format!("METHOD{ret} (inherited from {bn})")),
-                                                    insert_text: if m.params.is_empty() {
-                                                        Some(format!("{}()", m.name))
-                                                    } else {
-                                                        Some(format!("{}(", m.name))
-                                                    },
+                                                    insert_text: Some(snippet),
+                                                    insert_text_format: Some(tower_lsp::lsp_types::InsertTextFormat::SNIPPET),
                                                     ..Default::default()
                                                 });
                                             }

@@ -42,6 +42,7 @@ fn document_update_replaces_content() {
         "PROGRAM B\nVAR\n    y : REAL := 0.0;\nEND_VAR\n    y := 3.14;\nEND_PROGRAM\n"
             .to_string(),
         Some(2),
+        None,
     );
     assert_eq!(doc.version, Some(2));
     assert!(doc.source.contains("PROGRAM B"));
