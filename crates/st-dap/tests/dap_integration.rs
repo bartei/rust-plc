@@ -159,7 +159,8 @@ fn test_initialize() {
                 "adapterID": "st",
                 "clientID": "test"
             }))),
-            dap_request(2, "disconnect", None),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "disconnect", None),
         ],
     );
 
@@ -167,9 +168,9 @@ fn test_initialize() {
     assert!(resp["success"].as_bool().unwrap_or(false));
     assert!(resp["body"]["supportsConfigurationDoneRequest"].as_bool().unwrap_or(false));
 
-    // Should get an initialized event
+    // Initialized event is sent after launch (per DAP spec)
     let events = find_events(&messages, "initialized");
-    assert!(!events.is_empty(), "Expected initialized event");
+    assert!(!events.is_empty(), "Expected initialized event after launch");
 }
 
 #[test]

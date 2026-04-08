@@ -1939,7 +1939,14 @@ impl Analyzer {
                             sym.range,
                         ));
                     }
+                    // Class/FB instances are never "assigned" via :=, but
+                    // their state is managed implicitly via method calls.
+                    let is_instance = matches!(
+                        sym.ty,
+                        Ty::FunctionBlock { .. } | Ty::Class { .. }
+                    );
                     if !sym.assigned
+                        && !is_instance
                         && !matches!(
                             vk,
                             VarKind::VarInput | VarKind::VarInOut | VarKind::VarExternal

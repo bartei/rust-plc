@@ -102,6 +102,8 @@ struct DapSession {
     func_source_map: std::collections::HashMap<String, (String, String)>,
     /// Source files loaded from the project: (path, content).
     project_files: Vec<(String, String)>,
+    /// Accumulated breakpoints per file: path → (source_content, line_numbers).
+    pending_breakpoints: std::collections::HashMap<String, (String, Vec<u32>)>,
 }
 
 impl DapSession {
@@ -115,6 +117,7 @@ impl DapSession {
             entry_point_override: None,
             func_source_map: std::collections::HashMap::new(),
             project_files: Vec::new(),
+            pending_breakpoints: std::collections::HashMap::new(),
             next_var_ref: 1000,
         }
     }
@@ -123,14 +126,20 @@ impl DapSession {
         let seq = req.seq;
         match &req.command {
             Command::Initialize(_) => {
-                self.pending_events.push(Event::Initialized);
+                // NOTE: Do NOT emit Initialized here. Emit it after Launch
+                // so VS Code sends SetBreakpoints AFTER the VM exists.
                 ok(seq, ResponseBody::Initialize(Capabilities {
                     supports_configuration_done_request: Some(true),
                     supports_evaluate_for_hovers: Some(true),
                     ..Default::default()
                 }))
             }
-            Command::Launch(_) => self.handle_launch(seq),
+            Command::Launch(_) => {
+                let response = self.handle_launch(seq);
+                // Emit Initialized AFTER launch so breakpoints are set against a live VM
+                self.pending_events.push(Event::Initialized);
+                response
+            }
             Command::SetBreakpoints(args) => self.handle_set_breakpoints(seq, args),
             Command::ConfigurationDone => ok(seq, ResponseBody::ConfigurationDone),
             Command::Threads => ok(seq, ResponseBody::Threads(dap::responses::ThreadsResponse {
@@ -377,9 +386,54 @@ impl DapSession {
             let module = vm.module().clone();
             if let Some(ref source_bps) = args.breakpoints {
                 let lines: Vec<u32> = source_bps.iter().map(|bp| bp.line as u32).collect();
-                eprintln!("[DAP] SetBreakpoints: lines={lines:?}, source len={}", self.source.len());
+
+                // Determine which source file these breakpoints are for.
+                // VS Code sends the file path in args.source.
+                let bp_source_path = args.source.path.as_ref()
+                    .map(|p| p.to_string());
+
+                let bp_source_content = if let Some(ref path) = bp_source_path {
+                    // Try to find this file in project_files
+                    self.project_files.iter()
+                        .find(|(p, _)| {
+                            // Compare canonical paths to handle symlinks/relative paths
+                            let p_canon = std::fs::canonicalize(p).ok();
+                            let bp_canon = std::fs::canonicalize(path).ok();
+                            p_canon.is_some() && p_canon == bp_canon
+                        })
+                        .map(|(_, content)| content.clone())
+                        .or_else(|| {
+                            // Fallback: try reading the file directly
+                            std::fs::read_to_string(path).ok()
+                        })
+                        .unwrap_or_else(|| self.source.clone())
+                } else {
+                    self.source.clone()
+                };
+
+                eprintln!("[DAP] SetBreakpoints: file={:?} lines={lines:?}, source len={}",
+                    bp_source_path, bp_source_content.len());
+
+                // Don't clear ALL breakpoints — only set new ones additively.
+                // VS Code sends complete breakpoint list per file, so we rebuild from scratch.
                 vm.debug_mut().clear_breakpoints();
-                let results = vm.debug_mut().set_line_breakpoints(&module, &self.source, &lines);
+
+                // Re-apply breakpoints for ALL files we know about
+                // (VS Code sends SetBreakpoints per file, but we need to accumulate)
+                // Store pending breakpoints per file path
+                if let Some(path) = bp_source_path {
+                    self.pending_breakpoints.insert(path, (bp_source_content.clone(), lines.clone()));
+                } else {
+                    self.pending_breakpoints.insert(self.source_path.clone(), (bp_source_content.clone(), lines.clone()));
+                }
+
+                // Apply ALL accumulated breakpoints
+                for (source, file_lines) in self.pending_breakpoints.values() {
+                    vm.debug_mut().set_line_breakpoints(&module, source, file_lines);
+                }
+
+                // Report results for THIS file's breakpoints
+                let results = vm.debug_mut().set_line_breakpoints(&module, &bp_source_content, &lines);
                 eprintln!("[DAP] Breakpoint results: {results:?}");
 
                 for (i, result) in results.iter().enumerate() {
