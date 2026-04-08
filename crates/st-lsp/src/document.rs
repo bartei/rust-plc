@@ -41,15 +41,29 @@ impl Document {
     /// Update the document with new source text.
     /// Reuses the cached project_files from didOpen — no disk I/O or project
     /// re-discovery on each keystroke.
+    ///
+    /// If the new source has parse errors, we still update the tree and source
+    /// (for cursor position tracking) but keep the last successful analysis
+    /// results. This prevents squiggles from appearing while the user is typing
+    /// mid-expression (e.g., `controller.` before completing the method name).
     pub fn update(&mut self, source: String, version: Option<i32>, _uri: Option<&str>) {
         let (tree, ast, lower_errors, analysis) =
             Self::analyze_with_cached_project(&source, &self.project_files, self.file_path.as_deref());
+
+        let has_parse_errors = !lower_errors.is_empty() || tree.root_node().has_error();
+
         self.source = source;
         self.tree = tree;
-        self.ast = ast;
-        self.lower_errors = lower_errors;
-        self.analysis = analysis;
         self.version = version;
+
+        if has_parse_errors {
+            // Keep the last good AST and analysis — prevents false error squiggles
+            // while typing. The tree and source are still updated for cursor tracking.
+        } else {
+            self.ast = ast;
+            self.lower_errors = lower_errors;
+            self.analysis = analysis;
+        }
         // project_files unchanged — cached from didOpen
     }
 

@@ -133,6 +133,90 @@ fn dot_completions(doc: &Document, offset: usize) -> Vec<CompletionItem> {
                     }
                 }
             }
+            Ty::Class { name } => {
+                // Offer class methods and accessible fields
+                if let Some(cls_sym) = doc.analysis.symbols.resolve_class(name) {
+                    if let scope::SymbolKind::Class { methods, params, outputs, .. } = &cls_sym.kind {
+                        // Methods
+                        for m in methods {
+                            let ret = if m.return_type == Ty::Void {
+                                String::new()
+                            } else {
+                                format!(" : {}", m.return_type.display_name())
+                            };
+                            let param_list = m.params.iter()
+                                .map(|p| format!("{} : {}", p.name, p.ty.display_name()))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            items.push(CompletionItem {
+                                label: m.name.clone(),
+                                kind: Some(CompletionItemKind::METHOD),
+                                detail: Some(format!("METHOD({param_list}){ret}")),
+                                insert_text: if m.params.is_empty() {
+                                    Some(format!("{}()", m.name))
+                                } else {
+                                    Some(format!("{}(", m.name))
+                                },
+                                ..Default::default()
+                            });
+                        }
+                        // Also walk up the inheritance chain for inherited methods
+                        let mut base = cls_sym.kind.clone();
+                        loop {
+                            let base_name = if let scope::SymbolKind::Class { base_class, .. } = &base {
+                                base_class.clone()
+                            } else {
+                                None
+                            };
+                            match base_name {
+                                Some(bn) => {
+                                    if let Some(parent) = doc.analysis.symbols.resolve_class(&bn) {
+                                        if let scope::SymbolKind::Class { methods: pm, .. } = &parent.kind {
+                                            for m in pm {
+                                                // Skip if already added (overridden)
+                                                if items.iter().any(|i| i.label.eq_ignore_ascii_case(&m.name)) {
+                                                    continue;
+                                                }
+                                                let ret = if m.return_type == Ty::Void {
+                                                    String::new()
+                                                } else {
+                                                    format!(" : {}", m.return_type.display_name())
+                                                };
+                                                items.push(CompletionItem {
+                                                    label: m.name.clone(),
+                                                    kind: Some(CompletionItemKind::METHOD),
+                                                    detail: Some(format!("METHOD{ret} (inherited from {bn})")),
+                                                    insert_text: if m.params.is_empty() {
+                                                        Some(format!("{}()", m.name))
+                                                    } else {
+                                                        Some(format!("{}(", m.name))
+                                                    },
+                                                    ..Default::default()
+                                                });
+                                            }
+                                            base = parent.kind.clone();
+                                        } else {
+                                            break;
+                                        }
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                        // VAR_INPUT / VAR_OUTPUT fields
+                        for p in params.iter().chain(outputs.iter()) {
+                            items.push(CompletionItem {
+                                label: p.name.clone(),
+                                kind: Some(CompletionItemKind::FIELD),
+                                detail: Some(format!("{:?} : {}", p.var_kind, p.ty.display_name())),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
