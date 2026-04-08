@@ -440,6 +440,63 @@ END_PROGRAM
 - **Type safety** — the compiler knows which fields exist on each device
 - **YAML as single source of truth** — hardware config and symbol mapping in one place
 
+### Simulated Device (First Implementation)
+
+The simulated device is the first `CommDevice` implementation — no hardware needed.
+It uses in-memory register storage and exposes a web UI for manual I/O testing.
+The same device profile YAML format is used for both simulated and real devices,
+so switching from simulation to hardware is just a YAML config change.
+
+```yaml
+# plc-project.yaml — simulated devices for development/testing
+links:
+  - name: sim_link
+    type: simulated          # in-memory, no network
+
+devices:
+  - name: io_rack
+    link: sim_link
+    protocol: simulated
+    mode: cyclic
+    device_profile: sim_8di_4ai_4do_2ao
+    web_ui: true             # expose web UI for this device
+    web_port: 8080           # default port
+
+  - name: vfd_sim
+    link: sim_link
+    protocol: simulated
+    mode: cyclic
+    device_profile: sim_vfd
+    web_ui: true
+    web_port: 8081
+```
+
+The ST code is identical to what it would be with real hardware:
+
+```st
+PROGRAM Main
+VAR
+    motor_on : BOOL;
+END_VAR
+    (* Works with simulated device — toggle DI_0 in the web UI *)
+    IF io_rack.DI_0 THEN
+        io_rack.DO_0 := TRUE;
+    END_IF;
+
+    (* VFD simulation — set speed in the web UI, see output *)
+    vfd_sim.RUN := motor_on;
+    vfd_sim.SPEED_REF := 45.0;
+
+    (* Later: change YAML to protocol: modbus-tcp → same code, real hardware *)
+END_PROGRAM
+```
+
+The web UI (served at `localhost:8080`) provides:
+- **Inputs panel**: toggle switches for digital inputs, sliders/numeric for analog inputs
+- **Outputs panel**: LED indicators for digital outputs, value displays for analog outputs
+- **Diagnostics**: cycle count, last update timestamp, I/O direction arrows
+- **Real-time updates**: WebSocket pushes every scan cycle
+
 ### Multi-Rate I/O
 
 Inspired by TIA Portal's process image partitions, each device can declare its own
@@ -669,6 +726,11 @@ link crate — all existing device crates work unchanged.
 
 ### Implementation Plan
 
+Implementation order: API crate → simulated device (for testing) → communication
+manager → engine integration → then real protocol implementations (Modbus, etc.).
+
+#### Phase 13a: Core API + Simulated Device (build and test the framework)
+
 - [ ] **`st-comm-api` crate** (shared traits + types):
   - [ ] `CommLink` trait (open, close, send, receive, diagnostics)
   - [ ] `CommDevice` trait (configure, bind_link, read_inputs, write_outputs, acyclic)
@@ -679,6 +741,45 @@ link crate — all existing device crates work unchanged.
   - [ ] Device profile YAML parser (profile → struct schema + register map)
   - [ ] Profile-to-ST code generator (profile → TYPE struct + VAR_GLOBAL instances)
   - [ ] Project YAML parser (links + devices sections)
+- [ ] **`st-comm-sim` crate** (simulated device — first CommDevice implementation):
+  - [ ] Implements `CommDevice` trait with in-memory register storage
+  - [ ] Simulated link (no network — direct in-memory reads/writes)
+  - [ ] Web UI server (HTTP + WebSocket, e.g., localhost:8080):
+    - [ ] Toggle digital inputs (DI_0..DI_n) with switches
+    - [ ] Set analog inputs (AI_0..AI_n) with sliders/numeric fields
+    - [ ] Display digital output states (DO_0..DO_n) as indicators
+    - [ ] Display analog output values (AO_0..AO_n)
+    - [ ] Show device diagnostics (connected, cycle count, last update)
+    - [ ] Real-time updates via WebSocket (value changes push immediately)
+  - [ ] Loads standard device profile YAML (same format as real hardware)
+  - [ ] Multiple simulated devices per project (each gets its own web panel/tab)
+  - [ ] Unit tests: register read/write, profile loading, I/O direction enforcement
+  - [ ] Integration test: full scan cycle with simulated device + ST program
+- [ ] **Communication Manager** (in `st-runtime`):
+  - [ ] Parse `links:` and `devices:` sections from plc-project.yaml
+  - [ ] Create link instances, bind devices to their declared links
+  - [ ] Coordinate bus access for shared links (mutex/queue for serial buses)
+  - [ ] Integrate into scan cycle: read_inputs → execute → write_outputs → acyclic
+  - [ ] Map device profile struct fields ↔ VM global struct instance slots
+  - [ ] Direction-aware I/O: only read `input` fields, only write `output` fields
+  - [ ] Register value scaling (raw register ↔ engineering units via `scale` factor)
+  - [ ] Multi-rate scheduling: per-device `cycle_time` with independent update timers
+  - [ ] Auto-generate `CommDiag` fields for every device (connected, error, error_count, etc.)
+  - [ ] Connection monitoring and automatic reconnection with backoff
+  - [ ] Diagnostics exposed via monitor server + WebSocket
+- [ ] **Engine integration**:
+  - [ ] `st-cli run` loads link/device config and starts communication
+  - [ ] `st-cli comm-status` shows link health and device connection state
+  - [ ] `st-cli profile validate` checks a device profile YAML for errors
+- [ ] **Bundled device profiles**:
+  - [ ] `sim_8di_4ai_4do_2ao` — 8 digital in, 4 analog in, 4 digital out, 2 analog out
+  - [ ] `sim_16di_16do` — 16-channel digital I/O
+  - [ ] `sim_vfd` — simulated VFD (run, stop, speed_ref, speed_act, current, fault)
+- [ ] **Playground example**: simulated I/O project with web UI
+- [ ] **Documentation**: simulated device quickstart + "How to create a device profile"
+
+#### Phase 13b: Real Protocol Implementations
+
 - [ ] **`st-comm-link-tcp` crate** (TCP link):
   - [ ] TCP socket management (connect, reconnect, timeout)
   - [ ] Implements `CommLink` trait
@@ -698,25 +799,10 @@ link crate — all existing device crates work unchanged.
   - [ ] Device profile field ↔ register mapping with scaling
   - [ ] Unit tests with mock link
   - [ ] Integration tests with Modbus simulator
-- [ ] **Communication Manager** (in `st-runtime`):
-  - [ ] Parse `links:` and `devices:` sections from plc-project.yaml
-  - [ ] Create link instances, bind devices to their declared links
-  - [ ] Coordinate bus access for shared links (mutex/queue for serial buses)
-  - [ ] Integrate into scan cycle: read_inputs → execute → write_outputs → acyclic
-  - [ ] Map device profile struct fields ↔ VM global struct instance slots
-  - [ ] Direction-aware I/O: only read `input` fields, only write `output` fields
-  - [ ] Register value scaling (raw register ↔ engineering units via `scale` factor)
-  - [ ] Multi-rate scheduling: per-device `cycle_time` with independent update timers
-  - [ ] Auto-generate `CommDiag` fields for every device (connected, error, error_count, etc.)
-  - [ ] Connection monitoring and automatic reconnection with backoff
-  - [ ] Diagnostics exposed via monitor server + WebSocket
-- [ ] **Engine integration**:
-  - [ ] `st-cli run` loads link/device config and starts communication
-  - [ ] `st-cli comm-status` shows link health and device connection state
+- [ ] **Additional CLI commands**:
   - [ ] `st-cli comm-test` sends a test read to verify connectivity
   - [ ] `st-cli profile import` converts GSD/GSDML/ESI/EDS → YAML profile
-  - [ ] `st-cli profile validate` checks a device profile YAML for errors
-- [ ] **Bundled device profiles**:
+- [ ] **Bundled hardware device profiles**:
   - [ ] Generic Modbus I/O (coils + registers, 8/16/32 channel variants)
   - [ ] ABB ACS580 VFD
   - [ ] Siemens G120 VFD
@@ -726,11 +812,11 @@ link crate — all existing device crates work unchanged.
   - [ ] Communication architecture guide (link/device layering, multi-rate, diagnostics)
   - [ ] "Creating a Link Extension" tutorial
   - [ ] "Creating a Device Extension" tutorial
-  - [ ] "Creating a Device Profile" guide
   - [ ] Modbus quickstart (TCP + RTU examples)
-  - [ ] Playground example: Modbus I/O with simulated devices
-- [ ] **Future extensions** (separate crates, independent development):
-  - [ ] `st-comm-link-udp` — UDP link (for protocols using UDP transport)
+
+#### Phase 13c: Future Protocol Extensions (separate crates)
+
+  - [ ] `st-comm-link-udp` — UDP link
   - [ ] `st-comm-profinet` — PROFINET I/O device extension
   - [ ] `st-comm-ethercat` — EtherCAT device extension
   - [ ] `st-comm-canopen` — CANopen / CAN bus device extension
