@@ -122,6 +122,65 @@ impl Backend {
         }
     }
 
+    /// Resolve a symbol's byte range to a Location in a cross-file project.
+    /// Searches project_files to find which file the byte range belongs to.
+    /// Uses the same approach as the DAP: parse each project file individually
+    /// and check which one defines the symbol at the given byte range.
+    fn resolve_cross_file_location(
+        &self,
+        doc: &Document,
+        sym_range: st_syntax::ast::TextRange,
+    ) -> Option<Location> {
+        for (path, content) in &doc.project_files {
+            if sym_range.end > content.len() || sym_range.start >= content.len() {
+                continue;
+            }
+            // Verify: parse this file and check if any top-level item starts at sym_range.start
+            let parse = st_syntax::parse(content);
+            let has_item_at_range = parse.source_file.items.iter().any(|item| {
+                let item_range = match item {
+                    st_syntax::ast::TopLevelItem::Program(p) => p.range,
+                    st_syntax::ast::TopLevelItem::Function(f) => f.range,
+                    st_syntax::ast::TopLevelItem::FunctionBlock(fb) => fb.range,
+                    st_syntax::ast::TopLevelItem::Class(cls) => cls.range,
+                    st_syntax::ast::TopLevelItem::Interface(iface) => iface.range,
+                    st_syntax::ast::TopLevelItem::TypeDeclaration(td) => td.range,
+                    st_syntax::ast::TopLevelItem::GlobalVarDeclaration(vb) => vb.range,
+                };
+                // Check if the symbol range overlaps with this item
+                sym_range.start >= item_range.start && sym_range.end <= item_range.end
+            });
+            if !has_item_at_range {
+                continue;
+            }
+
+            let file_uri = tower_lsp::lsp_types::Url::from_file_path(path).ok()?;
+            let src = content.as_bytes();
+            let start_offset = sym_range.start.min(src.len());
+            let end_offset = sym_range.end.min(src.len());
+            let mut start_line = 0u32;
+            let mut start_col = 0u32;
+            for &b in &src[..start_offset] {
+                if b == b'\n' { start_line += 1; start_col = 0; }
+                else { start_col += 1; }
+            }
+            let mut end_line = start_line;
+            let mut end_col = start_col;
+            for &b in &src[start_offset..end_offset] {
+                if b == b'\n' { end_line += 1; end_col = 0; }
+                else { end_col += 1; }
+            }
+            return Some(Location {
+                uri: file_uri,
+                range: tower_lsp::lsp_types::Range {
+                    start: tower_lsp::lsp_types::Position { line: start_line, character: start_col },
+                    end: tower_lsp::lsp_types::Position { line: end_line, character: end_col },
+                },
+            });
+        }
+        None
+    }
+
     /// Find the innermost scope containing the given offset.
     fn find_scope_for_offset(
         &self,
@@ -348,11 +407,21 @@ impl LanguageServer for Backend {
             if let Some((_sid, sym)) =
                 doc.analysis.symbols.resolve(scope_id, &word)
             {
-                let range = doc.text_range_to_lsp(sym.range);
-                return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                    uri: uri.clone(),
-                    range,
-                })));
+                let sym_range = sym.range;
+
+                // Check if the symbol's byte range falls within the current file
+                if sym_range.end <= doc.source.len() {
+                    let range = doc.text_range_to_lsp(sym_range);
+                    return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                        uri: uri.clone(),
+                        range,
+                    })));
+                }
+
+                // Symbol is in a different project file — find which one
+                if let Some(location) = self.resolve_cross_file_location(doc, sym_range) {
+                    return Ok(Some(GotoDefinitionResponse::Scalar(location)));
+                }
             }
         }
 
@@ -941,11 +1010,9 @@ impl LanguageServer for Backend {
                 };
 
                 if let Some(type_name) = type_name {
-                    // Resolve the type definition
                     let global = doc.analysis.symbols.global_scope_id();
                     if let Some(type_sym) = doc.analysis.symbols.resolve(global, &type_name) {
                         let sym_range = type_sym.1.range;
-                        // Check if this symbol's byte range falls within the current file
                         if sym_range.end <= doc.source.len() {
                             let range = doc.text_range_to_lsp(sym_range);
                             return Ok(Some(GotoDefinitionResponse::Scalar(Location {
@@ -953,43 +1020,8 @@ impl LanguageServer for Backend {
                                 range,
                             })));
                         }
-                        // Symbol is in a different file — find which project file
-                        for (path, content) in &doc.project_files {
-                            if sym_range.end <= content.len() {
-                                // Verify the symbol name actually appears at this offset
-                                if sym_range.start < content.len() {
-                                    let snippet = &content[sym_range.start..sym_range.end.min(content.len())];
-                                    if snippet.to_uppercase().contains(&type_name.to_uppercase()) || sym_range.end <= content.len() {
-                                        // Convert byte offset to position within this file
-                                        let file_uri = tower_lsp::lsp_types::Url::from_file_path(path).ok();
-                                        if let Some(file_url) = file_uri {
-                                            let src = content.as_bytes();
-                                            let start_offset = sym_range.start.min(src.len());
-                                            let end_offset = sym_range.end.min(src.len());
-                                            let mut start_line = 0u32;
-                                            let mut start_col = 0u32;
-                                            for &b in &src[..start_offset] {
-                                                if b == b'\n' { start_line += 1; start_col = 0; }
-                                                else { start_col += 1; }
-                                            }
-                                            let mut end_line = start_line;
-                                            let mut end_col = start_col;
-                                            for &b in &src[start_offset..end_offset] {
-                                                if b == b'\n' { end_line += 1; end_col = 0; }
-                                                else { end_col += 1; }
-                                            }
-                                            let range = tower_lsp::lsp_types::Range {
-                                                start: tower_lsp::lsp_types::Position { line: start_line, character: start_col },
-                                                end: tower_lsp::lsp_types::Position { line: end_line, character: end_col },
-                                            };
-                                            return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                                                uri: file_url,
-                                                range,
-                                            })));
-                                        }
-                                    }
-                                }
-                            }
+                        if let Some(location) = self.resolve_cross_file_location(doc, sym_range) {
+                            return Ok(Some(GotoDefinitionResponse::Scalar(location)));
                         }
                     }
                 }
