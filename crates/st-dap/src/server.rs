@@ -90,6 +90,12 @@ fn console_output(msg: &str) -> Event {
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ScopeKind {
+    Locals,
+    Globals,
+}
+
 struct DapSession {
     source_path: String,
     source: String,
@@ -104,6 +110,8 @@ struct DapSession {
     project_files: Vec<(String, String)>,
     /// Accumulated breakpoints per file: path → (source_content, line_numbers).
     pending_breakpoints: std::collections::HashMap<String, (String, Vec<u32>)>,
+    /// Maps variable reference IDs to scope kinds for Variables requests.
+    scope_refs: std::collections::HashMap<i64, ScopeKind>,
 }
 
 impl DapSession {
@@ -118,6 +126,7 @@ impl DapSession {
             func_source_map: std::collections::HashMap::new(),
             project_files: Vec::new(),
             pending_breakpoints: std::collections::HashMap::new(),
+            scope_refs: std::collections::HashMap::new(),
             next_var_ref: 1000,
         }
     }
@@ -520,6 +529,10 @@ impl DapSession {
         let globals_ref = self.next_var_ref + 1;
         self.next_var_ref += 2;
 
+        // Track which reference IDs map to which scope
+        self.scope_refs.insert(locals_ref, ScopeKind::Locals);
+        self.scope_refs.insert(globals_ref, ScopeKind::Globals);
+
         ok(seq, ResponseBody::Scopes(dap::responses::ScopesResponse {
             scopes: vec![
                 Scope {
@@ -530,7 +543,7 @@ impl DapSession {
                 },
                 Scope {
                     name: "Globals".into(),
-                    presentation_hint: Some(ScopePresentationhint::Locals),
+                    presentation_hint: Some(ScopePresentationhint::Registers),
                     variables_reference: globals_ref,
                     ..Default::default()
                 },
@@ -542,10 +555,12 @@ impl DapSession {
         let mut variables = Vec::new();
 
         if let Some(ref vm) = self.vm {
-            let vars = if args.variables_reference % 2 == 0 {
-                vm.current_locals()
-            } else {
-                vm.global_variables()
+            let scope_kind = self.scope_refs.get(&args.variables_reference)
+                .copied()
+                .unwrap_or(ScopeKind::Locals);
+            let vars = match scope_kind {
+                ScopeKind::Locals => vm.current_locals(),
+                ScopeKind::Globals => vm.global_variables(),
             };
 
             for v in vars {

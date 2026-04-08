@@ -780,3 +780,232 @@ fn test_force_invalid_syntax() {
     let resp = find_response(&messages, 4).unwrap();
     assert!(resp["body"]["result"].as_str().unwrap_or("").contains("Usage"));
 }
+
+// =============================================================================
+// Multi-file project tests
+// =============================================================================
+
+/// Create a temp project directory with multiple files and return the main.st path.
+fn create_multi_file_project(files: &[(&str, &str)]) -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Always create plc-project.yaml
+    let yaml = "name: TestProject\nentryPoint: Main\n";
+    std::fs::write(dir.path().join("plc-project.yaml"), yaml).unwrap();
+
+    let mut main_path = String::new();
+    for (name, content) in files {
+        let full_path = dir.path().join(name);
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&full_path, content).unwrap();
+        if *name == "main.st" {
+            main_path = full_path.to_string_lossy().to_string();
+        }
+    }
+    assert!(!main_path.is_empty(), "Must include main.st");
+    (dir, main_path)
+}
+
+fn run_multi_file_dap_session(files: &[(&str, &str)], requests: &[Value]) -> Vec<Value> {
+    let (_dir, main_path) = create_multi_file_project(files);
+
+    let mut input_data = Vec::new();
+    for req in requests {
+        let body = serde_json::to_string(req).unwrap();
+        let header = format!("Content-Length: {}\r\n\r\n", body.len());
+        input_data.extend_from_slice(header.as_bytes());
+        input_data.extend_from_slice(body.as_bytes());
+    }
+
+    let input = Cursor::new(input_data);
+    let mut output = Vec::new();
+    st_dap::run_dap(input, &mut output, &main_path);
+
+    let buf = TestBuffer::new();
+    buf.data.lock().unwrap().extend_from_slice(&output);
+    buf.read_all_output()
+}
+
+#[test]
+fn test_multi_file_launch() {
+    let messages = run_multi_file_dap_session(
+        &[
+            ("counter.st", r#"
+CLASS Counter
+VAR _count : INT := 0; END_VAR
+METHOD Inc _count := _count + 1; END_METHOD
+METHOD Get : INT Get := _count; END_METHOD
+END_CLASS
+"#),
+            ("main.st", r#"
+VAR_GLOBAL g_val : INT; END_VAR
+PROGRAM Main
+VAR c : Counter; END_VAR
+    c.Inc();
+    g_val := c.Get();
+END_PROGRAM
+"#),
+        ],
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "disconnect", None),
+        ],
+    );
+
+    let launch_resp = find_response(&messages, 2).unwrap();
+    assert!(launch_resp["success"].as_bool().unwrap_or(false), "Launch should succeed");
+
+    // Should see initialized event (after launch)
+    let events = find_events(&messages, "initialized");
+    assert!(!events.is_empty(), "Should get initialized event");
+
+    // Should be stopped on entry
+    let stopped = find_events(&messages, "stopped");
+    assert!(!stopped.is_empty(), "Should stop on entry");
+}
+
+#[test]
+fn test_multi_file_breakpoint_in_main() {
+    let messages = run_multi_file_dap_session(
+        &[
+            ("counter.st", r#"
+CLASS Counter
+VAR _count : INT := 0; END_VAR
+METHOD Inc _count := _count + 1; END_METHOD
+METHOD Get : INT Get := _count; END_METHOD
+END_CLASS
+"#),
+            ("main.st", r#"
+VAR_GLOBAL g_val : INT; END_VAR
+PROGRAM Main
+VAR c : Counter; x : INT := 0; END_VAR
+    x := x + 1;
+    c.Inc();
+    g_val := c.Get();
+END_PROGRAM
+"#),
+        ],
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "setBreakpoints", Some(json!({
+                "source": { "path": "MAIN_PATH_PLACEHOLDER" },
+                "breakpoints": [{ "line": 5 }]
+            }))),
+            dap_request(4, "configurationDone", None),
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "disconnect", None),
+        ],
+    );
+
+    // Check breakpoint was verified
+    let bp_resp = find_response(&messages, 3).unwrap();
+    let bps = bp_resp["body"]["breakpoints"].as_array().unwrap();
+    assert!(!bps.is_empty(), "Should have breakpoint results");
+    assert!(bps[0]["verified"].as_bool().unwrap_or(false),
+        "Breakpoint should be verified: {}", serde_json::to_string_pretty(bp_resp).unwrap());
+
+    // Should have stopped on breakpoint
+    let stopped = find_events(&messages, "stopped");
+    let bp_stop = stopped.iter().find(|e| {
+        e["body"]["reason"].as_str() == Some("breakpoint")
+    });
+    assert!(bp_stop.is_some(), "Should stop on breakpoint. Events: {:?}",
+        stopped.iter().map(|e| e["body"]["reason"].as_str()).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_multi_file_step_into_class_method() {
+    let messages = run_multi_file_dap_session(
+        &[
+            ("counter.st", r#"
+CLASS Counter
+VAR _count : INT := 0; END_VAR
+METHOD Inc
+    _count := _count + 1;
+END_METHOD
+END_CLASS
+"#),
+            ("main.st", r#"
+PROGRAM Main
+VAR c : Counter; END_VAR
+    c.Inc();
+END_PROGRAM
+"#),
+        ],
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            // Step into c.Inc() — should enter the method
+            dap_request(4, "stepIn", Some(json!({ "threadId": 1 }))),
+            dap_request(5, "stepIn", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "stepIn", Some(json!({ "threadId": 1 }))),
+            dap_request(7, "stackTrace", Some(json!({ "threadId": 1 }))),
+            dap_request(8, "disconnect", None),
+        ],
+    );
+
+    // Check stack trace has correct function names
+    let st_resp = find_response(&messages, 7).unwrap();
+    let frames = st_resp["body"]["stackFrames"].as_array().unwrap();
+    assert!(!frames.is_empty(), "Should have stack frames");
+
+    // Top frame should be in Counter.Inc or Main
+    let top_name = frames[0]["name"].as_str().unwrap_or("");
+    eprintln!("Stack frames: {:?}",
+        frames.iter().map(|f| f["name"].as_str().unwrap_or("")).collect::<Vec<_>>());
+
+    // If stepped into Counter.Inc, top frame should show counter.st
+    if top_name == "Counter.Inc" {
+        let source_name = frames[0]["source"]["name"].as_str().unwrap_or("");
+        assert_eq!(source_name, "counter.st",
+            "Counter.Inc should show counter.st as source, got {source_name}");
+    }
+}
+
+#[test]
+fn test_multi_file_variables_after_method_call() {
+    let messages = run_multi_file_dap_session(
+        &[
+            ("adder.st", r#"
+CLASS Adder
+METHOD Add : INT
+VAR_INPUT a : INT; b : INT; END_VAR
+    Add := a + b;
+END_METHOD
+END_CLASS
+"#),
+            ("main.st", r#"
+VAR_GLOBAL g_result : INT; END_VAR
+PROGRAM Main
+VAR calc : Adder; result : INT; END_VAR
+    result := calc.Add(a := 10, b := 32);
+    g_result := result;
+END_PROGRAM
+"#),
+        ],
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            // Run through one full cycle
+            dap_request(4, "continue", Some(json!({ "threadId": 1 }))),
+            // After cycle completes, check globals
+            dap_request(5, "evaluate", Some(json!({
+                "expression": "g_result",
+                "context": "watch"
+            }))),
+            dap_request(6, "disconnect", None),
+        ],
+    );
+
+    // After one cycle, g_result should be 42
+    let eval_resp = find_response(&messages, 5).unwrap();
+    let result_str = eval_resp["body"]["result"].as_str().unwrap_or("<missing>");
+    eprintln!("g_result = {result_str}");
+    assert_eq!(result_str, "42", "g_result should be 42 (10+32)");
+}

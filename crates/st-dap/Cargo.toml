@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile = "3.27.0"
 
 [dependencies]
 st-runtime.workspace = true
