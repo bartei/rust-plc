@@ -39,8 +39,31 @@ impl Backend {
             });
         }
 
-        // Semantic diagnostics
+        // Semantic diagnostics — only include diagnostics that originate from
+        // THIS file. In multi-file projects, the merged analysis produces
+        // diagnostics for ALL files; we filter by checking if the diagnostic
+        // byte range falls within a top-level item defined in this file's AST.
+        let file_item_ranges: Vec<(usize, usize)> = doc.ast.items.iter().map(|item| {
+            let r = match item {
+                st_syntax::ast::TopLevelItem::Program(p) => p.range,
+                st_syntax::ast::TopLevelItem::Function(f) => f.range,
+                st_syntax::ast::TopLevelItem::FunctionBlock(fb) => fb.range,
+                st_syntax::ast::TopLevelItem::Class(cls) => cls.range,
+                st_syntax::ast::TopLevelItem::Interface(iface) => iface.range,
+                st_syntax::ast::TopLevelItem::TypeDeclaration(td) => td.range,
+                st_syntax::ast::TopLevelItem::GlobalVarDeclaration(vb) => vb.range,
+            };
+            (r.start, r.end)
+        }).collect();
+
         for d in &doc.analysis.diagnostics {
+            // Only include if the diagnostic falls within one of this file's items
+            let belongs_to_this_file = file_item_ranges.iter().any(|&(start, end)| {
+                d.range.start >= start && d.range.end <= end
+            });
+            if !belongs_to_this_file {
+                continue;
+            }
             let severity = match d.severity {
                 st_semantics::diagnostic::Severity::Error => DiagnosticSeverity::ERROR,
                 st_semantics::diagnostic::Severity::Warning => DiagnosticSeverity::WARNING,
