@@ -306,34 +306,46 @@ impl DapSession {
         )));
 
         // Build function → source file mapping for multi-file stack traces.
-        // Each function's source_map byte offsets are relative to the file it was parsed from.
-        // Match by checking which project file's length accommodates the function's offsets.
+        // Parse each project file individually to find which top-level names it defines,
+        // then map compiled function names to their defining file.
         self.func_source_map.clear();
         if !self.project_files.is_empty() {
-            for func in &module.functions {
-                // Find the max byte offset in this function's source map
-                let max_offset = func.source_map.iter()
-                    .map(|sm| sm.byte_end)
-                    .max()
-                    .unwrap_or(0);
-                if max_offset == 0 {
-                    continue;
-                }
-                // Find which project file this function belongs to
-                for (path, content) in &self.project_files {
-                    if max_offset <= content.len() {
-                        // Verify: check that at least one non-zero offset falls within this source
-                        let matches = func.source_map.iter().any(|sm| {
-                            sm.byte_offset > 0 && sm.byte_offset < content.len()
-                        });
-                        if matches {
-                            self.func_source_map.insert(
-                                func.name.clone(),
-                                (path.clone(), content.clone()),
-                            );
-                            break;
+            // Build name → (path, content) by parsing each file for its top-level declarations
+            let mut name_to_file: std::collections::HashMap<String, (String, String)> =
+                std::collections::HashMap::new();
+            for (path, content) in &self.project_files {
+                let parse = st_syntax::parse(content);
+                for item in &parse.source_file.items {
+                    let names: Vec<String> = match item {
+                        st_syntax::ast::TopLevelItem::Program(p) =>
+                            vec![p.name.name.clone()],
+                        st_syntax::ast::TopLevelItem::Function(f) =>
+                            vec![f.name.name.clone()],
+                        st_syntax::ast::TopLevelItem::FunctionBlock(fb) =>
+                            vec![fb.name.name.clone()],
+                        st_syntax::ast::TopLevelItem::Class(cls) => {
+                            let mut v = vec![cls.name.name.clone()];
+                            for m in &cls.methods {
+                                v.push(format!("{}.{}", cls.name.name, m.name.name));
+                            }
+                            v
                         }
+                        st_syntax::ast::TopLevelItem::Interface(iface) =>
+                            vec![iface.name.name.clone()],
+                        _ => vec![],
+                    };
+                    for name in names {
+                        name_to_file.insert(
+                            name.to_uppercase(),
+                            (path.clone(), content.clone()),
+                        );
                     }
+                }
+            }
+            // Map compiled functions to their source file
+            for func in &module.functions {
+                if let Some(entry) = name_to_file.get(&func.name.to_uppercase()) {
+                    self.func_source_map.insert(func.name.clone(), entry.clone());
                 }
             }
         }

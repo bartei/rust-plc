@@ -944,11 +944,53 @@ impl LanguageServer for Backend {
                     // Resolve the type definition
                     let global = doc.analysis.symbols.global_scope_id();
                     if let Some(type_sym) = doc.analysis.symbols.resolve(global, &type_name) {
-                        let range = doc.text_range_to_lsp(type_sym.1.range);
-                        return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                            uri: uri.clone(),
-                            range,
-                        })));
+                        let sym_range = type_sym.1.range;
+                        // Check if this symbol's byte range falls within the current file
+                        if sym_range.end <= doc.source.len() {
+                            let range = doc.text_range_to_lsp(sym_range);
+                            return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                                uri: uri.clone(),
+                                range,
+                            })));
+                        }
+                        // Symbol is in a different file — find which project file
+                        for (path, content) in &doc.project_files {
+                            if sym_range.end <= content.len() {
+                                // Verify the symbol name actually appears at this offset
+                                if sym_range.start < content.len() {
+                                    let snippet = &content[sym_range.start..sym_range.end.min(content.len())];
+                                    if snippet.to_uppercase().contains(&type_name.to_uppercase()) || sym_range.end <= content.len() {
+                                        // Convert byte offset to position within this file
+                                        let file_uri = tower_lsp::lsp_types::Url::from_file_path(path).ok();
+                                        if let Some(file_url) = file_uri {
+                                            let src = content.as_bytes();
+                                            let start_offset = sym_range.start.min(src.len());
+                                            let end_offset = sym_range.end.min(src.len());
+                                            let mut start_line = 0u32;
+                                            let mut start_col = 0u32;
+                                            for &b in &src[..start_offset] {
+                                                if b == b'\n' { start_line += 1; start_col = 0; }
+                                                else { start_col += 1; }
+                                            }
+                                            let mut end_line = start_line;
+                                            let mut end_col = start_col;
+                                            for &b in &src[start_offset..end_offset] {
+                                                if b == b'\n' { end_line += 1; end_col = 0; }
+                                                else { end_col += 1; }
+                                            }
+                                            let range = tower_lsp::lsp_types::Range {
+                                                start: tower_lsp::lsp_types::Position { line: start_line, character: start_col },
+                                                end: tower_lsp::lsp_types::Position { line: end_line, character: end_col },
+                                            };
+                                            return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                                                uri: file_url,
+                                                range,
+                                            })));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

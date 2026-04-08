@@ -15,56 +15,37 @@ pub struct Document {
     pub lower_errors: Vec<st_syntax::lower::LowerError>,
     pub analysis: AnalysisResult,
     pub version: Option<i32>,
+    /// Project files loaded for cross-file resolution: (path, content).
+    /// Used by goto-definition to find the correct source file.
+    pub project_files: Vec<(String, String)>,
 }
 
 impl Document {
     /// Create a new document from source text.
     pub fn new(source: String, version: Option<i32>) -> Self {
-        let (tree, ast, lower_errors, analysis) = Self::analyze_source(&source);
-        Self {
-            source,
-            tree,
-            ast,
-            lower_errors,
-            analysis,
-            version,
-        }
+        let (tree, ast, lower_errors, analysis, project_files) =
+            Self::analyze_source_with_uri(&source, None);
+        Self { source, tree, ast, lower_errors, analysis, version, project_files }
     }
 
     /// Create a new document with project-aware analysis using the file URI.
     pub fn new_with_uri(source: String, version: Option<i32>, uri: &str) -> Self {
-        let (tree, ast, lower_errors, analysis) =
+        let (tree, ast, lower_errors, analysis, project_files) =
             Self::analyze_source_with_uri(&source, Some(uri));
-        Self {
-            source,
-            tree,
-            ast,
-            lower_errors,
-            analysis,
-            version,
-        }
+        Self { source, tree, ast, lower_errors, analysis, version, project_files }
     }
 
     /// Update the document with new source text.
     pub fn update(&mut self, source: String, version: Option<i32>) {
-        let (tree, ast, lower_errors, analysis) = Self::analyze_source(&source);
+        let (tree, ast, lower_errors, analysis, project_files) =
+            Self::analyze_source_with_uri(&source, None);
         self.source = source;
         self.tree = tree;
         self.ast = ast;
         self.lower_errors = lower_errors;
         self.analysis = analysis;
         self.version = version;
-    }
-
-    fn analyze_source(
-        source: &str,
-    ) -> (
-        tree_sitter::Tree,
-        SourceFile,
-        Vec<st_syntax::lower::LowerError>,
-        AnalysisResult,
-    ) {
-        Self::analyze_source_with_uri(source, None)
+        self.project_files = project_files;
     }
 
     /// Analyze with optional file URI for project-aware multi-file resolution.
@@ -76,6 +57,7 @@ impl Document {
         SourceFile,
         Vec<st_syntax::lower::LowerError>,
         AnalysisResult,
+        Vec<(String, String)>,
     ) {
         let mut parser = tree_sitter::Parser::new();
         parser
@@ -89,6 +71,7 @@ impl Document {
 
         // Try to discover project context from file path
         let mut project_sources: Vec<String> = Vec::new();
+        let mut project_files: Vec<(String, String)> = Vec::new();
         if let Some(uri) = file_uri {
             if let Some(file_path) = uri.strip_prefix("file://") {
                 let file_path = std::path::Path::new(file_path);
@@ -108,7 +91,6 @@ impl Document {
                         }
                     }
                     if let Some(root) = project_root {
-                        // Load all project files except the current one (we add it separately)
                         if let Ok(project) =
                             st_syntax::project::discover_project(Some(&root))
                         {
@@ -116,6 +98,8 @@ impl Document {
                                 st_syntax::project::load_project_sources(&project)
                             {
                                 for (path, content) in sources {
+                                    let path_str = path.to_string_lossy().to_string();
+                                    project_files.push((path_str, content.clone()));
                                     // Skip the current file to avoid double-including
                                     if path == file_path {
                                         continue;
@@ -137,14 +121,13 @@ impl Document {
         let multi_result = st_syntax::multi_file::parse_multi(&all_sources);
         let analysis = st_semantics::analyze::analyze(&multi_result.source_file);
 
-        // Return the user's AST (from the single-file parse) but with
-        // the multi-file analysis (which includes project + stdlib symbols)
         let lower_result: LowerResult = st_syntax::lower::lower(&tree, source);
         (
             tree,
             lower_result.source_file,
             multi_result.errors,
             analysis,
+            project_files,
         )
     }
 
