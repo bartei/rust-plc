@@ -409,18 +409,22 @@ impl LanguageServer for Backend {
             {
                 let sym_range = sym.range;
 
-                // Check if the symbol's byte range falls within the current file
+                // Try cross-file first if we have project files — this is the
+                // most reliable check since it verifies the symbol exists in
+                // that file by parsing it.
+                if !doc.project_files.is_empty() {
+                    if let Some(location) = self.resolve_cross_file_location(doc, sym_range) {
+                        return Ok(Some(GotoDefinitionResponse::Scalar(location)));
+                    }
+                }
+
+                // Fallback: assume it's in the current file
                 if sym_range.end <= doc.source.len() {
                     let range = doc.text_range_to_lsp(sym_range);
                     return Ok(Some(GotoDefinitionResponse::Scalar(Location {
                         uri: uri.clone(),
                         range,
                     })));
-                }
-
-                // Symbol is in a different project file — find which one
-                if let Some(location) = self.resolve_cross_file_location(doc, sym_range) {
-                    return Ok(Some(GotoDefinitionResponse::Scalar(location)));
                 }
             }
         }
@@ -1013,15 +1017,18 @@ impl LanguageServer for Backend {
                     let global = doc.analysis.symbols.global_scope_id();
                     if let Some(type_sym) = doc.analysis.symbols.resolve(global, &type_name) {
                         let sym_range = type_sym.1.range;
+                        // Try cross-file first (avoids false positives from offset overlap)
+                        if !doc.project_files.is_empty() {
+                            if let Some(location) = self.resolve_cross_file_location(doc, sym_range) {
+                                return Ok(Some(GotoDefinitionResponse::Scalar(location)));
+                            }
+                        }
                         if sym_range.end <= doc.source.len() {
                             let range = doc.text_range_to_lsp(sym_range);
                             return Ok(Some(GotoDefinitionResponse::Scalar(Location {
                                 uri: uri.clone(),
                                 range,
                             })));
-                        }
-                        if let Some(location) = self.resolve_cross_file_location(doc, sym_range) {
-                            return Ok(Some(GotoDefinitionResponse::Scalar(location)));
                         }
                     }
                 }
