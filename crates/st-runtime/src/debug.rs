@@ -93,9 +93,9 @@ impl DebugState {
     /// Set breakpoints from source line numbers by resolving via source map.
     /// Returns the actual byte offsets where breakpoints were set.
     ///
-    /// Only considers functions whose source map offsets fall within the
-    /// given source text length. This prevents false matches from other
-    /// files in a multi-file project (each file has its own byte offsets).
+    /// Parses the source to discover which top-level items it defines, then
+    /// only searches functions whose names match those items. This reliably
+    /// filters out functions from other files in multi-file projects.
     pub fn set_line_breakpoints(
         &mut self,
         module: &Module,
@@ -104,6 +104,9 @@ impl DebugState {
     ) -> Vec<Option<usize>> {
         let source_len = source.len();
         let line_offsets = compute_line_offsets(source);
+
+        // Parse the source to find which function names are defined in this file
+        let file_func_names = Self::extract_function_names(source);
 
         lines
             .iter()
@@ -115,13 +118,12 @@ impl DebugState {
                     .copied()
                     .unwrap_or(source_len);
 
-                // Only search functions whose source map offsets are within
-                // this file's byte range (filters out other files' functions)
                 for func in &module.functions {
-                    let belongs_to_this_file = func.source_map.iter().any(|sm| {
-                        sm.byte_offset > 0 && sm.byte_end <= source_len
+                    // Only search functions defined in this source file
+                    let belongs = file_func_names.iter().any(|n| {
+                        n.eq_ignore_ascii_case(&func.name)
                     });
-                    if !belongs_to_this_file {
+                    if !belongs {
                         continue;
                     }
 
@@ -138,6 +140,62 @@ impl DebugState {
                 None
             })
             .collect()
+    }
+
+    /// Parse source text and extract all top-level function/program/FB/class names.
+    /// Used to match compiled functions to their defining source file.
+    fn extract_function_names(source: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        // Simple keyword-based extraction — avoids full parse dependency.
+        // Looks for PROGRAM/FUNCTION/FUNCTION_BLOCK/CLASS followed by an identifier.
+        let upper = source.to_uppercase();
+        for keyword in ["PROGRAM ", "FUNCTION_BLOCK ", "FUNCTION ", "CLASS "] {
+            let mut pos = 0;
+            while let Some(idx) = upper[pos..].find(keyword) {
+                let after = pos + idx + keyword.len();
+                // Extract the identifier after the keyword
+                let name_start = after;
+                let mut name_end = name_start;
+                let bytes = source.as_bytes();
+                while name_end < bytes.len()
+                    && (bytes[name_end].is_ascii_alphanumeric() || bytes[name_end] == b'_')
+                {
+                    name_end += 1;
+                }
+                if name_end > name_start {
+                    let name = &source[name_start..name_end];
+                    names.push(name.to_string());
+                    // For classes, also add ClassName.MethodName patterns
+                    if keyword == "CLASS " {
+                        // Find METHOD declarations within this class
+                        let class_name = name.to_string();
+                        let class_upper = &upper[after..];
+                        let mut mpos = 0;
+                        while let Some(midx) = class_upper[mpos..].find("METHOD ") {
+                            let mafter = mpos + midx + 7;
+                            let mut mend = mafter;
+                            let cbytes = class_upper.as_bytes();
+                            while mend < cbytes.len()
+                                && (cbytes[mend].is_ascii_alphanumeric() || cbytes[mend] == b'_')
+                            {
+                                mend += 1;
+                            }
+                            if mend > mafter {
+                                let mname = &source[after + mafter - 7 + 7..after + mend];
+                                names.push(format!("{class_name}.{mname}"));
+                            }
+                            mpos = mend;
+                            // Stop at END_CLASS
+                            if class_upper[mpos..].starts_with("END_CLASS") {
+                                break;
+                            }
+                        }
+                    }
+                }
+                pos = after;
+            }
+        }
+        names
     }
 
     /// Check if the current instruction should cause a pause.
