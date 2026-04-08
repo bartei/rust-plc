@@ -16,8 +16,10 @@ pub struct Document {
     pub analysis: AnalysisResult,
     pub version: Option<i32>,
     /// Project files loaded for cross-file resolution: (path, content).
-    /// Used by goto-definition to find the correct source file.
+    /// Cached on didOpen, reused on didChange without re-reading disk.
     pub project_files: Vec<(String, String)>,
+    /// This document's file path (for filtering itself from project_files).
+    pub file_path: Option<String>,
 }
 
 impl Document {
@@ -25,30 +27,71 @@ impl Document {
     pub fn new(source: String, version: Option<i32>) -> Self {
         let (tree, ast, lower_errors, analysis, project_files) =
             Self::analyze_source_with_uri(&source, None);
-        Self { source, tree, ast, lower_errors, analysis, version, project_files }
+        Self { source, tree, ast, lower_errors, analysis, version, project_files, file_path: None }
     }
 
     /// Create a new document with project-aware analysis using the file URI.
     pub fn new_with_uri(source: String, version: Option<i32>, uri: &str) -> Self {
+        let file_path = uri.strip_prefix("file://").map(|s| s.to_string());
         let (tree, ast, lower_errors, analysis, project_files) =
             Self::analyze_source_with_uri(&source, Some(uri));
-        Self { source, tree, ast, lower_errors, analysis, version, project_files }
+        Self { source, tree, ast, lower_errors, analysis, version, project_files, file_path }
     }
 
     /// Update the document with new source text.
-    pub fn update(&mut self, source: String, version: Option<i32>, uri: Option<&str>) {
-        let (tree, ast, lower_errors, analysis, project_files) =
-            Self::analyze_source_with_uri(&source, uri);
+    /// Reuses the cached project_files from didOpen — no disk I/O or project
+    /// re-discovery on each keystroke.
+    pub fn update(&mut self, source: String, version: Option<i32>, _uri: Option<&str>) {
+        let (tree, ast, lower_errors, analysis) =
+            Self::analyze_with_cached_project(&source, &self.project_files, self.file_path.as_deref());
         self.source = source;
         self.tree = tree;
         self.ast = ast;
         self.lower_errors = lower_errors;
         self.analysis = analysis;
         self.version = version;
-        self.project_files = project_files;
+        // project_files unchanged — cached from didOpen
+    }
+
+    /// Fast re-analysis using cached project files (no disk I/O).
+    /// Called on every keystroke via didChange.
+    fn analyze_with_cached_project(
+        source: &str,
+        cached_project_files: &[(String, String)],
+        self_path: Option<&str>,
+    ) -> (
+        tree_sitter::Tree,
+        SourceFile,
+        Vec<st_syntax::lower::LowerError>,
+        AnalysisResult,
+    ) {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&st_grammar::language())
+            .expect("Failed to load ST grammar");
+        let tree = parser.parse(source, None).expect("Failed to parse");
+
+        let stdlib = st_syntax::multi_file::builtin_stdlib();
+        let mut all_sources: Vec<&str> = stdlib;
+        // Add cached project files, excluding the current file (we add the
+        // fresh edited version below)
+        for (path, content) in cached_project_files {
+            let skip = self_path.is_some_and(|sp| path == sp);
+            if !skip {
+                all_sources.push(content.as_str());
+            }
+        }
+        all_sources.push(source);
+
+        let multi_result = st_syntax::multi_file::parse_multi(&all_sources);
+        let analysis = st_semantics::analyze::analyze(&multi_result.source_file);
+        let lower_result: LowerResult = st_syntax::lower::lower(&tree, source);
+
+        (tree, lower_result.source_file, multi_result.errors, analysis)
     }
 
     /// Analyze with optional file URI for project-aware multi-file resolution.
+    /// Does full project discovery from disk — called once on didOpen.
     pub fn analyze_source_with_uri(
         source: &str,
         file_uri: Option<&str>,
