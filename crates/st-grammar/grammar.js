@@ -610,11 +610,26 @@ module.exports = grammar({
             choice(
               seq(".", $.identifier),
               seq("[", commaSep1($._expression), "]"),
-              "^"  // dereference operator
+              "^",  // dereference operator
+              $.partial_access  // bit/byte/word/dword partial access
             )
           )
         )
       ),
+
+    // Partial access: .%X0, .%B1, .%W0, .%D0 (IEC 61131-3 §6.5.3)
+    partial_access: ($) =>
+      token(seq(
+        ".",
+        "%",
+        choice(
+          /[xX][0-9]+/,     // bit access
+          /[bB][0-9]+/,     // byte access
+          /[wW][0-9]+/,     // word access
+          /[dD][0-9]+/,     // dword access
+          /[lL][0-9]+/      // lword access
+        )
+      )),
 
     // =========================================================================
     // Function / FB calls

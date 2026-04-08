@@ -90,6 +90,7 @@ pub mod kind {
     pub const ACCESS_SPECIFIER: &str = "access_specifier";
     pub const THIS_EXPRESSION: &str = "this_expression";
     pub const SUPER_EXPRESSION: &str = "super_expression";
+    pub const PARTIAL_ACCESS: &str = "partial_access";
 }
 
 #[cfg(test)]

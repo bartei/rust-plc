@@ -1349,6 +1349,16 @@ impl Analyzer {
                     // For now, accept any type through deref (simplified)
                     current_ty = Ty::Unknown;
                 }
+                AccessPart::Partial(kind, _index) => {
+                    // Partial access: .%X0 → BOOL, .%B0 → BYTE, .%W0 → WORD, .%D0 → DWORD
+                    current_ty = match kind {
+                        PartialAccessKind::Bit => Ty::Elementary(ElementaryType::Bool),
+                        PartialAccessKind::Byte => Ty::Elementary(ElementaryType::Byte),
+                        PartialAccessKind::Word => Ty::Elementary(ElementaryType::Word),
+                        PartialAccessKind::DWord => Ty::Elementary(ElementaryType::Dword),
+                        PartialAccessKind::LWord => Ty::Elementary(ElementaryType::Lword),
+                    };
+                }
             }
         }
         current_ty

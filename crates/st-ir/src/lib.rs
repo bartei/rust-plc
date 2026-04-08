@@ -296,6 +296,18 @@ pub enum Instruction {
     /// Load NULL into a register.
     LoadNull(Reg),
 
+    // ── Partial access (bit/byte/word/dword extraction) ────────────────
+    /// Extract a bit from a value: dst = (src >> bit_index) & 1.
+    /// Result is Bool.
+    ExtractBit(Reg, Reg, u8),
+    /// Insert a bit into a value: dst = src with bit_index set to val.
+    InsertBit(Reg, Reg, u8, Reg),
+    /// Extract a byte/word/dword from a value: dst = (src >> (index*size)) & mask.
+    /// size_bits: 8=byte, 16=word, 32=dword, 64=lword.
+    ExtractPartial(Reg, Reg, u8, u8),  // dst, src, index, size_bits
+    /// Insert a byte/word/dword into a value: dst = src with partial replaced.
+    InsertPartial(Reg, Reg, u8, u8, Reg),  // dst, src, index, size_bits, val
+
     // ── Array / struct access ────────────────────────────────────────
     /// Load from array: dst, base_slot, index_register.
     LoadArray(Reg, u16, Reg),

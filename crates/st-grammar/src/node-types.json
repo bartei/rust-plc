@@ -5375,6 +5375,10 @@
           "named": true
         },
         {
+          "type": "partial_access",
+          "named": true
+        },
+        {
           "type": "power_expression",
           "named": true
         },
@@ -6279,6 +6283,10 @@
     "type": "line_comment",
     "named": true,
     "extra": true
+  },
+  {
+    "type": "partial_access",
+    "named": true
   },
   {
     "type": "real_literal",

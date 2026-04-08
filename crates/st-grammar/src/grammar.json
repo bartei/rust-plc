@@ -11927,9 +11927,54 @@
                 {
                   "type": "STRING",
                   "value": "^"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "partial_access"
                 }
               ]
             }
+          }
+        ]
+      }
+    },
+    "partial_access": {
+      "type": "TOKEN",
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "."
+          },
+          {
+            "type": "STRING",
+            "value": "%"
+          },
+          {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "PATTERN",
+                "value": "[xX][0-9]+"
+              },
+              {
+                "type": "PATTERN",
+                "value": "[bB][0-9]+"
+              },
+              {
+                "type": "PATTERN",
+                "value": "[wW][0-9]+"
+              },
+              {
+                "type": "PATTERN",
+                "value": "[dD][0-9]+"
+              },
+              {
+                "type": "PATTERN",
+                "value": "[lL][0-9]+"
+              }
+            ]
           }
         ]
       }

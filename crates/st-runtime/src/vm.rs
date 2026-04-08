@@ -598,6 +598,39 @@ impl Vm {
                     }
                 }
 
+                // Partial access (bit/byte/word/dword extraction/insertion)
+                Instruction::ExtractBit(dst, src, bit_idx) => {
+                    let val = self.reg_get(src).as_int();
+                    let bit = (val >> bit_idx) & 1;
+                    self.reg_set(dst, Value::Bool(bit != 0));
+                }
+                Instruction::InsertBit(dst, src, bit_idx, val_reg) => {
+                    let mut base = self.reg_get(src).as_int();
+                    let bit_val = self.reg_get(val_reg).as_bool();
+                    if bit_val {
+                        base |= 1 << bit_idx;
+                    } else {
+                        base &= !(1 << bit_idx);
+                    }
+                    self.reg_set(dst, Value::Int(base));
+                }
+                Instruction::ExtractPartial(dst, src, index, size_bits) => {
+                    let val = self.reg_get(src).as_int();
+                    let shift = (index as i64) * (size_bits as i64);
+                    let mask = if size_bits >= 64 { -1i64 } else { (1i64 << size_bits) - 1 };
+                    let extracted = (val >> shift) & mask;
+                    self.reg_set(dst, Value::Int(extracted));
+                }
+                Instruction::InsertPartial(dst, src, index, size_bits, val_reg) => {
+                    let mut base = self.reg_get(src).as_int();
+                    let new_val = self.reg_get(val_reg).as_int();
+                    let shift = (index as i64) * (size_bits as i64);
+                    let mask = if size_bits >= 64 { -1i64 } else { (1i64 << size_bits) - 1 };
+                    base &= !(mask << shift);
+                    base |= (new_val & mask) << shift;
+                    self.reg_set(dst, Value::Int(base));
+                }
+
                 // Array/struct access (simplified)
                 Instruction::LoadArray(dst, _slot, _idx) => {
                     self.reg_set(dst, Value::Int(0)); // TODO: implement array storage

@@ -1030,6 +1030,11 @@ impl<'a> LowerCtx<'a> {
         for child in node.children(&mut cursor) {
             match child.kind() {
                 kind::IDENTIFIER => parts.push(AccessPart::Identifier(self.lower_identifier(child))),
+                kind::PARTIAL_ACCESS => {
+                    if let Some(pa) = self.parse_partial_access(self.text(child)) {
+                        parts.push(pa);
+                    }
+                }
                 _ if self.text(child) == "^" => {
                     parts.push(AccessPart::Deref);
                 }
@@ -1063,6 +1068,10 @@ impl<'a> LowerCtx<'a> {
                         i += 1;
                     }
                     parts.push(AccessPart::Index(indices));
+                } else if child.kind() == kind::PARTIAL_ACCESS {
+                    if let Some(pa) = self.parse_partial_access(self.text(child)) {
+                        parts.push(pa);
+                    }
                 } else if self.text(child) == "." {
                     // dot separator, skip
                 }
@@ -1074,6 +1083,27 @@ impl<'a> LowerCtx<'a> {
             parts,
             range: self.range(node),
         }
+    }
+
+    /// Parse a partial access token like ".%X0", ".%B1", ".%W0", ".%D0".
+    fn parse_partial_access(&self, text: &str) -> Option<AccessPart> {
+        // Format: .%<kind><index>
+        let s = text.strip_prefix(".%").or_else(|| text.strip_prefix("."))?;
+        if s.is_empty() {
+            return None;
+        }
+        let kind_char = s.as_bytes()[0].to_ascii_uppercase();
+        let index_str = &s[1..];
+        let index: u32 = index_str.parse().ok()?;
+        let kind = match kind_char {
+            b'X' => PartialAccessKind::Bit,
+            b'B' => PartialAccessKind::Byte,
+            b'W' => PartialAccessKind::Word,
+            b'D' => PartialAccessKind::DWord,
+            b'L' => PartialAccessKind::LWord,
+            _ => return None,
+        };
+        Some(AccessPart::Partial(kind, index))
     }
 
     fn lower_function_call(&mut self, node: Node) -> FunctionCallExpr {

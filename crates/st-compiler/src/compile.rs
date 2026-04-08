@@ -601,6 +601,40 @@ impl<'a> FunctionCompiler<'a> {
             }
         }
 
+        // Check for partial store: var.%X0 := value, var.%B1 := value
+        if target.parts.len() >= 2 {
+            if let (Some(AccessPart::Identifier(id)), Some(AccessPart::Partial(kind, index))) =
+                (target.parts.first(), target.parts.get(1))
+            {
+                let base = self.compile_load_variable(&id.name);
+                let dst = self.alloc_reg();
+                match kind {
+                    PartialAccessKind::Bit => {
+                        self.emit(Instruction::InsertBit(dst, base, *index as u8, val_reg));
+                    }
+                    PartialAccessKind::Byte => {
+                        self.emit(Instruction::InsertPartial(dst, base, *index as u8, 8, val_reg));
+                    }
+                    PartialAccessKind::Word => {
+                        self.emit(Instruction::InsertPartial(dst, base, *index as u8, 16, val_reg));
+                    }
+                    PartialAccessKind::DWord => {
+                        self.emit(Instruction::InsertPartial(dst, base, *index as u8, 32, val_reg));
+                    }
+                    PartialAccessKind::LWord => {
+                        self.emit(Instruction::InsertPartial(dst, base, *index as u8, 64, val_reg));
+                    }
+                }
+                // Store modified value back
+                if let Some(slot) = self.find_local(&id.name) {
+                    self.emit_sourced(Instruction::StoreLocal(slot, dst), range);
+                } else if let Some(slot) = self.find_global(&id.name) {
+                    self.emit_sourced(Instruction::StoreGlobal(slot, dst), range);
+                }
+                return;
+            }
+        }
+
         if let Some(AccessPart::Identifier(id)) = target.parts.first() {
             if let Some(slot) = self.find_local(&id.name) {
                 self.emit_sourced(Instruction::StoreLocal(slot, val_reg), range);
@@ -803,8 +837,19 @@ impl<'a> FunctionCompiler<'a> {
                         }
                     }
                 }
+                // Check for partial access on a simple variable: var.%X0, var.%B1, etc.
+                if va.parts.len() >= 2 {
+                    if let Some(AccessPart::Identifier(id)) = va.parts.first() {
+                        if let Some(AccessPart::Partial(kind, index)) = va.parts.get(1) {
+                            let base = self.compile_load_variable(&id.name);
+                            return self.compile_partial_read(base, *kind, *index);
+                        }
+                    }
+                }
                 if let Some(AccessPart::Identifier(id)) = va.parts.first() {
-                    self.compile_load_variable(&id.name)
+                    let base = self.compile_load_variable(&id.name);
+                    // Check for chained partial access after the base
+                    self.apply_partial_chain(base, &va.parts[1..])
                 } else {
                     let reg = self.alloc_reg();
                     self.emit(Instruction::LoadConst(reg, Value::Int(0)));
@@ -855,6 +900,39 @@ impl<'a> FunctionCompiler<'a> {
                 reg
             }
         }
+    }
+
+    /// Emit extraction for a partial access (bit, byte, word, dword).
+    fn compile_partial_read(&mut self, src: Reg, kind: PartialAccessKind, index: u32) -> Reg {
+        let dst = self.alloc_reg();
+        match kind {
+            PartialAccessKind::Bit => {
+                self.emit(Instruction::ExtractBit(dst, src, index as u8));
+            }
+            PartialAccessKind::Byte => {
+                self.emit(Instruction::ExtractPartial(dst, src, index as u8, 8));
+            }
+            PartialAccessKind::Word => {
+                self.emit(Instruction::ExtractPartial(dst, src, index as u8, 16));
+            }
+            PartialAccessKind::DWord => {
+                self.emit(Instruction::ExtractPartial(dst, src, index as u8, 32));
+            }
+            PartialAccessKind::LWord => {
+                self.emit(Instruction::ExtractPartial(dst, src, index as u8, 64));
+            }
+        }
+        dst
+    }
+
+    /// Apply any partial access parts after the base, returning the final register.
+    fn apply_partial_chain(&mut self, mut reg: Reg, parts: &[AccessPart]) -> Reg {
+        for part in parts {
+            if let AccessPart::Partial(kind, index) = part {
+                reg = self.compile_partial_read(reg, *kind, *index);
+            }
+        }
+        reg
     }
 
     fn compile_load_variable(&mut self, name: &str) -> Reg {

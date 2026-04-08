@@ -501,6 +501,23 @@ pub enum AccessPart {
     Identifier(Identifier),
     Index(Vec<Expression>),
     Deref,
+    /// Partial bit/byte/word/dword access: .%X0, .%B1, .%W0, .%D0
+    Partial(PartialAccessKind, u32),
+}
+
+/// The size of a partial access operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PartialAccessKind {
+    /// Bit access (.%X0 .. .%X63) → result is BOOL
+    Bit,
+    /// Byte access (.%B0 .. .%B7) → result is BYTE
+    Byte,
+    /// Word access (.%W0 .. .%W3) → result is WORD
+    Word,
+    /// DWord access (.%D0 .. .%D1) → result is DWORD
+    DWord,
+    /// LWord access (.%L0) → result is LWORD
+    LWord,
 }
 
 // =============================================================================
