@@ -874,6 +874,300 @@ END_PROGRAM
     assert_eq!(forced.get("Y"), Some(&Value::Bool(true)));
 }
 
+#[test]
+fn force_blocks_device_writes_via_set_global_by_slot() {
+    // Regression for the case where forcing a global was overwritten on
+    // every scan cycle by `comm.read_inputs()` calling
+    // `vm.set_global_by_slot()` with the fresh device value. The forced
+    // value must take precedence over device updates AND program writes.
+    let source = "\
+VAR_GLOBAL
+    di_0 : BOOL := FALSE;
+    do_0 : BOOL := FALSE;
+END_VAR
+PROGRAM Main
+    do_0 := di_0;
+END_PROGRAM
+";
+    let mut engine = run_program(source, 1);
+
+    // Force di_0 = TRUE
+    engine.vm_mut().force_variable("di_0", Value::Bool(true));
+
+    // Find slots so we can simulate comm_manager pushing fresh device data.
+    let (di_slot, _) = engine
+        .vm()
+        .module()
+        .globals
+        .find_slot("di_0")
+        .expect("di_0 global");
+
+    // Simulate the comm manager writing the "real" device value (FALSE)
+    // every cycle. This must NOT clobber the force.
+    for _ in 0..10 {
+        engine.vm_mut().set_global_by_slot(di_slot, Value::Bool(false));
+        engine.run_one_cycle().unwrap();
+    }
+
+    // After 10 cycles of device pushes, di_0 should STILL read TRUE
+    // (the forced value), and do_0 should also be TRUE because the
+    // program reads di_0 and assigns it to do_0.
+    assert_eq!(
+        engine.vm().get_global("di_0"),
+        Some(&Value::Bool(true)),
+        "Forced di_0 should remain TRUE despite device writes"
+    );
+    assert_eq!(
+        engine.vm().get_global("do_0"),
+        Some(&Value::Bool(true)),
+        "do_0 should reflect the forced di_0 value (TRUE)"
+    );
+
+    // The watch list (which reads via global_variables) must also show the
+    // forced value, not the underlying device value.
+    let snapshot = engine.vm().global_variables();
+    let di_0 = snapshot
+        .iter()
+        .find(|v| v.name.eq_ignore_ascii_case("di_0"))
+        .unwrap();
+    assert_eq!(
+        di_0.value, "TRUE",
+        "global_variables() snapshot should show the forced value, got {}",
+        di_0.value
+    );
+}
+
+#[test]
+fn force_blocks_program_writes_via_store_global() {
+    // Forcing an OUTPUT (or any global) must also block program writes.
+    // The PLC engineer can hold do_0 = TRUE for commissioning even
+    // though the program would normally compute it from di_0.
+    let source = "\
+VAR_GLOBAL
+    do_0 : BOOL := FALSE;
+END_VAR
+PROGRAM Main
+    do_0 := FALSE;  (* program insists on FALSE every cycle *)
+END_PROGRAM
+";
+    let mut engine = run_program(source, 1);
+    engine.vm_mut().force_variable("do_0", Value::Bool(true));
+
+    for _ in 0..5 {
+        engine.run_one_cycle().unwrap();
+    }
+
+    assert_eq!(
+        engine.vm().get_global("do_0"),
+        Some(&Value::Bool(true)),
+        "Forced do_0 should remain TRUE despite the program writing FALSE"
+    );
+}
+
+// =============================================================================
+// Integer overflow / wrapping (IEC 61131-3 two's complement)
+// =============================================================================
+
+#[test]
+fn sint_local_wraps_at_overflow() {
+    // The user's original report: a SINT cycle counter must wrap from
+    // 127 → -128 instead of growing beyond the 8-bit range.
+    let source = "\
+PROGRAM Main
+VAR
+    cycle : SINT := 0;
+END_VAR
+    cycle := cycle + 1;
+END_PROGRAM
+";
+    // Run 130 cycles. Without wrapping, cycle would be 130 (out of range).
+    // With wrapping, cycle goes 0,1,...,127,-128,-127,-126,-125 → -126.
+    let mut engine = run_program(source, 130);
+    let val = engine.vm_mut().get_global("cycle"); // it's a local, but check there too
+    assert!(val.is_none(), "cycle is a PROGRAM local, not a global");
+
+    // To inspect the local, look at retained_locals via get_retained_locals.
+    let retained = engine.vm().get_retained_locals("Main").unwrap();
+    let cycle = &retained[0];
+    assert_eq!(
+        cycle,
+        &Value::Int(-126),
+        "Expected SINT cycle to wrap to -126 after 130 increments, got {cycle:?}"
+    );
+}
+
+#[test]
+fn sint_global_wraps_at_overflow() {
+    let source = "\
+VAR_GLOBAL
+    counter : SINT;
+END_VAR
+PROGRAM Main
+    counter := counter + 1;
+END_PROGRAM
+";
+    let engine = run_program(source, 200);
+    // 200 cycles: counter goes 0..127, then wraps to -128 and counts up.
+    // Final value = (200 + 128) mod 256 - 128 = 328 mod 256 - 128 = 72 - 128 = -56
+    assert_eq!(engine.vm().get_global("counter"), Some(&Value::Int(-56)));
+}
+
+#[test]
+fn usint_wraps_at_overflow() {
+    let source = "\
+VAR_GLOBAL
+    counter : USINT;
+END_VAR
+PROGRAM Main
+    counter := counter + 1;
+END_PROGRAM
+";
+    let engine = run_program(source, 260);
+    // 0 + 260 = 260, wrapped to 260 mod 256 = 4
+    assert_eq!(engine.vm().get_global("counter"), Some(&Value::UInt(4)));
+}
+
+#[test]
+fn int_wraps_at_overflow() {
+    let source = "\
+VAR_GLOBAL
+    counter : INT;
+END_VAR
+PROGRAM Main
+    counter := counter + 1;
+END_PROGRAM
+";
+    // Run past i16::MAX (32767). 32780 cycles → 32780 - 65536 = -32756.
+    let engine = run_program(source, 32780);
+    assert_eq!(engine.vm().get_global("counter"), Some(&Value::Int(-32756)));
+}
+
+#[test]
+fn dint_does_not_wrap_for_small_values() {
+    let source = "\
+VAR_GLOBAL
+    counter : DINT;
+END_VAR
+PROGRAM Main
+    counter := counter + 1000;
+END_PROGRAM
+";
+    let engine = run_program(source, 5);
+    assert_eq!(engine.vm().get_global("counter"), Some(&Value::Int(5000)));
+}
+
+#[test]
+fn comm_writes_to_sint_global_are_narrowed() {
+    // Comm devices push values via set_global_by_slot. Those writes must
+    // ALSO narrow to the slot's declared width — otherwise an out-of-range
+    // device value would silently store the wide form.
+    let source = "\
+VAR_GLOBAL
+    di : SINT;
+END_VAR
+PROGRAM Main
+    di := di;
+END_PROGRAM
+";
+    let mut engine = run_program(source, 1);
+    let (slot, _) = engine.vm().module().globals.find_slot("di").unwrap();
+
+    // Device pushes 200 (out of SINT range — should wrap to -56).
+    engine.vm_mut().set_global_by_slot(slot, Value::Int(200));
+    assert_eq!(engine.vm().get_global("di"), Some(&Value::Int(-56)));
+}
+
+#[test]
+fn forced_value_is_narrowed_to_slot_width() {
+    // The user can type "200" into the Force input for a SINT variable.
+    // The forced value must be narrowed to fit, matching the runtime
+    // semantics that would apply if the program had written 200.
+    let source = "\
+VAR_GLOBAL
+    s : SINT;
+END_VAR
+PROGRAM Main
+    s := s;
+END_PROGRAM
+";
+    let mut engine = run_program(source, 1);
+    engine.vm_mut().force_variable("s", Value::Int(200));
+    assert_eq!(engine.vm().get_global("s"), Some(&Value::Int(-56)));
+}
+
+#[test]
+fn force_does_not_block_writes_to_other_slots() {
+    // Regression: forcing one variable must NOT affect any other variable.
+    // The user reported "if i force a digital input, then none of the
+    // other variables are updated, either inputs or outputs". The fix
+    // for set_global_by_slot must only short-circuit on the SPECIFIC
+    // forced slot, not any other.
+    let source = "\
+VAR_GLOBAL
+    di_0 : BOOL := FALSE;
+    di_1 : BOOL := FALSE;
+    di_2 : BOOL := FALSE;
+    do_0 : BOOL := FALSE;
+END_VAR
+PROGRAM Main
+    do_0 := di_1 OR di_2;
+END_PROGRAM
+";
+    let mut engine = run_program(source, 1);
+
+    // Force di_0 — the OTHER variables must continue to work.
+    engine.vm_mut().force_variable("di_0", Value::Bool(true));
+
+    // Resolve the slots.
+    let (di_0_slot, _) = engine.vm().module().globals.find_slot("di_0").unwrap();
+    let (di_1_slot, _) = engine.vm().module().globals.find_slot("di_1").unwrap();
+    let (di_2_slot, _) = engine.vm().module().globals.find_slot("di_2").unwrap();
+
+    // Simulate a comm cycle: device pushes di_0=false (should be IGNORED
+    // because forced), di_1=true (should APPLY), di_2=true (should APPLY).
+    engine.vm_mut().set_global_by_slot(di_0_slot, Value::Bool(false));
+    engine.vm_mut().set_global_by_slot(di_1_slot, Value::Bool(true));
+    engine.vm_mut().set_global_by_slot(di_2_slot, Value::Bool(true));
+
+    engine.run_one_cycle().unwrap();
+
+    // Forced var: still TRUE despite the device pushing FALSE.
+    assert_eq!(engine.vm().get_global("di_0"), Some(&Value::Bool(true)));
+    // Non-forced vars: device pushes apply normally.
+    assert_eq!(engine.vm().get_global("di_1"), Some(&Value::Bool(true)));
+    assert_eq!(engine.vm().get_global("di_2"), Some(&Value::Bool(true)));
+    // Output computed by program from non-forced inputs: should be TRUE.
+    assert_eq!(engine.vm().get_global("do_0"), Some(&Value::Bool(true)));
+
+    // Sanity: only ONE slot should be in forced_global_slots.
+    let forced_count = engine.vm().forced_variables().len();
+    assert_eq!(forced_count, 1, "exactly one variable should be forced");
+}
+
+#[test]
+fn unforce_restores_normal_writes() {
+    let source = "\
+VAR_GLOBAL
+    counter : INT := 0;
+END_VAR
+PROGRAM Main
+    counter := counter + 1;
+END_PROGRAM
+";
+    let mut engine = run_program(source, 1);
+    engine.vm_mut().force_variable("counter", Value::Int(999));
+    engine.run_one_cycle().unwrap();
+    engine.run_one_cycle().unwrap();
+    // Force is held → counter stays at 999.
+    assert_eq!(engine.vm().get_global("counter"), Some(&Value::Int(999)));
+
+    // Unforce → next cycle the program write goes through.
+    engine.vm_mut().unforce_variable("counter");
+    engine.run_one_cycle().unwrap();
+    // The program reads 999 and writes 1000.
+    assert_eq!(engine.vm().get_global("counter"), Some(&Value::Int(1000)));
+}
+
 // =============================================================================
 // Pointers (REF_TO and ^)
 // =============================================================================

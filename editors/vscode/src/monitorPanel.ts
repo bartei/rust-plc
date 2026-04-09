@@ -68,7 +68,7 @@ export class MonitorPanel {
   }
 
   public updateVariables(
-    vars: Array<{ name: string; value: string; type: string }>
+    vars: Array<{ name: string; value: string; type: string; forced?: boolean }>
   ) {
     this.panel.webview.postMessage({ command: "updateVariables", variables: vars });
   }
@@ -288,6 +288,16 @@ export class MonitorPanel {
       color: var(--vscode-descriptionForeground);
       padding: 12px;
     }
+    .pending { color: var(--vscode-descriptionForeground); }
+    .forced td.value { color: var(--vscode-charts-orange, #d18616); font-weight: bold; }
+    .forced td.name::before {
+      content: "🔒 ";
+      color: var(--vscode-charts-orange, #d18616);
+    }
+    .force-error {
+      border-color: var(--vscode-inputValidation-errorBorder, #be1100) !important;
+      background: var(--vscode-inputValidation-errorBackground) !important;
+    }
   </style>
 </head>
 <body>
@@ -357,6 +367,13 @@ export class MonitorPanel {
       typeMap = new Map(catalog.map(c => [c.name.toLowerCase(), c.type]));
     }
 
+    /**
+     * Build the table STRUCTURE from the current watchList. Called only
+     * when the watch list itself changes (add/remove/clear). Each row gets
+     * a stable data-var attribute so updateValueCells() can find it later
+     * and mutate just the value/type cells without touching the input
+     * elements — preserving focus and any half-typed force value.
+     */
     function renderWatchTable() {
       const tbody = document.getElementById("var-body");
       if (watchList.length === 0) {
@@ -367,21 +384,120 @@ export class MonitorPanel {
       tbody.innerHTML = watchList.map(name => {
         const lc = name.toLowerCase();
         const v = valueMap.get(lc);
-        const value = v ? v.value : '<span style="color:var(--vscode-descriptionForeground)">…</span>';
+        const value = v ? v.value : '<span class="pending">…</span>';
         const type = (v && v.type) || typeMap.get(lc) || '';
+        const isForced = !!(v && v.forced);
         const safeName = name.replace(/'/g, "\\\\'");
-        return '<tr>' +
-          '<td>' + name + '</td>' +
+        const placeholder = type ? placeholderForType(type) : "value";
+        return '<tr data-var="' + lc + '"' + (isForced ? ' class="forced"' : '') + '>' +
+          '<td class="name">' + name + '</td>' +
           '<td class="value">' + value + '</td>' +
           '<td class="type">' + type + '</td>' +
           '<td>' +
-            '<input class="force-input" id="force-' + lc + '" placeholder="value" />' +
+            '<input class="force-input" placeholder="' + placeholder + '" />' +
             ' <button onclick="forceVar(\\'' + safeName + '\\')">Force</button>' +
             ' <button class="secondary" onclick="unforceVar(\\'' + safeName + '\\')">Unforce</button>' +
             ' <button class="secondary" onclick="removeWatch(\\'' + safeName + '\\')">Remove</button>' +
           '</td>' +
         '</tr>';
       }).join("");
+    }
+
+    /**
+     * In-place update of the value + type cells for every row in the
+     * watch list. Does NOT touch the row structure or the force input —
+     * the user can keep typing in a force field while the periodic
+     * telemetry refresh updates surrounding cells.
+     *
+     * Also toggles the .forced row class so the lock icon + value
+     * highlight appear/disappear immediately when force/unforce takes
+     * effect on the runtime.
+     */
+    function updateValueCells() {
+      for (const name of watchList) {
+        const lc = name.toLowerCase();
+        const v = valueMap.get(lc);
+        if (!v) continue;
+        const row = findRow(lc);
+        if (!row) continue;
+        const valueCell = row.querySelector(".value");
+        const typeCell = row.querySelector(".type");
+        if (valueCell && valueCell.textContent !== v.value) {
+          valueCell.textContent = v.value;
+        }
+        if (typeCell && v.type && typeCell.textContent !== v.type) {
+          typeCell.textContent = v.type;
+        }
+        const wasForced = row.classList.contains("forced");
+        const isForced = !!v.forced;
+        if (wasForced !== isForced) {
+          row.classList.toggle("forced", isForced);
+        }
+      }
+    }
+
+    /**
+     * Look up a row by its data-var attribute. We iterate the tbody
+     * children directly instead of using querySelector with a CSS
+     * attribute selector — that path requires escaping any CSS-special
+     * chars in the attribute value, which has tripped us up before
+     * (the previous polyfill produced double-backslashes that didn't
+     * match). Linear scan is fine for watch lists of <100 entries.
+     */
+    function findRow(lc) {
+      const tbody = document.getElementById("var-body");
+      const rows = tbody.children;
+      for (let i = 0; i < rows.length; i++) {
+        if (rows[i].getAttribute && rows[i].getAttribute("data-var") === lc) {
+          return rows[i];
+        }
+      }
+      return null;
+    }
+
+    function placeholderForType(type) {
+      const t = type.toUpperCase();
+      if (t === "BOOL") return "TRUE / FALSE";
+      if (t === "STRING" || t === "WSTRING") return "text";
+      if (t === "REAL" || t === "LREAL") return "1.5";
+      return "0";
+    }
+
+    /**
+     * Validate a user-entered force value against the variable's
+     * declared type. Returns the canonicalized value to send to the
+     * DAP, or null if the input is invalid for this type.
+     *
+     * BOOL accepts true/false/0/1 (case insensitive).
+     * Integer types accept signed decimals; we don't enforce range
+     * because the DAP/VM clamps to the declared type at load time.
+     * Float types accept decimals or integers.
+     * STRING accepts any non-empty input.
+     */
+    function validateForceValue(type, raw) {
+      if (!raw) return null;
+      const t = (type || "").toUpperCase();
+      if (t === "BOOL") {
+        const lower = raw.toLowerCase();
+        if (lower === "true" || lower === "1") return "true";
+        if (lower === "false" || lower === "0") return "false";
+        return null;
+      }
+      const intTypes = ["SINT", "USINT", "BYTE", "INT", "UINT", "WORD",
+                        "DINT", "UDINT", "DWORD", "LINT", "ULINT", "LWORD"];
+      if (intTypes.indexOf(t) !== -1) {
+        if (!/^-?\\d+$/.test(raw)) return null;
+        return raw;
+      }
+      if (t === "REAL" || t === "LREAL") {
+        if (!/^-?\\d+(\\.\\d+)?([eE][+-]?\\d+)?$/.test(raw)) return null;
+        return raw;
+      }
+      if (t === "STRING" || t === "WSTRING") {
+        return raw;
+      }
+      // Unknown / complex type — accept as-is and let the DAP reject.
+      return raw;
     }
 
     function addFromInput() {
@@ -419,13 +535,34 @@ export class MonitorPanel {
     }
 
     function forceVar(name) {
-      const input = document.getElementById("force-" + name.toLowerCase());
-      const value = input ? input.value.trim() : "";
-      if (!value) {
-        input && input.focus();
+      const lc = name.toLowerCase();
+      const row = findRow(lc);
+      const input = row ? row.querySelector(".force-input") : null;
+      const raw = input ? input.value.trim() : "";
+      if (!raw) {
+        if (input) input.focus();
         return;
       }
-      vscode.postMessage({ command: "force", variable: name, value: value });
+      // Validate against the declared type from the latest snapshot or
+      // catalog. Reject incompatible input by flashing the input red and
+      // refocusing — the user must correct it before the force is sent.
+      const v = valueMap.get(lc);
+      const type = (v && v.type) || typeMap.get(lc) || "";
+      const canonical = validateForceValue(type, raw);
+      if (canonical === null) {
+        if (input) {
+          input.classList.add("force-error");
+          input.title = "Invalid value for type " + type;
+          input.focus();
+          input.select();
+          setTimeout(function() {
+            input.classList.remove("force-error");
+            input.title = "";
+          }, 1500);
+        }
+        return;
+      }
+      vscode.postMessage({ command: "force", variable: name, value: canonical });
       if (input) input.value = "";
     }
 
@@ -454,7 +591,10 @@ export class MonitorPanel {
         for (const v of msg.variables) {
           valueMap.set(v.name.toLowerCase(), v);
         }
-        renderWatchTable();
+        // Only update text content on existing cells — DO NOT rebuild the
+        // table, that would destroy the force input fields and steal
+        // focus from the user mid-typing.
+        updateValueCells();
       } else if (msg.command === "updateCatalog") {
         catalog = msg.catalog;
         refreshCatalogDatalist();

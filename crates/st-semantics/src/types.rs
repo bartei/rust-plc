@@ -56,6 +56,28 @@ pub fn is_numeric(e: ElementaryType) -> bool {
     is_integer(e) || is_real_type(e)
 }
 
+/// Inclusive `(min, max)` range of values an integer type can represent,
+/// expressed as `i128` so the unsigned 64-bit `ULINT` upper bound fits.
+/// Returns `None` for non-integer types.
+pub fn integer_type_range(e: ElementaryType) -> Option<(i128, i128)> {
+    match e {
+        ElementaryType::Sint => Some((i8::MIN as i128, i8::MAX as i128)),
+        ElementaryType::Int => Some((i16::MIN as i128, i16::MAX as i128)),
+        ElementaryType::Dint => Some((i32::MIN as i128, i32::MAX as i128)),
+        ElementaryType::Lint => Some((i64::MIN as i128, i64::MAX as i128)),
+        ElementaryType::Usint => Some((0, u8::MAX as i128)),
+        ElementaryType::Uint => Some((0, u16::MAX as i128)),
+        ElementaryType::Udint => Some((0, u32::MAX as i128)),
+        ElementaryType::Ulint => Some((0, u64::MAX as i128)),
+        // Bit-string types share representation with the unsigned integers.
+        ElementaryType::Byte => Some((0, u8::MAX as i128)),
+        ElementaryType::Word => Some((0, u16::MAX as i128)),
+        ElementaryType::Dword => Some((0, u32::MAX as i128)),
+        ElementaryType::Lword => Some((0, u64::MAX as i128)),
+        _ => None,
+    }
+}
+
 /// Bit-width for numeric ranking. Higher rank = wider type.
 pub fn numeric_rank(e: ElementaryType) -> Option<u8> {
     match e {

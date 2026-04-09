@@ -970,6 +970,86 @@ fn test_watch_list_flow() {
 }
 
 #[test]
+fn test_force_does_not_freeze_other_watched_vars() {
+    // Regression for the user-reported "force one variable, all the
+    // others stop updating" scenario. We watch three variables, force
+    // ONE, run a cycle, and verify the others got updated by the
+    // program despite the force being active.
+    //
+    // Note: with the in-memory test harness all requests are buffered
+    // up front, so a long Continue is interrupted after exactly one
+    // cycle by the queued Disconnect. We assert "values reflect at
+    // least one program write" rather than "advanced past N".
+    let source = "\
+VAR_GLOBAL
+    di_0 : BOOL := FALSE;
+    counter : INT := 0;
+    state : INT := 0;
+END_VAR
+PROGRAM Main
+    counter := counter + 1;
+    state := 42;
+END_PROGRAM
+";
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(
+                4,
+                "evaluate",
+                Some(json!({ "expression": "watchVariables di_0,counter,state" })),
+            ),
+            dap_request(5, "evaluate", Some(json!({ "expression": "force di_0 = true" }))),
+            dap_request(6, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(7, "disconnect", None),
+        ],
+    );
+
+    let payloads = find_cycle_stats_payloads(&messages);
+    assert!(!payloads.is_empty(), "Expected telemetry events");
+    let last = payloads.last().unwrap();
+    let vars = last["variables"].as_array().unwrap();
+    let by_name: std::collections::HashMap<String, &serde_json::Value> = vars
+        .iter()
+        .filter_map(|v| v["name"].as_str().map(|n| (n.to_uppercase(), v)))
+        .collect();
+
+    // The forced variable shows TRUE
+    assert_eq!(
+        by_name.get("DI_0").map(|v| v["value"].as_str().unwrap_or("")),
+        Some("TRUE"),
+        "di_0 should be the forced TRUE, got: {:?}",
+        by_name.get("DI_0")
+    );
+    // Counter must have at least 1 (the program's `counter := counter + 1`
+    // ran at least once after the force)
+    let counter_val: i64 = by_name
+        .get("COUNTER")
+        .and_then(|v| v["value"].as_str())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    assert!(
+        counter_val >= 1,
+        "counter should have advanced after the cycle, got {counter_val} — \
+         force broke other variable updates"
+    );
+    // state must have been written to 42 (the program assigns it unconditionally)
+    let state_val: i64 = by_name
+        .get("STATE")
+        .and_then(|v| v["value"].as_str())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    assert_eq!(
+        state_val, 42,
+        "state should be 42 (unconditional program write) — \
+         force broke unrelated variable updates"
+    );
+}
+
+#[test]
 fn test_var_catalog_emitted_on_launch() {
     // The DAP pushes a `plc/varCatalog` telemetry event right after launch
     // so the Monitor panel can populate its autocomplete dropdown.

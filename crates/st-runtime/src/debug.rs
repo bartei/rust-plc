@@ -383,6 +383,16 @@ pub fn format_var_type(ty: VarType) -> &'static str {
     }
 }
 
+/// Format a variable's type with full width info from its declared
+/// `IntWidth` (e.g. "SINT" / "USINT" / "DINT" instead of just "INT").
+/// Falls back to the basic `format_var_type` for non-integer slots.
+pub fn format_var_type_with_width(ty: VarType, width: st_ir::IntWidth) -> &'static str {
+    if let Some(name) = width.display_name() {
+        return name;
+    }
+    format_var_type(ty)
+}
+
 /// Compute byte offsets for each line (0-indexed).
 fn compute_line_offsets(source: &str) -> Vec<usize> {
     let mut offsets = vec![0]; // line 0 starts at byte 0

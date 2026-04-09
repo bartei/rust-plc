@@ -1181,10 +1181,14 @@ impl DapSession {
             st_ir::Value::String(value_str.to_string())
         };
 
-        if let Some(ref mut vm) = self.vm {
-            vm.force_variable(var_name, value.clone());
+        if self.vm.is_some() {
+            self.vm.as_mut().unwrap().force_variable(var_name, value.clone());
             let result = format!("Forced {} = {}", var_name, st_runtime::debug::format_value(&value));
             self.pending_events.push(console_output(&result));
+            // Push a fresh telemetry snapshot so the Monitor panel updates
+            // immediately rather than waiting for the next periodic tick.
+            // Without this, the user sees the value pop in 100-500ms later.
+            self.push_cycle_stats_event();
             ok(seq, ResponseBody::Evaluate(dap::responses::EvaluateResponse {
                 result,
                 type_field: None, presentation_hint: None,
@@ -1202,10 +1206,13 @@ impl DapSession {
     }
 
     fn handle_unforce_command(&mut self, seq: i64, var_name: &str) -> Response {
-        if let Some(ref mut vm) = self.vm {
-            vm.unforce_variable(var_name);
+        if self.vm.is_some() {
+            self.vm.as_mut().unwrap().unforce_variable(var_name);
             let result = format!("Unforced {var_name}");
             self.pending_events.push(console_output(&result));
+            // Push a fresh telemetry snapshot so the panel's lock icon
+            // disappears immediately on unforce.
+            self.push_cycle_stats_event();
             ok(seq, ResponseBody::Evaluate(dap::responses::EvaluateResponse {
                 result,
                 type_field: None, presentation_hint: None,
@@ -1369,16 +1376,20 @@ impl DapSession {
                 .as_ref()
                 .map(|vm| {
                     let all = vm.monitorable_variables();
+                    let forced = vm.forced_variables();
                     self.watched_variables
                         .iter()
                         .filter_map(|name| {
                             all.iter()
                                 .find(|v| v.name.eq_ignore_ascii_case(name))
                                 .map(|v| {
+                                    let is_forced =
+                                        forced.contains_key(&v.name.to_uppercase());
                                     serde_json::json!({
                                         "name": v.name,
                                         "value": v.value,
                                         "type": v.ty,
+                                        "forced": is_forced,
                                     })
                                 })
                         })
@@ -1546,6 +1557,15 @@ impl DapSession {
                     let response = self.handle_set_breakpoints(req.seq, args);
                     self.deferred_responses.push(response);
                 }
+                Command::Evaluate(args) => {
+                    // Handle evaluate inline so the Monitor panel's
+                    // addWatch / removeWatch / force / unforce commands take
+                    // effect WHILE the program is running, not after the next
+                    // pause. The mutating watch commands also push a fresh
+                    // cycle stats event so the panel updates immediately.
+                    let response = self.handle_evaluate(req.seq, args);
+                    self.deferred_responses.push(response);
+                }
                 _ => {
                     self.deferred_requests.push(req);
                 }
@@ -1623,10 +1643,6 @@ impl DapSession {
         // is ~10s at 1µs/cycle — well above any interactive use, low enough
         // to fail fast in CI.
         const SAFETY_CYCLE_CAP: u64 = 10_000_000;
-        // Likewise, cap pending_events in case telemetry accumulates faster
-        // than the test harness drains it. Old cycle stats are stale; only
-        // the latest matters for the status bar.
-        const PENDING_EVENTS_SOFT_CAP: usize = 1024;
 
         loop {
             // Step first, then check for inflight requests. The opposite

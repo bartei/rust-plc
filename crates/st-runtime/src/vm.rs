@@ -68,6 +68,13 @@ pub struct Vm {
     retained_locals: std::collections::HashMap<u16, Vec<Value>>,
     /// Forced variables: name → forced value. Overrides runtime values.
     forced_variables: std::collections::HashMap<String, Value>,
+    /// Fast lookup: slot indices of currently-forced GLOBAL variables.
+    /// Kept in sync with `forced_variables` for global names. Used by the
+    /// hot-path write blockers (`set_global_by_slot`, `StoreGlobal`) to
+    /// reject device updates and program writes to forced variables —
+    /// matching real-PLC force semantics where the forced value takes
+    /// precedence over all other writers.
+    forced_global_slots: std::collections::HashSet<u16>,
     /// Cumulative elapsed time in nanoseconds (updated by engine each cycle).
     elapsed_time_ms: i64,
     /// FB/class instance storage: (caller_identity, instance_slot) → locals.
@@ -94,6 +101,7 @@ impl Vm {
             debug: DebugState::new(),
             retained_locals: std::collections::HashMap::new(),
             forced_variables: std::collections::HashMap::new(),
+            forced_global_slots: std::collections::HashSet::new(),
             elapsed_time_ms: 0,
             fb_instances: std::collections::HashMap::new(),
         }
@@ -158,16 +166,36 @@ impl Vm {
 
     /// Set a global variable value by name.
     pub fn set_global(&mut self, name: &str, value: Value) {
-        if let Some((i, _)) = self.module.globals.find_slot(name) {
-            self.globals[i as usize] = value;
+        if let Some((i, slot)) = self.module.globals.find_slot(name) {
+            // Forced globals reject all writes — devices, program code,
+            // online change, etc. The forced value persists until unforce.
+            if self.forced_global_slots.contains(&i) {
+                return;
+            }
+            let width = slot.int_width;
+            self.globals[i as usize] = narrow_value(value, width);
         }
     }
 
     /// Set a global variable value by slot index.
+    /// Forced slots silently drop the write — this is what makes a force
+    /// stick across cycles even when `comm.read_inputs` is pushing fresh
+    /// device data on every scan.
     pub fn set_global_by_slot(&mut self, slot: u16, value: Value) {
-        if (slot as usize) < self.globals.len() {
-            self.globals[slot as usize] = value;
+        if (slot as usize) >= self.globals.len() {
+            return;
         }
+        if self.forced_global_slots.contains(&slot) {
+            return;
+        }
+        let width = self
+            .module
+            .globals
+            .slots
+            .get(slot as usize)
+            .map(|s| s.int_width)
+            .unwrap_or(IntWidth::None);
+        self.globals[slot as usize] = narrow_value(value, width);
     }
 
     /// Get a global variable value by slot index.
@@ -186,15 +214,39 @@ impl Vm {
         self.retained_locals.get(&idx).cloned()
     }
 
-    /// Force a variable to a specific value. The forced value overrides
-    /// the runtime value whenever the variable is read.
+    /// Force a variable to a specific value. Real-PLC semantics: the
+    /// forced value takes precedence over device updates AND program
+    /// writes. Implemented by writing the value INTO the underlying slot
+    /// (so every reader naturally sees it) and adding the slot to
+    /// `forced_global_slots` so future writes from any source are
+    /// silently dropped. Locals/program-locals are still tracked via the
+    /// name-keyed map for the LoadLocal overlay path.
     pub fn force_variable(&mut self, name: &str, value: Value) {
-        self.forced_variables.insert(name.to_uppercase(), value);
+        // Narrow the forced value to the slot's declared integer width
+        // (so forcing a SINT to 200 wraps to -56 instead of being stored
+        // as a wide INT — matching what the running program would see).
+        if let Some((slot, slot_def)) = self.module.globals.find_slot(name) {
+            let narrowed = narrow_value(value.clone(), slot_def.int_width);
+            self.forced_variables
+                .insert(name.to_uppercase(), narrowed.clone());
+            self.forced_global_slots.insert(slot);
+            if (slot as usize) < self.globals.len() {
+                self.globals[slot as usize] = narrowed;
+            }
+        } else {
+            // Not a global — fall back to the name-keyed map only.
+            self.forced_variables.insert(name.to_uppercase(), value);
+        }
     }
 
-    /// Remove a force on a variable.
+    /// Remove a force on a variable. The slot keeps whatever the forced
+    /// value was until the next write from a device or program — i.e.
+    /// behavior immediately returns to normal on the next scan cycle.
     pub fn unforce_variable(&mut self, name: &str) {
         self.forced_variables.remove(&name.to_uppercase());
+        if let Some((slot, _)) = self.module.globals.find_slot(name) {
+            self.forced_global_slots.remove(&slot);
+        }
     }
 
     /// Get all currently forced variables.
@@ -292,7 +344,8 @@ impl Vm {
                 VariableInfo {
                     name: slot.name.clone(),
                     value: debug::format_value(&value),
-                    ty: debug::format_var_type(slot.ty).to_string(),
+                    ty: debug::format_var_type_with_width(slot.ty, slot.int_width)
+                        .to_string(),
                     var_ref: 0,
                 }
             })
@@ -311,7 +364,8 @@ impl Vm {
                 VariableInfo {
                     name: slot.name.clone(),
                     value: debug::format_value(&value),
-                    ty: debug::format_var_type(slot.ty).to_string(),
+                    ty: debug::format_var_type_with_width(slot.ty, slot.int_width)
+                        .to_string(),
                     var_ref: 0,
                 }
             })
@@ -333,7 +387,8 @@ impl Vm {
             .map(|slot| {
                 (
                     slot.name.clone(),
-                    debug::format_var_type(slot.ty).to_string(),
+                    debug::format_var_type_with_width(slot.ty, slot.int_width)
+                        .to_string(),
                 )
             })
             .collect();
@@ -344,7 +399,8 @@ impl Vm {
             for slot in &func.locals.slots {
                 result.push((
                     format!("{}.{}", func.name, slot.name),
-                    debug::format_var_type(slot.ty).to_string(),
+                    debug::format_var_type_with_width(slot.ty, slot.int_width)
+                        .to_string(),
                 ));
             }
         }
@@ -373,7 +429,8 @@ impl Vm {
                 result.push(VariableInfo {
                     name: format!("{prefix}.{}", slot.name),
                     value: debug::format_value(&value),
-                    ty: debug::format_var_type(slot.ty).to_string(),
+                    ty: debug::format_var_type_with_width(slot.ty, slot.int_width)
+                        .to_string(),
                     var_ref: 0,
                 });
             }
@@ -477,21 +534,40 @@ impl Vm {
                     self.reg_set(dst, val);
                 }
                 Instruction::StoreGlobal(slot, src) => {
-                    let val = self.reg_get(src).clone();
-                    self.globals[slot as usize] = val;
+                    // Forced globals reject program writes too — that's
+                    // the whole point of force in a PLC. The forced value
+                    // stays put until the user unforces it.
+                    if !self.forced_global_slots.contains(&slot) {
+                        let val = self.reg_get(src).clone();
+                        // Narrow to the slot's declared integer width so
+                        // sub-i64 types wrap on overflow per IEC 61131-3.
+                        let width = self
+                            .module
+                            .globals
+                            .slots
+                            .get(slot as usize)
+                            .map(|s| s.int_width)
+                            .unwrap_or(IntWidth::None);
+                        self.globals[slot as usize] = narrow_value(val, width);
+                    }
                 }
 
                 // Arithmetic
                 Instruction::Add(dst, l, r) => {
-                    let result = self.arith_op(l, r, |a, b| a + b, |a, b| a + b);
+                    // Wrapping arithmetic so SINT/INT/DINT overflow rolls
+                    // over per IEC 61131-3 (and so debug builds don't
+                    // panic on intentional overflow). The store-time
+                    // narrow_value call truncates to the slot's declared
+                    // width.
+                    let result = self.arith_op(l, r, i64::wrapping_add, |a, b| a + b);
                     self.reg_set(dst, result);
                 }
                 Instruction::Sub(dst, l, r) => {
-                    let result = self.arith_op(l, r, |a, b| a - b, |a, b| a - b);
+                    let result = self.arith_op(l, r, i64::wrapping_sub, |a, b| a - b);
                     self.reg_set(dst, result);
                 }
                 Instruction::Mul(dst, l, r) => {
-                    let result = self.arith_op(l, r, |a, b| a * b, |a, b| a * b);
+                    let result = self.arith_op(l, r, i64::wrapping_mul, |a, b| a * b);
                     self.reg_set(dst, result);
                 }
                 Instruction::Div(dst, l, r) => {
@@ -895,7 +971,17 @@ impl Vm {
     }
 
     fn local_set(&mut self, slot: u16, val: Value) {
-        self.call_stack.last_mut().unwrap().locals[slot as usize] = val;
+        // Narrow the value to the slot's declared integer width so SINT
+        // overflow wraps at -128/127 instead of growing into the i64 range.
+        let frame = self.call_stack.last_mut().unwrap();
+        let func = &self.module.functions[frame.func_index as usize];
+        let width = func
+            .locals
+            .slots
+            .get(slot as usize)
+            .map(|s| s.int_width)
+            .unwrap_or(IntWidth::None);
+        frame.locals[slot as usize] = narrow_value(val, width);
     }
 
     /// Save local variables of the current frame if it's a PROGRAM POU.
@@ -1192,5 +1278,48 @@ impl Vm {
             }
             _ => int_cmp(lv.as_int(), rv.as_int()),
         }
+    }
+}
+
+/// Narrow an integer value to its declared bit width using two's complement
+/// wrapping. Called at every store site (StoreLocal, StoreGlobal,
+/// set_global, set_global_by_slot, force_variable) so a SINT cycle counter
+/// wraps at 127→-128 instead of growing into the i64 range.
+///
+/// Non-integer values and `IntWidth::None` slots passthrough unchanged, so
+/// this is safe to call unconditionally on every store.
+fn narrow_value(val: Value, width: IntWidth) -> Value {
+    match width {
+        IntWidth::None | IntWidth::I64 | IntWidth::U64 => val,
+        IntWidth::I8 => match val {
+            Value::Int(i) => Value::Int(i as i8 as i64),
+            Value::UInt(u) => Value::Int(u as i8 as i64),
+            other => other,
+        },
+        IntWidth::U8 => match val {
+            Value::Int(i) => Value::UInt(i as u8 as u64),
+            Value::UInt(u) => Value::UInt(u as u8 as u64),
+            other => other,
+        },
+        IntWidth::I16 => match val {
+            Value::Int(i) => Value::Int(i as i16 as i64),
+            Value::UInt(u) => Value::Int(u as i16 as i64),
+            other => other,
+        },
+        IntWidth::U16 => match val {
+            Value::Int(i) => Value::UInt(i as u16 as u64),
+            Value::UInt(u) => Value::UInt(u as u16 as u64),
+            other => other,
+        },
+        IntWidth::I32 => match val {
+            Value::Int(i) => Value::Int(i as i32 as i64),
+            Value::UInt(u) => Value::Int(u as i32 as i64),
+            other => other,
+        },
+        IntWidth::U32 => match val {
+            Value::Int(i) => Value::UInt(i as u32 as u64),
+            Value::UInt(u) => Value::UInt(u as u32 as u64),
+            other => other,
+        },
     }
 }

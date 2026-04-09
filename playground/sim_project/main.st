@@ -16,7 +16,7 @@
 
 PROGRAM Main
 VAR
-    cycle      : DINT := 0;
+    cycle      : SINT := 0;
 END_VAR
 
     cycle := cycle + 1;

@@ -12,7 +12,7 @@ entryPoint: Main
 # Omit `engine` (or omit `cycle_time`) to run as fast as the CPU allows.
 # Accepted units: ns, us / µs, ms, s. A bare number is treated as ms.
 engine:
-  cycle_time: 100ms
+  cycle_time: 10ms
 
 # Communication framework configuration.
 # Each device gets a flat set of VAR_GLOBALs named {device}_{field}.

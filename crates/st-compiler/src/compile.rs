@@ -89,6 +89,7 @@ impl ModuleCompiler {
             TopLevelItem::GlobalVarDeclaration(vb) => {
                 for decl in &vb.declarations {
                     let ty = Self::var_type_from_ast(&decl.ty);
+                    let int_width = Self::int_width_from_ast(&decl.ty);
                     for name in &decl.names {
                         let offset = self.globals.total_size();
                         let size = ty.size();
@@ -98,6 +99,7 @@ impl ModuleCompiler {
                             offset,
                             size,
                             retain: vb.qualifiers.contains(&VarQualifier::Retain),
+                            int_width,
                         });
                     }
                 }
@@ -171,7 +173,8 @@ impl ModuleCompiler {
                 let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases);
                 fc.compile_var_blocks(&f.var_blocks);
                 let ret_ty = Self::var_type_from_ast(&f.return_type);
-                let ret_slot = fc.add_local(&f.name.name, ret_ty);
+                let ret_width = Self::int_width_from_ast(&f.return_type);
+                let ret_slot = fc.add_local(&f.name.name, ret_ty, ret_width);
                 let body_start_pc = fc.current_pc();
                 fc.compile_statements(&f.body)?;
                 let ret_reg = fc.alloc_reg();
@@ -235,7 +238,8 @@ impl ModuleCompiler {
                     // Define return variable if method has return type
                     let ret_slot = method.return_type.as_ref().map(|dt| {
                         let ret_ty = Self::var_type_from_ast(dt);
-                        fc.add_local(&method.name.name, ret_ty)
+                        let ret_width = Self::int_width_from_ast(dt);
+                        fc.add_local(&method.name.name, ret_ty, ret_width)
                     });
                     let body_start_pc = fc.current_pc();
                     fc.compile_statements(&method.body)?;
@@ -299,6 +303,27 @@ impl ModuleCompiler {
             DataType::Ref(_) => VarType::Ref,
             DataType::Array(_) => VarType::Int, // simplified: arrays handled separately
             DataType::UserDefined(_) => VarType::Int, // simplified: resolved at link time
+        }
+    }
+
+    /// Original integer width / signedness for a source AST type. The VM
+    /// uses this at store time to wrap values to the declared bit width
+    /// (so a SINT cycle counter wraps at 127→-128 instead of growing to
+    /// the i64 range).
+    fn int_width_from_ast(dt: &DataType) -> IntWidth {
+        match dt {
+            DataType::Elementary(e) => match e {
+                ElementaryType::Sint => IntWidth::I8,
+                ElementaryType::Usint | ElementaryType::Byte => IntWidth::U8,
+                ElementaryType::Int => IntWidth::I16,
+                ElementaryType::Uint | ElementaryType::Word => IntWidth::U16,
+                ElementaryType::Dint => IntWidth::I32,
+                ElementaryType::Udint | ElementaryType::Dword => IntWidth::U32,
+                ElementaryType::Lint => IntWidth::I64,
+                ElementaryType::Ulint | ElementaryType::Lword => IntWidth::U64,
+                _ => IntWidth::None,
+            },
+            _ => IntWidth::None,
         }
     }
 }
@@ -406,7 +431,7 @@ impl<'a> FunctionCompiler<'a> {
         self.pending_source = Some(range);
     }
 
-    fn add_local(&mut self, name: &str, ty: VarType) -> u16 {
+    fn add_local(&mut self, name: &str, ty: VarType, int_width: IntWidth) -> u16 {
         let offset = self.locals.total_size();
         let size = ty.size();
         let idx = self.locals.slots.len() as u16;
@@ -416,6 +441,7 @@ impl<'a> FunctionCompiler<'a> {
             offset,
             size,
             retain: false,
+            int_width,
         });
         idx
     }
@@ -488,13 +514,14 @@ impl<'a> FunctionCompiler<'a> {
         for vb in var_blocks {
             for decl in &vb.declarations {
                 let ty = ModuleCompiler::var_type_from_ast(&decl.ty);
+                let int_width = ModuleCompiler::int_width_from_ast(&decl.ty);
                 // Track FB type names for user-defined types
                 let fb_type_name = match &decl.ty {
                     DataType::UserDefined(qn) => Some(qn.as_str()),
                     _ => None,
                 };
                 for name in &decl.names {
-                    let slot = self.add_local(&name.name, ty);
+                    let slot = self.add_local(&name.name, ty, int_width);
                     // Remember the FB type name so we can resolve calls later
                     if let Some(ref type_name) = fb_type_name {
                         self.fb_type_names.insert(slot, type_name.clone());
