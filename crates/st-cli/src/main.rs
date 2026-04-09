@@ -335,9 +335,19 @@ fn run_program_cmd(args: &[String]) {
             })
     };
 
-    // Run
+    // Load engine config (cycle_time, ...) from plc-project.yaml if present.
+    let engine_proj = if is_single_file {
+        st_comm_api::EngineProjectConfig::default()
+    } else {
+        comm_setup::load_engine_config(&resolve_project_root(target))
+    };
+    if let Some(ct) = engine_proj.cycle_time {
+        eprintln!("[ENGINE] cycle_time: {ct:?}");
+    }
+
     let config = st_runtime::EngineConfig {
         max_cycles: cycles,
+        cycle_time: engine_proj.cycle_time,
         ..Default::default()
     };
     let mut engine = st_runtime::Engine::new(module, program_name, config);
@@ -348,16 +358,33 @@ fn run_program_cmd(args: &[String]) {
         comm_setup::start_web_uis(setup, 8080);
     }
 
+    let wall_started = std::time::Instant::now();
     match engine.run() {
         Ok(()) => {
+            let wall_total = wall_started.elapsed();
             let stats = engine.stats();
-            eprintln!(
-                "Executed {} cycle(s) in {:?} (avg {:?}/cycle, {} instructions)",
-                stats.cycle_count,
-                stats.total_time,
-                stats.avg_cycle_time(),
-                engine.vm().instruction_count(),
-            );
+            // `stats.total_time` only sums execution time per cycle — it does
+            // NOT include the inter-cycle sleep enforced by `engine.cycle_time`.
+            // Report wall-clock total separately so users with a cycle_time
+            // configured see the period they actually configured.
+            if engine_proj.cycle_time.is_some() {
+                eprintln!(
+                    "Executed {} cycle(s) in {:?} wall ({:?} cpu, avg {:?}/cycle exec, {} instructions)",
+                    stats.cycle_count,
+                    wall_total,
+                    stats.total_time,
+                    stats.avg_cycle_time(),
+                    engine.vm().instruction_count(),
+                );
+            } else {
+                eprintln!(
+                    "Executed {} cycle(s) in {:?} (avg {:?}/cycle, {} instructions)",
+                    stats.cycle_count,
+                    stats.total_time,
+                    stats.avg_cycle_time(),
+                    engine.vm().instruction_count(),
+                );
+            }
         }
         Err(e) => {
             eprintln!("Runtime error: {e}");

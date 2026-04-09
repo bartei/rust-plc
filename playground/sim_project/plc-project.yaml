@@ -3,6 +3,17 @@ name: SimulatedIO
 version: "1.0.0"
 entryPoint: Main
 
+# Scan cycle engine settings.
+# `cycle_time` is the target period for one full scan cycle (read inputs →
+# run program → write outputs). The engine sleeps the difference between
+# `cycle_time` and the cycle's actual execution time, so the loop runs at
+# a stable, predictable rate — same as a real PLC.
+#
+# Omit `engine` (or omit `cycle_time`) to run as fast as the CPU allows.
+# Accepted units: ns, us / µs, ms, s. A bare number is treated as ms.
+engine:
+  cycle_time: 100ms
+
 # Communication framework configuration.
 # Each device gets a flat set of VAR_GLOBALs named {device}_{field}.
 # A web UI is started for each simulated device on a sequential port,

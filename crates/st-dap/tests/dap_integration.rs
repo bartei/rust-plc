@@ -70,14 +70,27 @@ fn find_double_crlf(data: &[u8]) -> Option<usize> {
 }
 
 /// Helper: build a DAP request message.
+///
+/// Note about `arguments`: the dap crate's `Command` enum is deserialized
+/// with `#[serde(tag = "command", content = "arguments")]`. Unit variants
+/// like `configurationDone` MUST omit the `arguments` field; tuple variants
+/// like `disconnect(DisconnectArguments)` MUST include it (use `Some(json!({}))`
+/// for "no meaningful args"). The set of unit variants is small and stable;
+/// see `UNIT_COMMANDS` below.
 fn dap_request(seq: i64, command: &str, arguments: Option<Value>) -> Value {
+    const UNIT_COMMANDS: &[&str] = &["configurationDone", "loadedSources", "threads"];
     let mut msg = json!({
         "seq": seq,
         "type": "request",
         "command": command,
     });
+    let is_unit = UNIT_COMMANDS.contains(&command);
     if let Some(args) = arguments {
         msg["arguments"] = args;
+    } else if !is_unit {
+        // Tuple variant with no caller-supplied args: send an empty object
+        // so the dap crate's tag/content deserializer accepts the message.
+        msg["arguments"] = json!({});
     }
     msg
 }
@@ -213,7 +226,50 @@ fn test_threads() {
 }
 
 #[test]
-fn test_continue_runs_to_completion() {
+fn test_continue_interrupted_by_pause() {
+    // Continue runs forever (PLC scan loop). A queued Pause should be picked
+    // up by process_inflight_requests between cycles, set the VM's pause
+    // flag, and the next iteration's step should Halt with reason "pause".
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(4, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(5, "pause", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "disconnect", None),
+        ],
+    );
+
+    let cont_resp = find_response(&messages, 4).expect("Expected continue response");
+    assert!(cont_resp["success"].as_bool().unwrap_or(false));
+
+    // The Pause should have triggered a Stopped event with reason "pause".
+    let stopped = find_events(&messages, "stopped");
+    let pause_stops: Vec<_> = stopped
+        .iter()
+        .filter(|e| e["body"]["reason"].as_str() == Some("pause"))
+        .collect();
+    assert!(
+        !pause_stops.is_empty(),
+        "Expected a Stopped(pause) event, got: {:?}",
+        stopped
+            .iter()
+            .map(|e| e["body"]["reason"].as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let pause_resp = find_response(&messages, 5).expect("Expected pause response");
+    assert!(pause_resp["success"].as_bool().unwrap_or(false));
+}
+
+#[test]
+fn test_continue_then_disconnect() {
+    // PLC programs run forever (cyclic scan) — `continue` should run until
+    // the user disconnects, sets a breakpoint, or pauses. The disconnect
+    // request queued behind the continue should interrupt the run loop and
+    // cleanly tear down the session.
     let messages = run_dap_session(
         SIMPLE_PROGRAM,
         &[
@@ -227,10 +283,9 @@ fn test_continue_runs_to_completion() {
 
     let resp = find_response(&messages, 4).expect("Expected continue response");
     assert!(resp["success"].as_bool().unwrap_or(false));
-
-    // Program should terminate
-    let terminated = find_events(&messages, "terminated");
-    assert!(!terminated.is_empty(), "Expected terminated event after continue");
+    let disc_resp = find_response(&messages, 5).expect("Expected disconnect response");
+    assert!(disc_resp["success"].as_bool().unwrap_or(false));
+    // No spontaneous Terminated event — Continue is interruptible-only now.
 }
 
 #[test]
@@ -744,6 +799,294 @@ fn test_cycle_info() {
     let resp = find_response(&messages, 4).unwrap();
     let result = resp["body"]["result"].as_str().unwrap_or("");
     assert!(result.contains("Instructions"), "Expected cycle info: {result}");
+}
+
+// =============================================================================
+// Cycle stats + telemetry tests (Tier 1 + Tier 2 cycle-time feedback)
+// =============================================================================
+
+/// Find every `output` event whose category is `telemetry` and whose `output`
+/// sentinel is `plc/cycleStats`. Returns the structured `data` payloads.
+fn find_cycle_stats_payloads(messages: &[Value]) -> Vec<&Value> {
+    messages
+        .iter()
+        .filter_map(|m| {
+            if m["type"].as_str() != Some("event")
+                || m["event"].as_str() != Some("output")
+            {
+                return None;
+            }
+            let body = &m["body"];
+            if body["category"].as_str() != Some("telemetry") {
+                return None;
+            }
+            if body["output"].as_str() != Some("plc/cycleStats") {
+                return None;
+            }
+            Some(&body["data"])
+        })
+        .collect()
+}
+
+/// Parse the `Scan cycles: N` field out of `scanCycleInfo`'s formatted result.
+fn parse_cycle_count(result: &str) -> Option<u64> {
+    // "Scan cycles: 1234 | Instructions/cycle: ..."
+    let after = result.strip_prefix("Scan cycles: ")?;
+    let end = after.find(' ').unwrap_or(after.len());
+    after[..end].parse().ok()
+}
+
+#[test]
+fn test_cycle_stats_increments_after_continue() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(4, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(5, "evaluate", Some(json!({ "expression": "scanCycleInfo" }))),
+            dap_request(6, "disconnect", None),
+        ],
+    );
+
+    let resp = find_response(&messages, 5).expect("Expected scanCycleInfo response");
+    let result = resp["body"]["result"].as_str().unwrap_or("");
+    let count = parse_cycle_count(result)
+        .unwrap_or_else(|| panic!("Could not parse cycle count from: {result}"));
+    assert!(
+        count > 0,
+        "Cycle count should be > 0 after Continue, got {count}: {result}"
+    );
+    // SIMPLE_PROGRAM has no infinite loop, so the DAP loop runs many cycles
+    // until it hits the 100k safety cap. We just need *some* timing.
+    assert!(
+        result.contains("last:") && result.contains("min/max/avg:"),
+        "Expected timing fields in result: {result}"
+    );
+}
+
+#[test]
+fn test_cycle_stats_telemetry_event_schema() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(4, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(5, "disconnect", None),
+        ],
+    );
+
+    let payloads = find_cycle_stats_payloads(&messages);
+    assert!(
+        !payloads.is_empty(),
+        "Expected at least one plc/cycleStats telemetry event after Continue"
+    );
+
+    // Validate the schema of the most recent payload — every required field
+    // must be present and the right JSON type. Future schema bumps should
+    // update this assertion deliberately.
+    let last = payloads.last().unwrap();
+    assert_eq!(last["schema"].as_u64(), Some(3), "schema field");
+    assert!(last["cycle_count"].is_u64(), "cycle_count must be u64");
+    assert!(last["last_us"].is_u64(), "last_us must be u64");
+    assert!(last["min_us"].is_u64(), "min_us must be u64");
+    assert!(last["max_us"].is_u64(), "max_us must be u64");
+    assert!(last["avg_us"].is_u64(), "avg_us must be u64");
+    assert!(
+        last["instructions_per_cycle"].is_u64(),
+        "instructions_per_cycle must be u64"
+    );
+    // watchdog_us is Option<u64> — null when unset
+    assert!(
+        last["watchdog_us"].is_null() || last["watchdog_us"].is_u64(),
+        "watchdog_us must be null or u64"
+    );
+    assert!(last["devices_ok"].is_u64(), "devices_ok must be u64");
+    assert!(last["devices_err"].is_u64(), "devices_err must be u64");
+
+    // Schema v2: period + jitter fields
+    assert!(
+        last["target_us"].is_null() || last["target_us"].is_u64(),
+        "target_us must be null or u64"
+    );
+    assert!(last["last_period_us"].is_u64(), "last_period_us must be u64");
+    assert!(last["min_period_us"].is_u64(), "min_period_us must be u64");
+    assert!(last["max_period_us"].is_u64(), "max_period_us must be u64");
+    assert!(last["jitter_max_us"].is_u64(), "jitter_max_us must be u64");
+
+    // Schema v3: variables array. With the watch-list model the array is
+    // empty by default — the panel must opt-in via `addWatch` / `watchVariables`.
+    assert!(last["variables"].is_array(), "variables must be an array");
+    assert!(
+        last["variables"].as_array().unwrap().is_empty(),
+        "variables should be empty by default — opt-in via addWatch"
+    );
+
+    // Sanity: with no comm devices wired up, both counts should be zero.
+    assert_eq!(last["devices_ok"].as_u64(), Some(0));
+    assert_eq!(last["devices_err"].as_u64(), Some(0));
+    // After Continue we definitely ran at least one cycle.
+    assert!(last["cycle_count"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn test_watch_list_flow() {
+    // Verify the addWatch / removeWatch / clearWatch evaluate commands
+    // round-trip and that the variables array reflects the watch list.
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            // Add Main.x to the watch list — handle_watch_add will push a
+            // fresh telemetry event reflecting the new list.
+            dap_request(4, "evaluate", Some(json!({ "expression": "addWatch Main.x" }))),
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "disconnect", None),
+        ],
+    );
+
+    let payloads = find_cycle_stats_payloads(&messages);
+    assert!(!payloads.is_empty(), "Expected telemetry events");
+    let last = payloads.last().unwrap();
+    let vars = last["variables"].as_array().unwrap();
+    let var_names: Vec<&str> = vars
+        .iter()
+        .filter_map(|v| v["name"].as_str())
+        .collect();
+    assert!(
+        var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.x")),
+        "Expected watched 'Main.x' in variables, got: {var_names:?}"
+    );
+    // We did NOT add Main.y, so it should NOT appear.
+    assert!(
+        !var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.y")),
+        "Did not expect un-watched 'Main.y' in variables"
+    );
+}
+
+#[test]
+fn test_var_catalog_emitted_on_launch() {
+    // The DAP pushes a `plc/varCatalog` telemetry event right after launch
+    // so the Monitor panel can populate its autocomplete dropdown.
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "disconnect", None),
+        ],
+    );
+
+    let catalog_events: Vec<&serde_json::Value> = messages
+        .iter()
+        .filter_map(|m| {
+            if m["type"].as_str() != Some("event")
+                || m["event"].as_str() != Some("output")
+            {
+                return None;
+            }
+            let body = &m["body"];
+            if body["category"].as_str() != Some("telemetry")
+                || body["output"].as_str() != Some("plc/varCatalog")
+            {
+                return None;
+            }
+            Some(&body["data"])
+        })
+        .collect();
+
+    assert!(
+        !catalog_events.is_empty(),
+        "Expected at least one plc/varCatalog telemetry event after launch"
+    );
+    let catalog = catalog_events[0];
+    assert_eq!(catalog["schema"].as_u64(), Some(1));
+    let vars = catalog["variables"].as_array().unwrap();
+    let names: Vec<&str> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("Main.x")),
+        "Expected 'Main.x' in catalog, got: {names:?}"
+    );
+}
+
+#[test]
+fn test_cycle_stats_force_flush_on_step() {
+    // SIMPLE_PROGRAM has 3 statements. Three step-overs are enough to step
+    // through the whole cycle and trigger the wrap-around path, which marks
+    // a cycle as completed and triggers the post-loop force-flush — even
+    // though 1 cycle is far below the periodic interval (default 20).
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(4, "next", Some(json!({ "threadId": 1 }))),
+            dap_request(5, "next", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "next", Some(json!({ "threadId": 1 }))),
+            dap_request(7, "disconnect", None),
+        ],
+    );
+
+    let payloads = find_cycle_stats_payloads(&messages);
+    assert!(
+        !payloads.is_empty(),
+        "Expected force-flushed plc/cycleStats event after stepping through a full cycle"
+    );
+    // The flush should reflect exactly one completed cycle (not 20+).
+    let last = payloads.last().unwrap();
+    let count = last["cycle_count"].as_u64().unwrap_or(0);
+    assert!(
+        count >= 1 && count < 20,
+        "Force-flushed event should fire below the periodic interval, got cycle_count={count}"
+    );
+}
+
+#[test]
+fn test_cycle_stats_invariants_after_continue() {
+    // Note: with the interruptible run loop, a queued Disconnect interrupts
+    // Continue after exactly one cycle, so we don't get multiple periodic
+    // emissions in this test setup. We test the post-loop force-flush
+    // payload's invariants instead, which is the same code path.
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(4, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(5, "disconnect", None),
+        ],
+    );
+
+    let payloads = find_cycle_stats_payloads(&messages);
+    assert!(!payloads.is_empty(), "Expected at least one telemetry event");
+
+    let last = payloads.last().unwrap();
+    let cycle_count = last["cycle_count"].as_u64().unwrap();
+    let min_us = last["min_us"].as_u64().unwrap();
+    let max_us = last["max_us"].as_u64().unwrap();
+    let avg_us = last["avg_us"].as_u64().unwrap();
+    let last_us = last["last_us"].as_u64().unwrap();
+
+    assert!(cycle_count >= 1, "Expected ≥1 cycle, got {cycle_count}");
+    assert!(
+        min_us <= avg_us,
+        "Invariant: min ({min_us}) ≤ avg ({avg_us})"
+    );
+    assert!(
+        avg_us <= max_us,
+        "Invariant: avg ({avg_us}) ≤ max ({max_us})"
+    );
+    assert!(
+        last_us <= max_us,
+        "Invariant: last ({last_us}) ≤ max ({max_us})"
+    );
 }
 
 #[test]

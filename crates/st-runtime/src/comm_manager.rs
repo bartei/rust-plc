@@ -131,6 +131,22 @@ impl CommManager {
     pub fn device_count(&self) -> usize {
         self.device_entries.len()
     }
+
+    /// Returns `(healthy, error)` counts based on each device's `is_connected()`.
+    /// Used by diagnostic surfaces (status bar, monitor server) without exposing
+    /// the device list itself.
+    pub fn health_counts(&self) -> (u32, u32) {
+        let mut ok = 0u32;
+        let mut err = 0u32;
+        for entry in &self.device_entries {
+            if entry.device.is_connected() {
+                ok += 1;
+            } else {
+                err += 1;
+            }
+        }
+        (ok, err)
+    }
 }
 
 impl Default for CommManager {
@@ -161,5 +177,114 @@ fn vm_value_to_io_value(vm: &Value, data_type: FieldDataType) -> IoValue {
             }
         }
         _ => IoValue::Int(vm.as_int()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vm::{Vm, VmConfig};
+    use st_comm_api::{
+        AcyclicRequest, AcyclicResponse, CommError, DeviceDiagnostics, DeviceProfile, IoValues,
+    };
+    use st_ir::{MemoryLayout, Module};
+    use std::sync::{Arc, Mutex};
+
+    /// Minimal CommDevice stub for testing CommManager bookkeeping. Carries
+    /// only the bits relevant to `health_counts()`.
+    struct StubDevice {
+        name: String,
+        connected: bool,
+        profile: DeviceProfile,
+    }
+
+    impl StubDevice {
+        fn new(name: &str, connected: bool) -> Self {
+            Self {
+                name: name.to_string(),
+                connected,
+                profile: DeviceProfile {
+                    name: name.to_string(),
+                    vendor: None,
+                    protocol: None,
+                    description: None,
+                    fields: vec![],
+                },
+            }
+        }
+    }
+
+    impl CommDevice for StubDevice {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn protocol(&self) -> &str {
+            "stub"
+        }
+        fn configure(&mut self, _: &serde_yaml::Value) -> Result<(), CommError> {
+            Ok(())
+        }
+        fn bind_link(
+            &mut self,
+            _: Arc<Mutex<dyn st_comm_api::CommLink>>,
+        ) -> Result<(), CommError> {
+            Ok(())
+        }
+        fn device_profile(&self) -> &DeviceProfile {
+            &self.profile
+        }
+        fn read_inputs(&mut self) -> Result<IoValues, CommError> {
+            Ok(IoValues::new())
+        }
+        fn write_outputs(&mut self, _: &IoValues) -> Result<(), CommError> {
+            Ok(())
+        }
+        fn acyclic_request(
+            &mut self,
+            _: AcyclicRequest,
+        ) -> Result<AcyclicResponse, CommError> {
+            Ok(AcyclicResponse {
+                success: true,
+                data: vec![],
+                error: None,
+            })
+        }
+        fn is_connected(&self) -> bool {
+            self.connected
+        }
+        fn diagnostics(&self) -> DeviceDiagnostics {
+            DeviceDiagnostics {
+                connected: self.connected,
+                ..Default::default()
+            }
+        }
+    }
+
+    fn empty_vm() -> Vm {
+        let module = Module {
+            functions: vec![],
+            globals: MemoryLayout::default(),
+            type_defs: vec![],
+        };
+        Vm::new(module, VmConfig::default())
+    }
+
+    #[test]
+    fn health_counts_empty_manager() {
+        let mgr = CommManager::new();
+        assert_eq!(mgr.device_count(), 0);
+        assert_eq!(mgr.health_counts(), (0, 0));
+    }
+
+    #[test]
+    fn health_counts_mixed_devices() {
+        let vm = empty_vm();
+        let mut mgr = CommManager::new();
+        mgr.register_device(Box::new(StubDevice::new("ok_a", true)), "ok_a", &vm);
+        mgr.register_device(Box::new(StubDevice::new("ok_b", true)), "ok_b", &vm);
+        mgr.register_device(Box::new(StubDevice::new("down", false)), "down", &vm);
+
+        assert_eq!(mgr.device_count(), 3);
+        assert_eq!(mgr.health_counts(), (2, 1));
     }
 }

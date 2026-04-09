@@ -4,7 +4,7 @@
 //! device profiles, generates ST source for the device globals, and starts
 //! a web UI per simulated device.
 
-use st_comm_api::{write_io_map_file, CommConfig, DeviceProfile, IoValue};
+use st_comm_api::{write_io_map_file, CommConfig, DeviceProfile, EngineProjectConfig, IoValue};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -14,6 +14,20 @@ pub struct CommSetup {
     pub profiles: HashMap<String, DeviceProfile>,
     pub io_map_path: PathBuf,
     pub device_states: Vec<DeviceState>,
+    pub engine: EngineProjectConfig,
+}
+
+/// Standalone loader for the optional `engine:` section. Used when there's no
+/// comm config (or no devices) but we still want project-wide engine settings
+/// like `cycle_time` to apply.
+pub fn load_engine_config(project_root: &Path) -> EngineProjectConfig {
+    let Some(yaml_path) = find_project_yaml(project_root) else {
+        return EngineProjectConfig::default();
+    };
+    let Ok(yaml_text) = std::fs::read_to_string(&yaml_path) else {
+        return EngineProjectConfig::default();
+    };
+    EngineProjectConfig::from_project_yaml(&yaml_text).unwrap_or_default()
 }
 
 pub struct DeviceState {
@@ -32,6 +46,7 @@ pub fn load_for_project(project_root: &Path) -> Result<Option<CommSetup>, String
         .map_err(|e| format!("Cannot read {}: {e}", yaml_path.display()))?;
 
     let config = CommConfig::from_project_yaml(&yaml_text)?;
+    let engine = EngineProjectConfig::from_project_yaml(&yaml_text).unwrap_or_default();
     if config.devices.is_empty() {
         return Ok(None);
     }
@@ -54,6 +69,7 @@ pub fn load_for_project(project_root: &Path) -> Result<Option<CommSetup>, String
         profiles,
         io_map_path,
         device_states: Vec::new(),
+        engine,
     }))
 }
 

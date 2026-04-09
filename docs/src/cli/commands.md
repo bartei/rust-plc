@@ -114,6 +114,11 @@ Executed 100 cycle(s) in 1.8ms (avg 18µs/cycle, 112 instructions)
 - **Global variables persist** across scan cycles
 - **FB instance state persists** across calls
 - **Timers use wall-clock time** via `SYSTEM_TIME()`
+- **Configurable scan cycle period** via `engine.cycle_time` in
+  `plc-project.yaml` — see [Project Configuration](./project-configuration.md).
+  When set, the engine sleeps after each cycle so the loop runs at the
+  configured rate (10ms, 1ms, etc.) just like a real PLC. When omitted, runs
+  as fast as the CPU allows.
 
 ## `st-cli compile`
 
@@ -222,7 +227,7 @@ This is typically invoked by the VSCode extension when you press F5, not called 
 | Step In | Step into function/FB calls (`F11`) |
 | Step Over | Step over one statement (`F10`) |
 | Step Out | Run until current function returns (`Shift+F11`) |
-| Continue | Run across scan cycles until a breakpoint is hit (`F5`) |
+| Continue | Run scan cycles until a breakpoint is hit or user pauses (`F5`). The toolbar switches to a Pause button while running. |
 | Stack Trace | View the full call stack including nested POU calls |
 | Scopes | Inspect Locals and Globals scopes |
 | Variables | View all variables with types and current values |
@@ -238,9 +243,15 @@ This is typically invoked by the VSCode extension when you press F5, not called 
 | `scanCycleInfo` | Show cycle statistics |
 
 **Key behaviors:**
-- Continue runs across scan cycles (up to 100,000) until a breakpoint hits
+- Continue runs across scan cycles indefinitely until the user pauses, sets a
+  breakpoint, or disconnects — same as a real PLC. A 10-million-cycle safety
+  cap guards against runaway loops in tests and CI.
 - Step at end of cycle wraps to the next cycle
 - PROGRAM locals and FB state persist across cycles
+- The DAP run loop is interruptible: Pause, Disconnect, and SetBreakpoints
+  take effect mid-run; new breakpoints become active on the next cycle.
+- If `engine.cycle_time` is set in `plc-project.yaml`, the DAP loop honors it
+  (sleeps in interruptible 10ms chunks between cycles)
 - 4 VSCode debug toolbar buttons: Force, Unforce, List Forced, Cycle Info
 
 ## `st-cli help`

@@ -776,7 +776,8 @@ aren't blocking the first end-to-end demo.
   - [x] Direction-aware I/O: only read input fields, only write output fields
   - [ ] Register value scaling (raw register ↔ engineering units via `scale`)
   - [ ] Multi-rate scheduling: per-device `cycle_time` with independent timers
-  - [ ] Auto-generate `CommDiag` fields per device (connected, error, etc.)
+  - [ ] Auto-generate `CommDiag` fields per device (connected, error, etc.) —
+        see "Diagnostics exposure" subsection below for the agreed design
   - [ ] Connection monitoring and automatic reconnection with backoff
   - [ ] Diagnostics exposed via monitor server
 - [x] **Engine + CLI + DAP integration**:
@@ -809,6 +810,301 @@ aren't blocking the first end-to-end demo.
       on port 8081, plus a `main.st` showing digital passthrough, analog
       passthrough, and a VFD start/stop interlock
 - [ ] **Documentation**: simulated device quickstart + "How to create a device profile"
+
+#### Phase 13a.1: Diagnostics Exposure (HMI / SCADA integration)
+
+Goal: provide a reliable, convenient, well-documented way for FUXA, Node-RED,
+and similar HMI/SCADA tools to read device diagnostics. Two-layer design — one
+ground truth (ST globals), one convenience layer (HTTP JSON).
+
+**Layer 1 — diagnostics as auto-generated ST globals (ground truth)**
+- [ ] At `CommManager::register_device()`, reserve six diag globals per device
+      using the existing `{device}_{field}` flat-naming convention:
+      - `{device}_diag_connected`    : BOOL   (responding this cycle)
+      - `{device}_diag_error`        : BOOL   (last transaction failed)
+      - `{device}_diag_error_count`  : UDINT  (cumulative errors)
+      - `{device}_diag_cycles_ok`    : UDINT  (successful scan cycles)
+      - `{device}_diag_last_resp_ms` : UINT   (last round-trip time)
+      - `{device}_diag_last_update`  : UDINT  (engine cycle of last good I/O)
+- [ ] After `write_outputs()` in the scan cycle, call `device.diagnostics()`
+      and write the six fields onto their reserved global slots
+- [ ] `_io_map.st` emits a trailing `--- DIAGNOSTICS ---` block per device so
+      LSP / semantic checker / user ST code all see the diag globals
+- [ ] Same treatment for links: `{link}_link_is_open`, `{link}_link_bytes_sent`,
+      `{link}_link_bytes_received`, `{link}_link_errors` (deferred until real
+      `CommLink` implementations exist in Phase 13b)
+- [ ] Engine-level globals: `engine_cycle_count`, `engine_last_cycle_us`,
+      `engine_min_cycle_us`, `engine_max_cycle_us`, `engine_avg_cycle_us`
+- [ ] Unit test: globals exist after `register_device`, get updated each cycle,
+      readable from ST code (e.g., `IF NOT io_rack_diag_connected THEN ...`)
+
+**Layer 2 — HTTP `/api/diagnostics` JSON endpoint (convenience layer)**
+- [ ] New `st-diag-server` (or fold into `st-monitor`) running on a SEPARATE
+      port from the monitor WebSocket — declared in `plc-project.yaml`:
+      ```yaml
+      diagnostics:
+        port: 9090
+        bind: 127.0.0.1
+      ```
+      Separate port because HMIs and the monitor UI have different auth/CORS
+      profiles down the line.
+- [ ] `GET /api/diagnostics` — full snapshot:
+      ```json
+      {
+        "schema": "1",
+        "ts_ms": 1775692800123,
+        "engine":  { "cycle_count": ..., "last_us": ..., "min_us": ...,
+                     "max_us": ..., "avg_us": ... },
+        "links":   { "<link>": { "is_open": ..., "bytes_sent": ..., ... } },
+        "devices": { "<device>": { "protocol": ..., "profile": ...,
+                                    "connected": ..., "error": ...,
+                                    "error_count": ..., "successful_cycles": ...,
+                                    "last_response_ms": ..., "last_error": ...,
+                                    "last_update_cycle": ... } }
+      }
+      ```
+- [ ] `GET /api/diagnostics/devices/{name}` — single device
+- [ ] `GET /api/diagnostics/summary` — `{ healthy, device_count,
+      connected_count, error_count }` for a single "system OK" lamp
+- [ ] Stable `"schema": "1"` field so HMI configs survive future changes
+- [ ] Read-only endpoint, no auth in v1 — bind to `127.0.0.1` by default
+
+**Layer 3 — documentation (`docs/comm/diagnostics.md`)**
+- [ ] Field-by-field reference for the six diag fields (units, semantics,
+      when `connected` flips, update timing relative to scan cycle)
+- [ ] ST code example: alarm + watchdog using `*_diag_connected`
+- [ ] `/api/diagnostics` schema reference + versioning policy
+- [ ] **Node-RED quickstart**: example flow JSON polling `/api/diagnostics`
+      with an `inject` → `http request` → `json` → `switch` → notification
+- [ ] **FUXA quickstart**: Web API device pointed at `/api/diagnostics` with
+      tag bindings + a 4-lamp connection panel screenshot
+- [ ] Cross-link from Phase 13a quickstart so users find it from day one
+
+#### Phase 13a.2: VS Code Cycle-Time Feedback
+
+Goal: give users live, glanceable feedback about scan cycle health while they
+debug, using DAP custom events + native VS Code primitives.
+
+**Tier 1 — fix `scanCycleInfo` and route DAP through real cycle stats**
+- [x] **Bug**: `handle_cycle_info` reported `cycle_count = 0` because the DAP
+      ran its own scan loop bypassing `Engine::run_one_cycle()`
+- [x] DAP session now owns its own `CycleStats` and times each cycle in
+      `step_one_dap_iteration` (the refactored loop body)
+- [x] `handle_cycle_info` reports real `cycle_count`, `last_us`, `min_us`,
+      `max_us`, `avg_us`, `instructions/cycle`, watchdog margin
+
+**Tier 2 — live status bar via `plc/cycleStats` custom DAP event**
+- [x] DAP server emits cycle stats every N cycles (default 20). The dap crate
+      doesn't expose custom event variants, so we piggy-back on standard
+      `output` events with `category: telemetry`, `output: "plc/cycleStats"`,
+      and the structured payload in `data`
+- [x] VS Code extension subscribes via `registerDebugAdapterTrackerFactory`
+      (telemetry events don't surface through `onDidReceiveDebugSessionCustomEvent`)
+- [x] `StatusBarItem` (Right alignment) renders:
+      `$(pulse) PLC  142µs  #1,241  98µs/310µs  ●●`
+- [x] Background → warning above 75% of watchdog, error above 100%
+- [x] Click target: `structured-text.openMonitor`
+- [x] Hide the StatusBarItem when no `st`-type debug session is active
+
+**Interactive Continue + configurable cycle time** (added in this session — was
+implicit in Tier 1 design but became its own work item):
+- [x] `engine.cycle_time` parsed from `plc-project.yaml` via
+      `EngineProjectConfig::from_project_yaml` (st-comm-api)
+- [x] `Engine::run` honors `EngineConfig.cycle_time` — sleeps `target - elapsed`
+      after each cycle so wall time matches the configured period
+- [x] DAP session loads `engine.cycle_time` at launch and enforces the same
+      period in its run loop, with `interruptible_sleep` (10ms chunks polling
+      the request channel)
+- [x] **Removed the 100k-cycle hard cap** in DAP Continue mode so debug
+      sessions match every other PLC IDE: Continue runs until the user pauses,
+      sets a breakpoint, or disconnects. A 10M-cycle safety net guards against
+      runaway loops in tests
+- [x] DAP run loop is interruptible: dedicated reader thread + mpsc channel,
+      `process_inflight_requests` drains the channel between cycles, Pause /
+      Disconnect / SetBreakpoints take effect mid-run, all other requests are
+      queued and processed after `resume_execution` returns
+
+**Tier 3 — dedicated "PLC Scan Cycle" tree view**
+- [ ] `contributes.views` under the `debug` view container
+- [ ] `TreeDataProvider` fed from the same `plc/cycleStats` events
+- [ ] Rows: cycle count, last/min/max/avg, watchdog margin, instructions/cycle,
+      per-device leaves (●/○ connected, last RTT)
+
+**Tier 4 — CodeLens + watchdog Diagnostic**
+- [ ] CodeLens above each `PROGRAM` / `FUNCTION_BLOCK` / `FUNCTION` header
+      showing `⏱ Nµs last · Mµs max` (program-level only until Tier 6 lands)
+- [ ] Watchdog budget read from `plc-project.yaml` (`engine.watchdog_ms`)
+- [ ] When `last_us > budget`, push `DiagnosticSeverity.Warning` onto the POU
+      header line so it shows in the Problems panel + as a squiggle
+
+**Tier 5 — MonitorPanel sparkline**
+- [ ] Add a "Cycle time" card to `editors/vscode/src/monitorPanel.ts`
+- [ ] Rolling sparkline (last 300 cycles), histogram (10µs buckets), max/
+      watchdog markers — sourced from `plc/cycleStats` telemetry
+
+**Tier 6 — per-POU profiling (stretch)**
+- [ ] VM tracks per-POU `call_count` + `total_time_ns` keyed by function index
+- [ ] DAP custom event `plc/poStats` carries the table
+- [ ] CodeLens upgraded to per-POU timing
+- [ ] MonitorPanel "Top POUs by time" table
+
+**Tier 7 — watchdog breakpoint (stretch)**
+- [ ] `launch.json` option `"breakOnWatchdog": true`
+- [ ] DAP emits `Stopped { reason: "exception", description: "watchdog ..." }`
+      on overrun, dropping the user into the offending frame
+
+**Cycle period + jitter tracking** (added in this session):
+- [x] `CycleStats` gains `last_cycle_period`, `min_cycle_period`,
+      `max_cycle_period`, `jitter_max` (period = wall-clock between consecutive
+      cycle starts; cycle time = pure VM execution)
+- [x] `Engine.run_one_cycle` measures the period via a `previous_cycle_start`
+      Instant and updates `jitter_max = max(|period - target|)`
+- [x] DAP mirrors the same tracking via `step_one_dap_iteration`, with
+      `previous_cycle_start` reset on Halt so user think-time doesn't pollute
+      the measurement
+- [x] `scanCycleInfo` REPL shows period + jitter
+- [x] `plc/cycleStats` telemetry payload (schema v2+) carries `target_us`,
+      `last_period_us`, `min_period_us`, `max_period_us`, `jitter_max_us`
+- [x] Status bar tooltip shows target/period/jitter when a `cycle_time` is set
+- [x] Engine + DAP tests assert period stats are populated and jitter stays
+      small relative to the target
+- [x] Documentation: `cli/project-configuration.md` "Jitter" section explains
+      what jitter is, where it's surfaced, and how to interpret it for
+      time-sensitive control loops
+
+**`avg_cycle_time` overflow + scope_refs leak fixes** (added in this session):
+- [x] **Bug**: `avg_cycle_time` cast `cycle_count: u64` to `u32` for the
+      Duration division, wrapping after 4.29 billion cycles (~71 minutes at
+      1µs/cycle) — fixed via u128 division. Regression test added.
+- [x] **Leak**: `scope_refs` HashMap in DapSession grew unboundedly across
+      pause/resume cycles — fixed by clearing on `resume_execution` per DAP
+      spec ("variable references invalid after Continued").
+
+**`Continue` no longer freezes the play/pause button** (added in this session):
+- [x] **Bug**: `handle_request` for Continue called the blocking
+      `resume_execution` then returned the response. VS Code never received
+      the Continue response in time to flip the play button to pause.
+- [x] **Fix**: `is_resume_command()` detection in `run_dap`'s main loop sends
+      the Continue/Step response and flushes it BEFORE entering the run loop.
+      VS Code transitions to "running" state immediately; the yellow highlight
+      clears.
+
+**Live event streaming during Continue** (added in this session):
+- [x] **Bug**: telemetry events (and any other `pending_events`) only got
+      flushed to the wire AFTER `resume_execution` returned, so the status
+      bar and Monitor panel were frozen during long Continue runs.
+- [x] **Fix**: `resume_execution` now takes a `writer: &mut DapWriter<W>`
+      parameter and drains `pending_events` to the wire on every cycle
+      completion inside the loop.
+- [x] `cycle_event_interval` is now computed from `engine.cycle_time` to
+      target ~500ms between updates regardless of cycle period (10ms cycle →
+      every 50, 100ms cycle → every 5, etc.). Free-run defaults to every 20.
+
+#### Phase 13a.3: Live Variable Monitor + Siemens-Style Watch Tables
+
+Goal: a Codesys/TwinCAT/TIA Portal-grade variable monitor that streams live
+values during a debug session, with a user-managed watch list that scales
+to projects with hundreds of I/O points.
+
+**Subscription model + watch list** (this session):
+- [x] DAP `DapSession.watched_variables: Vec<String>` — telemetry only ships
+      values for variables in this list, so projects with hundreds of I/O
+      points don't waste 100KB/s on unused data
+- [x] Evaluate REPL commands: `addWatch <var>`, `removeWatch <var>`,
+      `watchVariables a,b,c`, `clearWatch`, `varCatalog`
+- [x] Each watch mutation triggers an immediate `push_cycle_stats_event` so
+      the panel updates instantly without waiting for the next 500ms tick
+- [x] `Vm::monitorable_catalog()` enumerates globals + every PROGRAM POU's
+      declared locals from the **module schema** (not runtime state), so the
+      catalog is complete even before the first cycle has run
+- [x] `plc/varCatalog` telemetry event pushed once per launch with
+      `[{name, type}, ...]`. Used by the Monitor panel to populate its
+      autocomplete dropdown
+- [x] `Vm::monitorable_variables()` returns globals + PROGRAM retained locals
+      namespaced as `Main.x`, `Pump.speed`, etc. (PROGRAM locals persist
+      across cycles like globals do, conceptually)
+
+**Monitor panel UX** (this session):
+- [x] Full rewrite using `postMessage` for incremental DOM updates → zero
+      flicker at 500ms refresh rate
+- [x] Watch list table with autocomplete add input, per-row Force input, per-row
+      Remove button, "Clear all" button
+- [x] HTML5 `<datalist>` autocomplete sourced from the catalog — type a few
+      letters of any variable, suggestions appear, hit Enter to add
+- [x] Per-workspace persistence via `vscode.ExtensionContext.workspaceState`
+      keyed on workspace folder path. Watch list survives panel close,
+      window reload, and VS Code restart
+- [x] On a new debug session, the persisted watch list is re-issued to the
+      DAP via `watchVariables a,b,c`
+- [x] Force/Unforce buttons wire to the DAP's existing
+      `evaluate("force x = 42")` REPL — no more `prompt()` modal
+- [x] Live cycle stats (cycles, last/min/max/avg, target, period, jitter) —
+      updated from the same `plc/cycleStats` events at ~500ms cadence
+- [x] Tests: `test_watch_list_flow` (addWatch round-trip),
+      `test_var_catalog_emitted_on_launch` (catalog presence + content)
+
+**Siemens TIA Portal-style Watch Tables** (future):
+
+In TIA Portal, a "Watch table" is a named collection of variables with
+per-row metadata (display format, comment, modify value, trigger). Users
+create multiple tables for different subsystems (e.g. "Pumps", "Conveyor",
+"Diagnostics") and switch between them in tabs. This is the gold standard
+for industrial PLC monitoring and the natural next step after the basic
+watch list.
+
+- [ ] **Multiple named watch tables**: rename "Watch List" to "Watch Tables"
+      with a tab strip at the top. Each tab is a named table (default: "Main")
+- [ ] **Per-table persistence**: storage key changes from
+      `plcMonitor.watchList:<workspace>` to
+      `plcMonitor.watchTables:<workspace>` with the value being
+      `{ tables: { "<name>": WatchTable }, activeTable: "<name>" }`
+- [ ] **WatchTable schema**:
+      ```ts
+      interface WatchTableEntry {
+        name: string;             // ST variable name (e.g. "io_rack.DI_0")
+        comment?: string;         // user-supplied annotation
+        displayFormat?: "dec" | "hex" | "bin" | "bool" | "ascii" | "float";
+        modifyValue?: string;     // pre-typed value for one-click force
+        triggerExpression?: string; // optional: only show / capture when this is true
+      }
+      interface WatchTable {
+        name: string;
+        entries: WatchTableEntry[];
+        description?: string;     // shown as a tooltip on the tab
+      }
+      ```
+- [ ] **Comment column** in the table UI — editable inline, persisted
+      immediately on blur
+- [ ] **Display format selector** per row (dropdown: dec/hex/bin/bool/ascii/float).
+      Format is applied client-side in the panel; the wire format stays
+      decimal so we don't bloat the telemetry payload
+- [ ] **Modify column**: per-row text input pre-loaded with `modifyValue`,
+      so a one-click "Modify" button forces the variable to a known
+      pre-configured value (e.g. always force a setpoint to 100). Useful
+      for commissioning and step-test workflows
+- [ ] **Tab strip**: New / Rename / Duplicate / Delete table operations,
+      drag-to-reorder
+- [ ] **Import / Export**: serialize tables to a `.plc-watch.json` file in
+      the project root so teams can share watch tables in version control
+- [ ] **Compatibility with TIA Portal**: import `.tww` (Watch Table) files
+      via a small parser — converts Siemens addressing (e.g. `%MW100`) to
+      our flat `device.field` namespace where possible
+- [ ] **DAP wire protocol**: extend `watchVariables` to accept a richer
+      payload (`watchVariablesV2 [{name, displayFormat}, ...]`) so the DAP
+      knows about display preferences and can format values server-side
+      for types where the panel can't (e.g. STRING, custom STRUCTs)
+- [ ] **Trigger expressions** (advanced): evaluate a boolean ST expression
+      between cycles; only sample the table when it's true. Lets users
+      capture state at a specific moment without setting a breakpoint
+- [ ] **Snapshot / Compare**: button to capture the current values into a
+      "snapshot" stored alongside the table. Side-by-side compare with
+      live values, highlighting differences. Critical for regression
+      testing controller behavior changes
+- [ ] **Charting view**: secondary tab on each table that plots numeric
+      variables over time using a sparkline / line chart. Reuses the
+      cycle stats sparkline plumbing from Phase 13a.2 Tier 5
+- [ ] Documentation: `docs/src/cli/watch-tables.md` quickstart with
+      screenshots and a TIA-Portal-comparison cheat sheet
 
 #### Phase 13b: Real Protocol Implementations
 

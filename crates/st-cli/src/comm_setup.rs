@@ -4,7 +4,7 @@
 //! profiles, generates ST source code for the device globals, instantiates
 //! simulated devices, and starts a web UI for each one.
 
-use st_comm_api::{write_io_map_file, CommConfig, DeviceProfile};
+use st_comm_api::{write_io_map_file, CommConfig, DeviceProfile, EngineProjectConfig};
 use st_comm_sim::SimulatedDevice;
 use st_runtime::Engine;
 use std::collections::HashMap;
@@ -28,6 +28,20 @@ pub struct DeviceState {
     pub name: String,
     pub profile: DeviceProfile,
     pub state: Arc<Mutex<HashMap<String, st_comm_api::IoValue>>>,
+}
+
+/// Load the optional `engine:` section from `plc-project.yaml`. Returns the
+/// default (empty) config if there is no project YAML, no `engine:` section,
+/// or the file is unreadable. Used for cycle-time and other project-wide
+/// engine settings — independent of whether comm devices are configured.
+pub fn load_engine_config(project_root: &Path) -> EngineProjectConfig {
+    let Some(yaml_path) = find_project_yaml(project_root) else {
+        return EngineProjectConfig::default();
+    };
+    let Ok(yaml_text) = std::fs::read_to_string(&yaml_path) else {
+        return EngineProjectConfig::default();
+    };
+    EngineProjectConfig::from_project_yaml(&yaml_text).unwrap_or_default()
 }
 
 /// Load comm config from `plc-project.yaml` in the given project root and

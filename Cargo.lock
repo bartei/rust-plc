@@ -1048,6 +1048,7 @@ name = "st-runtime"
 version = "0.1.1"
 dependencies = [
  "serde",
+ "serde_yaml",
  "st-comm-api",
  "st-compiler",
  "st-ir",

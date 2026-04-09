@@ -303,6 +303,138 @@ fn cycle_stats_tracked() {
 }
 
 #[test]
+fn avg_cycle_time_does_not_overflow_past_u32_max() {
+    // Regression: the original implementation cast cycle_count to u32 for
+    // the Duration division, which silently wrapped after 4.29 billion
+    // cycles (~71 minutes at 1µs/cycle). For an indefinite debug session
+    // this produced garbage averages. Verify the u128-backed implementation
+    // returns sensible numbers well past u32::MAX.
+    use std::time::Duration;
+    let stats = CycleStats {
+        cycle_count: u32::MAX as u64 + 100, // ≈ 4.29 billion + 100
+        last_cycle_time: Duration::from_micros(1),
+        min_cycle_time: Duration::from_nanos(500),
+        max_cycle_time: Duration::from_micros(2),
+        // Each cycle averages 1µs → total = cycle_count µs.
+        total_time: Duration::from_micros(u32::MAX as u64 + 100),
+        ..Default::default()
+    };
+    let avg = stats.avg_cycle_time();
+    // Expected: ~1µs ± rounding. The buggy version returned values in the
+    // millisecond range (or zero, depending on the overflow direction).
+    assert!(
+        avg >= Duration::from_nanos(900) && avg <= Duration::from_nanos(1100),
+        "Expected avg ≈ 1µs, got {avg:?}"
+    );
+}
+
+#[test]
+fn period_and_jitter_tracked_with_cycle_time() {
+    use std::time::Duration;
+    let source = "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    x := x + 1;\nEND_PROGRAM\n";
+    let parse_result = st_syntax::parse(source);
+    let module = st_compiler::compile(&parse_result.source_file).unwrap();
+    let target = Duration::from_millis(20);
+    let config = EngineConfig {
+        max_cycles: 10,
+        cycle_time: Some(target),
+        ..Default::default()
+    };
+    let mut engine = Engine::new(module, "Main".to_string(), config);
+    engine.run().unwrap();
+
+    let stats = engine.stats();
+    assert_eq!(stats.cycle_count, 10);
+
+    // Period stats must be populated after ≥2 cycles.
+    assert!(
+        stats.last_cycle_period > Duration::ZERO,
+        "last_cycle_period should be > 0: {:?}",
+        stats.last_cycle_period
+    );
+    assert!(
+        stats.min_cycle_period <= stats.max_cycle_period,
+        "min_period ({:?}) should be ≤ max_period ({:?})",
+        stats.min_cycle_period,
+        stats.max_cycle_period
+    );
+
+    // Periods should be close to the 20ms target.
+    assert!(
+        stats.min_cycle_period >= Duration::from_millis(18),
+        "min_period ({:?}) should be close to 20ms target",
+        stats.min_cycle_period
+    );
+    assert!(
+        stats.max_cycle_period <= Duration::from_millis(50),
+        "max_period ({:?}) should not wildly exceed the 20ms target",
+        stats.max_cycle_period
+    );
+
+    // Jitter should be small relative to the target (under 10ms on any
+    // reasonable scheduler). This is a loose bound — tight timing is
+    // hardware-dependent and not testable in a CI runner.
+    assert!(
+        stats.jitter_max < Duration::from_millis(10),
+        "jitter_max ({:?}) should be < 10ms for a 20ms target",
+        stats.jitter_max
+    );
+}
+
+#[test]
+fn period_stats_populated_in_free_run() {
+    let source = "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    x := x + 1;\nEND_PROGRAM\n";
+    let parse_result = st_syntax::parse(source);
+    let module = st_compiler::compile(&parse_result.source_file).unwrap();
+    let config = EngineConfig {
+        max_cycles: 100,
+        // No cycle_time → free-run mode.
+        ..Default::default()
+    };
+    let mut engine = Engine::new(module, "Main".to_string(), config);
+    engine.run().unwrap();
+
+    let stats = engine.stats();
+    // In free-run mode, period stats should still be tracked.
+    assert!(stats.last_cycle_period > std::time::Duration::ZERO);
+    assert!(stats.min_cycle_period <= stats.max_cycle_period);
+    // Jitter stays at zero because there's no target to deviate from.
+    assert_eq!(stats.jitter_max, std::time::Duration::ZERO);
+}
+
+#[test]
+fn engine_run_honors_cycle_time() {
+    use std::time::{Duration, Instant};
+    let source = "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    x := x + 1;\nEND_PROGRAM\n";
+    let parse_result = st_syntax::parse(source);
+    let module = st_compiler::compile(&parse_result.source_file).unwrap();
+    let config = EngineConfig {
+        max_cycles: 5,
+        cycle_time: Some(Duration::from_millis(50)),
+        ..Default::default()
+    };
+    let mut engine = Engine::new(module, "Main".to_string(), config);
+
+    let started = Instant::now();
+    engine.run().unwrap();
+    let total = started.elapsed();
+
+    // 5 cycles × 50ms target = 250ms minimum. The engine starts each cycle
+    // immediately on completing the previous one's sleep, so the first
+    // cycle's wait happens BEFORE termination — total ≈ 5 × 50ms.
+    // We allow generous slack for scheduler jitter (up to +200ms).
+    assert!(
+        total >= Duration::from_millis(250),
+        "Expected ≥250ms wall time for 5×50ms cycles, got {total:?}"
+    );
+    assert!(
+        total < Duration::from_millis(1500),
+        "Expected <1.5s wall time, got {total:?} (cycle_time sleep is wildly off)"
+    );
+    assert_eq!(engine.stats().cycle_count, 5);
+}
+
+#[test]
 fn single_cycle_execution() {
     let source = "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    x := x + 1;\nEND_PROGRAM\n";
     let parse_result = st_syntax::parse(source);

@@ -7,50 +7,241 @@ use dap::responses::{ResponseBody, ResponseMessage};
 use dap::types::*;
 use st_comm_api::CommDevice;
 use st_ir::PouKind;
+use dap::base_message::Sendable;
 use st_runtime::comm_manager::CommManager;
 use st_runtime::debug::{PauseReason, StepMode};
+use st_runtime::engine::CycleStats;
 use st_runtime::vm::{Vm, VmConfig, VmError};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::comm_setup;
 
-/// Run the DAP server on the given reader/writer.
-pub fn run_dap<R: Read, W: Write>(input: R, output: W, source_path: &str) {
-    let mut server = Server::new(BufReader::new(input), BufWriter::new(output));
-    let mut session = DapSession::new(source_path);
+/// Read one DAP-framed message (`Content-Length: N\r\n\r\n<json>`) from the
+/// given buffered reader and parse it as a `Request`. Returns `Ok(None)` on
+/// EOF. Used both by the production reader thread and the in-process tests.
+fn read_dap_request<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Request>> {
+    let mut content_length: usize = 0;
+    let mut line = String::new();
 
-    // Log to stderr for development debugging
+    // Header section: read lines until we hit the empty separator line.
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            return Ok(None); // EOF
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some(rest) = trimmed.strip_prefix("Content-Length:") {
+            content_length = rest.trim().parse().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Bad Content-Length: {e}"),
+                )
+            })?;
+        }
+        // Other headers are ignored — we only care about Content-Length.
+    }
+
+    if content_length == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Missing or zero Content-Length",
+        ));
+    }
+
+    let mut body = vec![0u8; content_length];
+    reader.read_exact(&mut body)?;
+    let req: Request = serde_json::from_slice(&body).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Invalid DAP JSON: {e}"),
+        )
+    })?;
+    Ok(Some(req))
+}
+
+/// DAP message writer. Owns the output buffer + sequence counter. Mirrors
+/// the wire format of `dap::ServerOutput::send` so VS Code accepts it.
+struct DapWriter<W: Write> {
+    out: BufWriter<W>,
+    seq: i64,
+}
+
+impl<W: Write> DapWriter<W> {
+    fn new(output: W) -> Self {
+        Self {
+            out: BufWriter::new(output),
+            seq: 0,
+        }
+    }
+
+    fn send(&mut self, body: Sendable) -> std::io::Result<()> {
+        self.seq += 1;
+        let message = dap::base_message::BaseMessage {
+            seq: self.seq,
+            message: body,
+        };
+        let json = serde_json::to_string(&message).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Serialize failed: {e}"))
+        })?;
+        write!(self.out, "Content-Length: {}\r\n\r\n", json.len())?;
+        write!(self.out, "{json}\r\n")?;
+        self.out.flush()
+    }
+
+    fn respond(&mut self, response: Response) -> std::io::Result<()> {
+        self.send(Sendable::Response(response))
+    }
+
+    fn send_event(&mut self, event: Event) -> std::io::Result<()> {
+        self.send(Sendable::Event(event))
+    }
+}
+
+/// Run the DAP server on the given reader/writer.
+///
+/// Architecture: a dedicated reader thread owns the input stream and pushes
+/// parsed `Request`s onto an mpsc channel. The main thread owns the writer
+/// and the `DapSession`, blocks on `recv()` for the next request, and after
+/// each `handle_request` call drains any deferred requests/responses that
+/// the (interruptible) run loop accumulated.
+pub fn run_dap<R, W>(input: R, output: W, source_path: &str)
+where
+    R: Read + Send + 'static,
+    W: Write,
+{
+    let (req_tx, req_rx) = mpsc::channel::<Request>();
+    let mut writer = DapWriter::new(output);
+    let mut session = DapSession::new(source_path);
+    session.set_request_rx(req_rx);
+
     eprintln!("[DAP] Server started for: {source_path}");
 
-    loop {
-        let req = match server.poll_request() {
-            Ok(Some(req)) => req,
-            Ok(None) => {
-                eprintln!("[DAP] Client disconnected (EOF)");
-                break;
+    // Spawn the reader thread. It owns the input stream, parses framed DAP
+    // messages, and pushes them onto the channel until EOF or a parse error.
+    let _reader_handle = thread::spawn(move || {
+        let mut reader = BufReader::new(input);
+        loop {
+            match read_dap_request(&mut reader) {
+                Ok(Some(req)) => {
+                    if req_tx.send(req).is_err() {
+                        // Receiver dropped — main loop has exited.
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    eprintln!("[DAP] Reader thread: EOF");
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("[DAP] Reader thread: read error: {e}");
+                    break;
+                }
             }
-            Err(e) => {
-                eprintln!("[DAP] Read error: {e}");
-                break;
+        }
+    });
+
+    // Main loop: pull requests from the channel, handle them, send responses
+    // and any pending events. The session may have queued additional
+    // requests/responses while running cycles inside resume_execution; drain
+    // those after each top-level handle_request returns.
+    loop {
+        // Block on next request. Scoped so the immutable borrow ends before
+        // we call session.handle_request below.
+        let req = {
+            let rx = match session.request_rx.as_ref() {
+                Some(rx) => rx,
+                None => {
+                    eprintln!("[DAP] No request receiver");
+                    break;
+                }
+            };
+            match rx.recv() {
+                Ok(r) => r,
+                Err(_) => {
+                    eprintln!("[DAP] Request channel closed");
+                    break;
+                }
             }
         };
 
         eprintln!("[DAP] Request: {:?}", req.command);
+        let is_resume = DapSession::is_resume_command(&req.command);
 
+        // For resume commands (Continue, Step, etc.) we MUST send the
+        // response BEFORE the blocking run loop starts, so VS Code can
+        // transition to "running" state immediately — flipping the
+        // play/pause button and clearing the yellow highlight.
         let response = session.handle_request(&req);
-
         eprintln!("[DAP] Response: success={}", response.success);
-
-        if server.respond(response).is_err() {
+        if writer.respond(response).is_err() {
             eprintln!("[DAP] Failed to send response");
             break;
         }
 
+        // Flush any events generated during handle_request (Stopped on
+        // entry, Initialized, console output, etc.) BEFORE the run loop.
         for event in session.pending_events.drain(..) {
             eprintln!("[DAP] Event: {event:?}");
-            if server.send_event(event).is_err() {
+            if writer.send_event(event).is_err() {
                 eprintln!("[DAP] Failed to send event");
                 break;
+            }
+        }
+
+        if is_resume {
+            // Now enter the blocking run loop. The response is already
+            // sent, so VS Code is in "running" state. resume_execution
+            // streams telemetry events to the writer in real time; the
+            // Stopped / Terminated event left over in pending_events is
+            // flushed here after it returns.
+            session.handle_resume(&req.command, &mut writer);
+
+            // Send events generated at loop exit (Stopped, Terminated,
+            // final telemetry force-flush).
+            for event in session.pending_events.drain(..) {
+                eprintln!("[DAP] Event: {event:?}");
+                if writer.send_event(event).is_err() {
+                    eprintln!("[DAP] Failed to send event");
+                    break;
+                }
+            }
+        }
+
+        // Drain responses generated inline during a run loop (e.g.,
+        // SetBreakpoints applied while running).
+        for resp in session.deferred_responses.drain(..) {
+            if writer.respond(resp).is_err() {
+                eprintln!("[DAP] Failed to send deferred response");
+                break;
+            }
+        }
+
+        // Drain requests received during a run loop. Process each one as if
+        // it had arrived through the normal main-loop flow — this generates
+        // their proper responses (and any follow-on events).
+        let deferred: Vec<Request> = session.deferred_requests.drain(..).collect();
+        for d in deferred {
+            eprintln!("[DAP] Deferred request: {:?}", d.command);
+            let resp = session.handle_request(&d);
+            if writer.respond(resp).is_err() {
+                eprintln!("[DAP] Failed to send deferred response");
+                break;
+            }
+            for event in session.pending_events.drain(..) {
+                if writer.send_event(event).is_err() {
+                    break;
+                }
+            }
+            // Inflight handlers may also have queued more responses
+            for resp in session.deferred_responses.drain(..) {
+                let _ = writer.respond(resp);
             }
         }
 
@@ -59,10 +250,8 @@ pub fn run_dap<R: Read, W: Write>(input: R, output: W, source_path: &str) {
             break;
         }
     }
-    // Ensure all output is flushed
-    // The dap crate's Server holds a BufWriter that may not flush on drop
-    // in all edge cases. We extract and explicitly flush here.
-    std::mem::drop(server);
+    // Make sure stdout is flushed before we drop everything.
+    drop(writer);
 }
 
 fn ok(seq: i64, body: ResponseBody) -> Response {
@@ -94,6 +283,57 @@ fn console_output(msg: &str) -> Event {
     })
 }
 
+/// Build a `plc/cycleStats` telemetry event. We piggy-back on DAP's standard
+/// `output` event with `category: telemetry` so we don't need to patch the
+/// `dap` crate; the VS Code extension picks the payload up via a
+/// `DebugAdapterTracker`. The `output` field carries a stable sentinel string
+/// the tracker matches against, and `data` carries the structured payload.
+fn cycle_stats_event(
+    stats: &CycleStats,
+    instructions_per_cycle: u64,
+    devices_ok: u32,
+    devices_err: u32,
+    watchdog_us: Option<u64>,
+    target_cycle_time: Option<Duration>,
+    variables: &[serde_json::Value],
+) -> Event {
+    let to_us = |d: Duration| d.as_micros() as u64;
+    let min_us = if stats.min_cycle_time == Duration::MAX {
+        0
+    } else {
+        to_us(stats.min_cycle_time)
+    };
+    let min_period_us = if stats.min_cycle_period == Duration::MAX {
+        0
+    } else {
+        to_us(stats.min_cycle_period)
+    };
+    let payload = serde_json::json!({
+        "schema": 3,
+        "cycle_count": stats.cycle_count,
+        "last_us": to_us(stats.last_cycle_time),
+        "min_us": min_us,
+        "max_us": to_us(stats.max_cycle_time),
+        "avg_us": to_us(stats.avg_cycle_time()),
+        "instructions_per_cycle": instructions_per_cycle,
+        "watchdog_us": watchdog_us,
+        "devices_ok": devices_ok,
+        "devices_err": devices_err,
+        "target_us": target_cycle_time.map(|d| to_us(d)),
+        "last_period_us": to_us(stats.last_cycle_period),
+        "min_period_us": min_period_us,
+        "max_period_us": to_us(stats.max_cycle_period),
+        "jitter_max_us": to_us(stats.jitter_max),
+        "variables": variables,
+    });
+    Event::Output(OutputEventBody {
+        category: Some(OutputEventCategory::Telemetry),
+        output: "plc/cycleStats".to_string(),
+        data: Some(payload),
+        ..Default::default()
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ScopeKind {
     Locals,
@@ -120,6 +360,49 @@ struct DapSession {
     comm: CommManager,
     /// Comm setup data (config, profiles, generated source) loaded from plc-project.yaml.
     comm_setup: Option<comm_setup::CommSetup>,
+    /// Live scan cycle statistics (populated by the DAP run loop).
+    cycle_stats: CycleStats,
+    /// Instant the *currently in-flight* scan cycle started, or `None` between
+    /// cycles. A single logical cycle may span multiple `vm.run` /
+    /// `vm.continue_execution` calls when breakpoints are hit, so this is
+    /// only set when a fresh cycle begins and only cleared when it completes.
+    current_cycle_start: Option<Instant>,
+    /// Instructions executed during the current in-flight cycle (kept across
+    /// breakpoint pauses; reset when a new cycle starts).
+    current_cycle_instructions: u64,
+    /// Cycles executed since the last `plc/cycleStats` telemetry event.
+    cycles_since_last_event: u32,
+    /// Emit a telemetry event every N cycles. 0 disables periodic emission.
+    cycle_event_interval: u32,
+    /// Watchdog budget in microseconds, surfaced in telemetry payloads. Future
+    /// versions will read this from `plc-project.yaml`.
+    watchdog_us: Option<u64>,
+    /// Tracks when the previous scan cycle started (for period / jitter
+    /// calculation). Reset to `None` when the run loop exits via Halt so
+    /// user-pause time doesn't pollute the measurement.
+    previous_cycle_start: Option<Instant>,
+    /// User's watch list — only these variables are snapshot into the
+    /// telemetry payload's `variables` array. Empty list means "send no
+    /// variables" (the user hasn't picked any to watch yet). Sending all
+    /// variables every 500ms doesn't scale to projects with hundreds of
+    /// I/O points, so the panel must opt-in.
+    watched_variables: Vec<String>,
+    /// Target scan cycle period from `engine.cycle_time` in plc-project.yaml.
+    /// `None` means "run as fast as possible". When set, the DAP run loop
+    /// sleeps `target - elapsed` between cycles in interruptible chunks.
+    target_cycle_time: Option<Duration>,
+    /// Receiver half of the request channel. Set by `run_dap` after the
+    /// reader thread is spawned. The DAP run loop polls this between cycles
+    /// to remain interruptible by `Pause`, `Disconnect`, `SetBreakpoints`,
+    /// and other client requests during a long Continue.
+    request_rx: Option<mpsc::Receiver<Request>>,
+    /// Requests received during a run loop. Drained and processed by the
+    /// outer `run_dap` loop after `resume_execution` returns.
+    deferred_requests: Vec<Request>,
+    /// Responses generated inline during a run loop (e.g., for SetBreakpoints
+    /// applied while the program is executing). Sent by `run_dap` after
+    /// `resume_execution` returns.
+    deferred_responses: Vec<Response>,
 }
 
 impl DapSession {
@@ -138,7 +421,61 @@ impl DapSession {
             next_var_ref: 1000,
             comm: CommManager::new(),
             comm_setup: None,
+            cycle_stats: CycleStats {
+                min_cycle_time: Duration::MAX,
+                min_cycle_period: Duration::MAX,
+                ..Default::default()
+            },
+            current_cycle_start: None,
+            current_cycle_instructions: 0,
+            cycles_since_last_event: 0,
+            cycle_event_interval: 20,
+            watchdog_us: None,
+            previous_cycle_start: None,
+            watched_variables: Vec::new(),
+            target_cycle_time: None,
+            request_rx: None,
+            deferred_requests: Vec::new(),
+            deferred_responses: Vec::new(),
         }
+    }
+
+    /// Install the request channel receiver. Called by `run_dap` after the
+    /// reader thread is spawned. Without a receiver the run loop falls back
+    /// to non-interactive mode (legacy test path).
+    pub fn set_request_rx(&mut self, rx: mpsc::Receiver<Request>) {
+        self.request_rx = Some(rx);
+    }
+
+    /// Returns true if the command is a "resume" command (Continue, Next,
+    /// StepIn, StepOut) whose response must be sent BEFORE the blocking
+    /// run loop starts. This lets VS Code transition to "running" state
+    /// immediately so the play/pause button flips and the yellow highlight
+    /// is removed.
+    fn is_resume_command(cmd: &Command) -> bool {
+        matches!(
+            cmd,
+            Command::Continue(_)
+                | Command::Next(_)
+                | Command::StepIn(_)
+                | Command::StepOut(_)
+        )
+    }
+
+    /// Execute the resume action for a Continue/Step request. Called by the
+    /// main loop AFTER the response has already been sent to VS Code.
+    /// The `writer` is passed through so `resume_execution` can stream
+    /// telemetry events to the wire in real time (every N cycles) rather
+    /// than buffering them until the run loop exits.
+    fn handle_resume<W: Write>(&mut self, cmd: &Command, writer: &mut DapWriter<W>) {
+        let mode = match cmd {
+            Command::Continue(_) => StepMode::Continue,
+            Command::Next(_) => StepMode::StepOver,
+            Command::StepIn(_) => StepMode::StepIn,
+            Command::StepOut(_) => StepMode::StepOut,
+            _ => return,
+        };
+        self.resume_execution(mode, writer);
     }
 
     fn handle_request(&mut self, req: &Request) -> Response {
@@ -167,24 +504,19 @@ impl DapSession {
             Command::StackTrace(args) => self.handle_stack_trace(seq, args),
             Command::Scopes(args) => self.handle_scopes(seq, args),
             Command::Variables(args) => self.handle_variables(seq, args),
+            // Resume commands (Continue/Step) are handled specially by the
+            // run_dap main loop: the response is sent BEFORE calling
+            // resume_execution, so VS Code can transition to "running" state
+            // immediately and flip the play/pause button. The main loop
+            // detects these via is_resume_command() and calls handle_resume().
             Command::Continue(_) => {
-                self.resume_execution(StepMode::Continue);
                 ok(seq, ResponseBody::Continue(dap::responses::ContinueResponse {
                     all_threads_continued: Some(true),
                 }))
             }
-            Command::Next(_) => {
-                self.resume_execution(StepMode::StepOver);
-                ok(seq, ResponseBody::Next)
-            }
-            Command::StepIn(_) => {
-                self.resume_execution(StepMode::StepIn);
-                ok(seq, ResponseBody::StepIn)
-            }
-            Command::StepOut(_) => {
-                self.resume_execution(StepMode::StepOut);
-                ok(seq, ResponseBody::StepOut)
-            }
+            Command::Next(_) => ok(seq, ResponseBody::Next),
+            Command::StepIn(_) => ok(seq, ResponseBody::StepIn),
+            Command::StepOut(_) => ok(seq, ResponseBody::StepOut),
             Command::Pause(_) => {
                 if let Some(ref mut vm) = self.vm {
                     vm.debug_mut().pause();
@@ -246,6 +578,21 @@ impl DapSession {
                     setup.config.devices.len(),
                     setup.io_map_path.display(),
                 )));
+                self.target_cycle_time = setup.engine.cycle_time;
+            } else {
+                // No comm devices, but the engine section may still exist.
+                self.target_cycle_time = comm_setup::load_engine_config(root).cycle_time;
+            }
+            if let Some(ct) = self.target_cycle_time {
+                self.pending_events.push(console_output(&format!(
+                    "Engine cycle time: {ct:?}"
+                )));
+                // Compute telemetry emission interval so updates arrive
+                // roughly every 500ms regardless of cycle_time. For a 10ms
+                // cycle that's every 50 cycles; for a 100ms cycle, every 5.
+                // Floor at 1 so we always emit at least once per cycle.
+                let target_ms = ct.as_millis().max(1) as u32;
+                self.cycle_event_interval = (500 / target_ms).max(1);
             }
 
             // Multi-file project mode — pass the project ROOT directory
@@ -438,6 +785,12 @@ impl DapSession {
         });
         // Read device inputs into globals before the very first instruction halts.
         self.comm.read_inputs(&mut vm);
+        vm.reset_instruction_count();
+        // Do NOT stamp current_cycle_start here. The entry stop is a
+        // debugger-only phase — the user may sit at it for seconds before
+        // clicking Continue. If we stamped now, the first cycle's elapsed
+        // time would include all that think-time. The actual cycle start
+        // will be stamped by step_one_dap_iteration when execution begins.
         let _ = vm.run(&program_name); // Err(Halt) expected
 
         self.vm = Some(vm);
@@ -451,6 +804,11 @@ impl DapSession {
             all_threads_stopped: Some(true),
             hit_breakpoint_ids: None,
         }));
+
+        // Push the variable catalog so the Monitor panel can populate its
+        // autocomplete dropdown without having to receive every variable's
+        // value on every cycle.
+        self.push_var_catalog_event();
 
         ok(seq, ResponseBody::Launch)
     }
@@ -656,6 +1014,28 @@ impl DapSession {
         if expr.eq_ignore_ascii_case("listForced") || expr.eq_ignore_ascii_case("forced") {
             return self.handle_list_forced(seq);
         }
+        // watchVariables a,b,c — replace the watch list (comma-separated)
+        if let Some(rest) = expr.strip_prefix("watchVariables ") {
+            return self.handle_watch_replace(seq, rest);
+        }
+        // addWatch <var>
+        if let Some(rest) = expr.strip_prefix("addWatch ") {
+            return self.handle_watch_add(seq, rest.trim());
+        }
+        // removeWatch <var>
+        if let Some(rest) = expr.strip_prefix("removeWatch ") {
+            return self.handle_watch_remove(seq, rest.trim());
+        }
+        // clearWatch
+        if expr.eq_ignore_ascii_case("clearWatch") {
+            self.watched_variables.clear();
+            return self.eval_text_response(seq, "Watch list cleared");
+        }
+        // varCatalog — request a fresh catalog of all monitorable vars
+        if expr.eq_ignore_ascii_case("varCatalog") {
+            self.push_var_catalog_event();
+            return self.eval_text_response(seq, "Catalog pushed");
+        }
 
         // Normal variable lookup
         let mut result_str = "<unknown>".to_string();
@@ -682,6 +1062,97 @@ impl DapSession {
             indexed_variables: None,
             memory_reference: None,
         }))
+    }
+
+    /// Helper: build a textual evaluate response.
+    fn eval_text_response(&self, seq: i64, text: &str) -> Response {
+        ok(seq, ResponseBody::Evaluate(dap::responses::EvaluateResponse {
+            result: text.to_string(),
+            type_field: None,
+            presentation_hint: None,
+            variables_reference: 0,
+            named_variables: None,
+            indexed_variables: None,
+            memory_reference: None,
+        }))
+    }
+
+    fn handle_watch_replace(&mut self, seq: i64, csv: &str) -> Response {
+        let names: Vec<String> = csv
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        let count = names.len();
+        self.watched_variables = names;
+        // Push a fresh telemetry snapshot so the panel shows the new
+        // watch list immediately rather than waiting for the next tick.
+        self.push_cycle_stats_event();
+        self.eval_text_response(seq, &format!("Watching {count} variable(s)"))
+    }
+
+    fn handle_watch_add(&mut self, seq: i64, name: &str) -> Response {
+        if name.is_empty() {
+            return self.eval_text_response(seq, "Usage: addWatch <variable>");
+        }
+        if !self
+            .watched_variables
+            .iter()
+            .any(|v| v.eq_ignore_ascii_case(name))
+        {
+            self.watched_variables.push(name.to_string());
+        }
+        self.push_cycle_stats_event();
+        self.eval_text_response(seq, &format!("Now watching '{name}'"))
+    }
+
+    fn handle_watch_remove(&mut self, seq: i64, name: &str) -> Response {
+        if name.is_empty() {
+            return self.eval_text_response(seq, "Usage: removeWatch <variable>");
+        }
+        let before = self.watched_variables.len();
+        self.watched_variables
+            .retain(|v| !v.eq_ignore_ascii_case(name));
+        let removed = before - self.watched_variables.len();
+        self.push_cycle_stats_event();
+        if removed > 0 {
+            self.eval_text_response(seq, &format!("Stopped watching '{name}'"))
+        } else {
+            self.eval_text_response(seq, &format!("'{name}' was not in the watch list"))
+        }
+    }
+
+    /// Push a `plc/varCatalog` telemetry event listing every monitorable
+    /// variable's name and type. Used by the Monitor panel to populate
+    /// its autocomplete dropdown without having to receive every variable
+    /// value on every cycle.
+    fn push_var_catalog_event(&mut self) {
+        let catalog: Vec<serde_json::Value> = self
+            .vm
+            .as_ref()
+            .map(|vm| {
+                vm.monitorable_catalog()
+                    .iter()
+                    .map(|(name, ty)| {
+                        serde_json::json!({
+                            "name": name,
+                            "type": ty,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let payload = serde_json::json!({
+            "schema": 1,
+            "variables": catalog,
+        });
+        self.pending_events.push(Event::Output(OutputEventBody {
+            category: Some(OutputEventCategory::Telemetry),
+            output: "plc/varCatalog".to_string(),
+            data: Some(payload),
+            ..Default::default()
+        }));
     }
 
     fn handle_force_command(&mut self, seq: i64, expr: &str) -> Response {
@@ -752,10 +1223,49 @@ impl DapSession {
     }
 
     fn handle_cycle_info(&self, seq: i64) -> Response {
-        let result = if let Some(ref vm) = self.vm {
-            format!("Scan cycles: {} | Instructions: {}",
-                0, // cycle count tracked by engine, not VM directly
-                vm.instruction_count()
+        let result = if self.vm.is_some() {
+            let s = &self.cycle_stats;
+            let to_us = |d: Duration| d.as_micros();
+            let min_us = if s.min_cycle_time == Duration::MAX {
+                0
+            } else {
+                to_us(s.min_cycle_time)
+            };
+            let watchdog = match self.watchdog_us {
+                Some(w) => format!("{w}µs"),
+                None => "disabled".into(),
+            };
+            let jitter = if s.jitter_max > Duration::ZERO {
+                format!("{}µs", to_us(s.jitter_max))
+            } else if self.target_cycle_time.is_some() {
+                "0µs".into()
+            } else {
+                "n/a (no cycle_time target)".into()
+            };
+            let period = if s.last_cycle_period > Duration::ZERO {
+                let min_p = if s.min_cycle_period == Duration::MAX {
+                    0
+                } else {
+                    to_us(s.min_cycle_period)
+                };
+                format!(
+                    " | period: {}µs (min/max: {}µs / {}µs)",
+                    to_us(s.last_cycle_period),
+                    min_p,
+                    to_us(s.max_cycle_period),
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                "Scan cycles: {} | Instructions/cycle: {} | last: {}µs | min/max/avg: {}µs / {}µs / {}µs | jitter: {jitter}{period} | watchdog: {}",
+                s.cycle_count,
+                self.current_cycle_instructions,
+                to_us(s.last_cycle_time),
+                min_us,
+                to_us(s.max_cycle_time),
+                to_us(s.avg_cycle_time()),
+                watchdog,
             )
         } else {
             "No program running".into()
@@ -792,151 +1302,465 @@ impl DapSession {
         }))
     }
 
-    fn resume_execution(&mut self, mode: StepMode) {
+    /// Apply a completed cycle's elapsed time + instruction count into
+    /// `cycle_stats`. Called after the resume loop releases its borrows on
+    /// `self.vm` and `self.comm`. If the periodic threshold is reached, also
+    /// pushes a `plc/cycleStats` telemetry event.
+    fn record_completed_cycle(
+        &mut self,
+        elapsed: Duration,
+        instructions: u64,
+        cycle_started: Instant,
+    ) {
+        self.cycle_stats.cycle_count += 1;
+        self.cycle_stats.last_cycle_time = elapsed;
+        self.cycle_stats.total_time += elapsed;
+        if elapsed < self.cycle_stats.min_cycle_time {
+            self.cycle_stats.min_cycle_time = elapsed;
+        }
+        if elapsed > self.cycle_stats.max_cycle_time {
+            self.cycle_stats.max_cycle_time = elapsed;
+        }
+        self.current_cycle_instructions = instructions;
+
+        // Period tracking: wall-clock interval between consecutive cycle starts.
+        if let Some(prev) = self.previous_cycle_start {
+            let period = cycle_started.duration_since(prev);
+            self.cycle_stats.last_cycle_period = period;
+            if period < self.cycle_stats.min_cycle_period {
+                self.cycle_stats.min_cycle_period = period;
+            }
+            if period > self.cycle_stats.max_cycle_period {
+                self.cycle_stats.max_cycle_period = period;
+            }
+            if let Some(target) = self.target_cycle_time {
+                let dev = if period > target {
+                    period - target
+                } else {
+                    target - period
+                };
+                if dev > self.cycle_stats.jitter_max {
+                    self.cycle_stats.jitter_max = dev;
+                }
+            }
+        }
+        self.previous_cycle_start = Some(cycle_started);
+
+        self.cycles_since_last_event = self.cycles_since_last_event.saturating_add(1);
+        if self.cycle_event_interval > 0
+            && self.cycles_since_last_event >= self.cycle_event_interval
+        {
+            self.cycles_since_last_event = 0;
+            self.push_cycle_stats_event();
+        }
+    }
+
+    /// Push a `plc/cycleStats` telemetry event reflecting the latest stats,
+    /// including a snapshot of *watched* variable values for the Monitor
+    /// panel. Variables outside `watched_variables` are NOT included — the
+    /// panel must opt-in via `addWatch` so we don't ship hundreds of values
+    /// every 500ms in projects with lots of I/O points.
+    fn push_cycle_stats_event(&mut self) {
+        let (devices_ok, devices_err) = self.comm.health_counts();
+        let variables: Vec<serde_json::Value> = if self.watched_variables.is_empty() {
+            Vec::new()
+        } else {
+            self.vm
+                .as_ref()
+                .map(|vm| {
+                    let all = vm.monitorable_variables();
+                    self.watched_variables
+                        .iter()
+                        .filter_map(|name| {
+                            all.iter()
+                                .find(|v| v.name.eq_ignore_ascii_case(name))
+                                .map(|v| {
+                                    serde_json::json!({
+                                        "name": v.name,
+                                        "value": v.value,
+                                        "type": v.ty,
+                                    })
+                                })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        self.pending_events.push(cycle_stats_event(
+            &self.cycle_stats,
+            self.current_cycle_instructions,
+            devices_ok,
+            devices_err,
+            self.watchdog_us,
+            self.target_cycle_time,
+            &variables,
+        ));
+    }
+
+    /// One iteration of the DAP run loop. Either continues an in-flight
+    /// program (vm.continue_execution) or starts a fresh scan cycle. The
+    /// borrow split on `self.vm`/`self.comm` is scoped to this function so
+    /// the outer loop has full `&mut self` access between calls.
+    ///
+    /// `cycle_start` tracks the wall-clock at which the *currently in-flight*
+    /// scan cycle began. It is `Some` while a cycle is mid-execution
+    /// (possibly across multiple breakpoint pauses) and `None` between
+    /// cycles. A fresh-cycle iteration stamps it; a completed-cycle iteration
+    /// consumes it.
+    fn step_one_dap_iteration(
+        &mut self,
+        mode: StepMode,
+        program_name: &str,
+        cycle_start: &mut Option<Instant>,
+    ) -> CycleStep {
+        let comm = &mut self.comm;
+        let vm = self.vm.as_mut().unwrap();
+
+        let result = if vm.call_depth() > 0 {
+            // Continuing from a previous halt (breakpoint, entry stop, step).
+            // Ensure cycle_start is set so we measure actual VM time, not
+            // user think-time since the Stopped event.
+            if cycle_start.is_none() {
+                *cycle_start = Some(Instant::now());
+            }
+            vm.continue_execution()
+        } else {
+            // Start of a fresh scan cycle: pull device inputs into VM globals.
+            comm.read_inputs(vm);
+            vm.debug_mut().resume_with_source(mode, 0, 0);
+            vm.reset_instruction_count();
+            let now = Instant::now();
+            *cycle_start = Some(now);
+            vm.run(program_name)
+        };
+
+        match result {
+            Err(VmError::Halt) => CycleStep::Halted,
+            Ok(_) => {
+                comm.write_outputs(vm);
+                let started = cycle_start.take().unwrap_or_else(Instant::now);
+                let elapsed = started.elapsed();
+                let instructions = vm.instruction_count();
+                CycleStep::Completed { elapsed, instructions, cycle_started: started }
+            }
+            Err(e) => CycleStep::Error(format!("{e}")),
+        }
+    }
+
+    /// Build the textual `func_name line N` description for the topmost
+    /// stack frame. Used in Stopped events and console output.
+    fn current_frame_description(&self) -> String {
+        let Some(ref vm) = self.vm else {
+            return "<unknown>".to_string();
+        };
+        vm.stack_frames()
+            .first()
+            .map(|f| {
+                let src = self
+                    .func_source_map
+                    .get(&f.func_name)
+                    .map(|(_, c)| c.as_str())
+                    .unwrap_or(&self.source);
+                let (line, _) = byte_offset_to_line_col(src, f.source_offset);
+                format!("{} line {line}", f.func_name)
+            })
+            .unwrap_or_else(|| "<unknown>".to_string())
+    }
+
+    /// Push a Stopped event reflecting the VM's current pause reason.
+    fn push_halt_stopped_event(&mut self) {
+        let pause_reason = self
+            .vm
+            .as_ref()
+            .map(|vm| vm.debug_state().pause_reason)
+            .unwrap_or(PauseReason::None);
+        let frame_desc = self.current_frame_description();
+        eprintln!("[DAP] Halted: reason={pause_reason:?} at {frame_desc}");
+
+        let reason = match pause_reason {
+            PauseReason::Breakpoint => StoppedEventReason::Breakpoint,
+            PauseReason::Step => StoppedEventReason::Step,
+            PauseReason::PauseRequest => StoppedEventReason::Pause,
+            PauseReason::Entry => StoppedEventReason::Entry,
+            PauseReason::None => StoppedEventReason::Step,
+        };
+        self.pending_events.push(console_output(&format!(
+            "Stopped: {pause_reason:?} at {frame_desc}"
+        )));
+        self.pending_events.push(Event::Stopped(StoppedEventBody {
+            reason,
+            description: Some(format!("Stopped at {frame_desc}")),
+            thread_id: Some(1),
+            preserve_focus_hint: None,
+            text: None,
+            all_threads_stopped: Some(true),
+            hit_breakpoint_ids: None,
+        }));
+    }
+
+    /// Push a runtime error message + Terminated event.
+    fn push_runtime_error(&mut self, msg: &str) {
+        eprintln!("[DAP] Runtime error: {msg}");
+        self.pending_events.push(Event::Output(OutputEventBody {
+            category: Some(OutputEventCategory::Stderr),
+            output: format!("Runtime error: {msg}\n"),
+            ..Default::default()
+        }));
+        self.pending_events.push(Event::Terminated(None));
+    }
+
+    /// Drain incoming requests from the channel without blocking. Pause is
+    /// applied inline (sets the VM's pause flag). Disconnect is reported via
+    /// the return value. SetBreakpoints is applied inline so a breakpoint
+    /// added during a long Continue takes effect immediately. All other
+    /// requests are queued onto `self.deferred_requests` for the outer
+    /// `run_dap` loop to process after `resume_execution` returns.
+    fn process_inflight_requests(&mut self) -> InflightAction {
+        let mut action = InflightAction::default();
+
+        // Drain everything currently buffered. We don't loop blocking — the
+        // outer run loop calls this between cycles only.
+        loop {
+            let req = match self
+                .request_rx
+                .as_ref()
+                .and_then(|rx| rx.try_recv().ok())
+            {
+                Some(req) => req,
+                None => break,
+            };
+            eprintln!("[DAP] Inflight request: {:?}", req.command);
+            match &req.command {
+                Command::Pause(_) => {
+                    if let Some(ref mut vm) = self.vm {
+                        vm.debug_mut().pause();
+                    }
+                    action.pause_requested = true;
+                    self.deferred_requests.push(req);
+                }
+                Command::Disconnect(_) => {
+                    action.disconnect_requested = true;
+                    self.deferred_requests.push(req);
+                }
+                Command::SetBreakpoints(args) => {
+                    let response = self.handle_set_breakpoints(req.seq, args);
+                    self.deferred_responses.push(response);
+                }
+                _ => {
+                    self.deferred_requests.push(req);
+                }
+            }
+        }
+        action
+    }
+
+    /// Sleep for `target` while remaining responsive to incoming requests.
+    /// Returns true if a Pause/Disconnect was processed during the sleep
+    /// (caller should bail out of its run loop).
+    fn interruptible_sleep(&mut self, target: Duration) -> bool {
+        const CHUNK: Duration = Duration::from_millis(10);
+        let deadline = Instant::now() + target;
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let remaining = deadline - now;
+            let chunk = if remaining < CHUNK { remaining } else { CHUNK };
+            std::thread::sleep(chunk);
+            let action = self.process_inflight_requests();
+            if action.disconnect_requested || action.pause_requested {
+                return true;
+            }
+        }
+    }
+
+    fn resume_execution<W: Write>(&mut self, mode: StepMode, writer: &mut DapWriter<W>) {
         if self.vm.is_none() {
             eprintln!("[DAP] resume_execution: no VM");
             return;
         }
-        // Disjoint borrows so we can use both `vm` and `comm` in the loop below.
-        let comm = &mut self.comm;
-        let vm = self.vm.as_mut().unwrap();
 
-        let depth = vm.call_depth();
-        let current_source_offset = vm.stack_frames()
-            .first()
-            .map(|f| f.source_offset)
-            .unwrap_or(0);
+        // Per the DAP spec, variable references issued via the previous
+        // `Scopes` request become invalid as soon as execution resumes. Drop
+        // them now so the HashMap doesn't grow unboundedly across thousands
+        // of pause/resume cycles in a long debug session. The next `Scopes`
+        // request after the next Stopped event will allocate fresh refs.
+        self.scope_refs.clear();
 
-        eprintln!("[DAP] resume: mode={mode:?} depth={depth} source_offset={current_source_offset}");
-        vm.debug_mut().resume_with_source(mode, depth, current_source_offset);
+        // Setup: tell the VM what stepping mode we're in and where we are.
+        let (depth, current_source_offset, program_name) = {
+            let vm = self.vm.as_mut().unwrap();
+            let depth = vm.call_depth();
+            let offset = vm
+                .stack_frames()
+                .first()
+                .map(|f| f.source_offset)
+                .unwrap_or(0);
+            vm.debug_mut().resume_with_source(mode, depth, offset);
+            let program_name = vm
+                .module()
+                .functions
+                .iter()
+                .find(|f| f.kind == PouKind::Program)
+                .map(|f| f.name.clone())
+                .unwrap_or_default();
+            (depth, offset, program_name)
+        };
+        eprintln!(
+            "[DAP] resume: mode={mode:?} depth={depth} source_offset={current_source_offset}"
+        );
 
-        let program_name = vm
-            .module()
-            .functions
-            .iter()
-            .find(|f| f.kind == PouKind::Program)
-            .map(|f| f.name.clone())
-            .unwrap_or_default();
+        let mut cycle_start = self.current_cycle_start.take();
+        let mut current_mode = mode;
+        let mut any_completed = false;
+        let mut cycles_in_this_resume: u64 = 0;
 
-        // Run cycles until the VM halts (breakpoint/step) or errors out.
-        // In Continue mode, this may run many scan cycles before a breakpoint hits.
-        // In Step modes, it stops after one statement.
-        let max_cycles = if mode == StepMode::Continue { 100_000 } else { 1 };
-        let mut cycles = 0u64;
+        // Safety cap: even though Continue is meant to run "until the user
+        // stops", we don't want a runaway loop in a test or a malformed
+        // program to consume unbounded RAM (pending_events grows during the
+        // run since nothing drains it until we return). Ten million cycles
+        // is ~10s at 1µs/cycle — well above any interactive use, low enough
+        // to fail fast in CI.
+        const SAFETY_CYCLE_CAP: u64 = 10_000_000;
+        // Likewise, cap pending_events in case telemetry accumulates faster
+        // than the test harness drains it. Old cycle stats are stale; only
+        // the latest matters for the status bar.
+        const PENDING_EVENTS_SOFT_CAP: usize = 1024;
 
         loop {
-            let result = if vm.call_depth() > 0 {
-                vm.continue_execution()
-            } else {
-                // Start of a fresh scan cycle: pull device inputs into VM globals.
-                comm.read_inputs(vm);
-                vm.debug_mut().resume_with_source(mode, 0, 0);
-                vm.run(&program_name)
-            };
+            // Step first, then check for inflight requests. The opposite
+            // order would mean a queued Disconnect (which is the very first
+            // thing the test harness puts in the channel after the run
+            // request) would short-circuit the run before any work happens —
+            // breaking step requests entirely.
+            let outcome =
+                self.step_one_dap_iteration(current_mode, &program_name, &mut cycle_start);
 
-            match result {
-                Err(VmError::Halt) => {
-                    let pause_reason = vm.debug_state().pause_reason;
-                    let frame_desc = vm.stack_frames()
-                        .first()
-                        .map(|f| {
-                            let src = self.func_source_map.get(&f.func_name)
-                                .map(|(_, c)| c.as_str())
-                                .unwrap_or(&self.source);
-                            let (line, _) = byte_offset_to_line_col(src, f.source_offset);
-                            format!("{} line {line}", f.func_name)
-                        })
-                        .unwrap_or_else(|| "<unknown>".to_string());
-                    eprintln!("[DAP] Halted: reason={pause_reason:?} at {frame_desc} (after {cycles} cycles)");
-
-                    let reason = match pause_reason {
-                        PauseReason::Breakpoint => StoppedEventReason::Breakpoint,
-                        PauseReason::Step => StoppedEventReason::Step,
-                        PauseReason::PauseRequest => StoppedEventReason::Pause,
-                        PauseReason::Entry => StoppedEventReason::Entry,
-                        PauseReason::None => StoppedEventReason::Step,
-                    };
-                    self.pending_events.push(console_output(&format!(
-                        "Stopped: {pause_reason:?} at {frame_desc}"
-                    )));
-                    self.pending_events.push(Event::Stopped(StoppedEventBody {
-                        reason,
-                        description: Some(format!("Stopped at {frame_desc}")),
-                        thread_id: Some(1),
-                        preserve_focus_hint: None,
-                        text: None,
-                        all_threads_stopped: Some(true),
-                        hit_breakpoint_ids: None,
-                    }));
+            match outcome {
+                CycleStep::Halted => {
+                    self.push_halt_stopped_event();
                     break;
                 }
-                Ok(_) => {
-                    // Cycle completed — push VM globals out to device outputs.
-                    comm.write_outputs(vm);
-                    cycles += 1;
+                CycleStep::Completed { elapsed, instructions, cycle_started } => {
+                    self.record_completed_cycle(elapsed, instructions, cycle_started);
+                    any_completed = true;
+                    cycles_in_this_resume = cycles_in_this_resume.saturating_add(1);
 
-                    if mode != StepMode::Continue && cycles >= max_cycles {
-                        // Step mode reached end of cycle — start next cycle
-                        // and stop at the first statement (like a wrap-around)
-                        eprintln!("[DAP] Step wrapped to next cycle");
-                        // New scan cycle: read inputs again
-                        comm.read_inputs(vm);
-                        vm.debug_mut().resume_with_source(StepMode::StepIn, 0, 0);
-                        match vm.run(&program_name) {
-                            Err(VmError::Halt) => {
-                                let pause_reason = vm.debug_state().pause_reason;
-                                let frame_desc = vm.stack_frames()
-                                    .first()
-                                    .map(|f| {
-                                        let src = self.func_source_map.get(&f.func_name)
-                                            .map(|(_, c)| c.as_str())
-                                            .unwrap_or(&self.source);
-                                        let (line, _) = byte_offset_to_line_col(src, f.source_offset);
-                                        format!("{} line {line}", f.func_name)
-                                    })
-                                    .unwrap_or_else(|| "<unknown>".to_string());
-                                eprintln!("[DAP] Next cycle stopped at {frame_desc}");
-                                self.pending_events.push(console_output(&format!(
-                                    "Stopped: {pause_reason:?} at {frame_desc}"
-                                )));
-                                self.pending_events.push(Event::Stopped(StoppedEventBody {
-                                    reason: StoppedEventReason::Step,
-                                    description: Some(format!("Stopped at {frame_desc}")),
-                                    thread_id: Some(1),
-                                    preserve_focus_hint: None,
-                                    text: None,
-                                    all_threads_stopped: Some(true),
-                                    hit_breakpoint_ids: None,
-                                }));
-                            }
-                            _ => {
-                                self.pending_events.push(Event::Terminated(None));
-                            }
-                        }
+                    // Flush accumulated events (telemetry, console output) to
+                    // the wire NOW so the VS Code status bar and PLC Monitor
+                    // webview update in real time while the program runs,
+                    // rather than buffering everything until the loop exits.
+                    // Stopped / Terminated events are pushed just before
+                    // `break` and won't be in pending_events at this point.
+                    for event in self.pending_events.drain(..) {
+                        let _ = writer.send_event(event);
+                    }
+
+                    if current_mode != StepMode::Continue {
+                        // Step-mode wrap-around: the user stepped past the
+                        // end of the program. Run one more iteration in
+                        // StepIn mode to halt at the first statement of the
+                        // next cycle, matching the behavior of every other
+                        // PLC IDE.
+                        current_mode = StepMode::StepIn;
+                        continue;
+                    }
+
+                    // Continue mode only: drain incoming requests so the
+                    // run loop is interruptible by Pause/Disconnect/SetBp.
+                    let action = self.process_inflight_requests();
+                    if action.pause_requested {
+                        // We're between scan cycles, so there's no in-flight
+                        // execution to halt — vm.pause() was called by
+                        // process_inflight_requests, and the next iteration's
+                        // fresh-cycle branch would clear the pause flag via
+                        // resume_with_source. Push the Stopped(Pause) event
+                        // here directly to acknowledge the request.
+                        self.push_halt_stopped_event();
+                        break;
+                    }
+                    if action.disconnect_requested {
+                        eprintln!("[DAP] Disconnect during run loop — exiting");
                         break;
                     }
 
-                    if cycles >= 100_000 {
-                        eprintln!("[DAP] Reached max cycles without breakpoint");
-                        self.pending_events.push(console_output("Reached max cycles without breakpoint"));
+                    // Continue mode: enforce the configured cycle period.
+                    if let Some(target) = self.target_cycle_time {
+                        if let Some(remaining) = target.checked_sub(elapsed) {
+                            if !remaining.is_zero() && self.interruptible_sleep(remaining) {
+                                // A Pause/Disconnect arrived during the
+                                // sleep — let the next iteration handle it.
+                                continue;
+                            }
+                        }
+                    } else {
+                        // No cycle-time target → loop runs CPU-bound. Yield
+                        // periodically so the reader thread gets a chance
+                        // to push pending Pause/Disconnect requests.
+                        if cycles_in_this_resume.is_multiple_of(64) {
+                            std::thread::yield_now();
+                        }
+                    }
+
+                    if cycles_in_this_resume >= SAFETY_CYCLE_CAP {
+                        eprintln!(
+                            "[DAP] Safety cap reached ({SAFETY_CYCLE_CAP} cycles in one resume) — terminating"
+                        );
+                        self.pending_events.push(console_output(
+                            "[DAP] Safety cycle cap reached — exiting run loop",
+                        ));
                         self.pending_events.push(Event::Terminated(None));
                         break;
                     }
-                    // Continue to next cycle
                 }
-                Err(e) => {
-                    eprintln!("[DAP] Runtime error after {cycles} cycles: {e}");
-                    self.pending_events.push(Event::Output(OutputEventBody {
-                        category: Some(OutputEventCategory::Stderr),
-                        output: format!("Runtime error: {e}\n"),
-                        ..Default::default()
-                    }));
-                    self.pending_events.push(Event::Terminated(None));
+                CycleStep::Error(msg) => {
+                    self.push_runtime_error(&msg);
                     break;
                 }
             }
         }
+
+        // Preserve any in-flight cycle start so the next resume_execution
+        // call (e.g., resuming from a breakpoint) folds the full cycle's
+        // timing into stats.
+        self.current_cycle_start = cycle_start;
+        // Reset period tracker so user-pause time between the Stopped event
+        // and the next Continue doesn't pollute period / jitter measurements.
+        self.previous_cycle_start = None;
+
+        // Force a fresh status-bar update on every interactive boundary
+        // (breakpoint hit / step) so feedback is instant rather than waiting
+        // for the periodic interval to elapse.
+        if any_completed {
+            self.push_cycle_stats_event();
+        }
     }
+}
+
+/// Outcome of one iteration of the DAP run loop.
+enum CycleStep {
+    /// VM halted (breakpoint, step done, pause request, etc.). Outer loop
+    /// pushes a Stopped event and breaks.
+    Halted,
+    /// One scan cycle ran to completion. Outer loop applies stats, then
+    /// either keeps running (Continue mode) or wraps around to the next
+    /// cycle and halts at the first statement (Step modes).
+    Completed {
+        elapsed: Duration,
+        instructions: u64,
+        /// When this cycle started (for period / jitter tracking).
+        cycle_started: Instant,
+    },
+    /// Runtime error from the VM. Outer loop pushes Terminated and breaks.
+    Error(String),
+}
+
+/// Side-effects of draining incoming requests during a run loop.
+#[derive(Default)]
+struct InflightAction {
+    pause_requested: bool,
+    disconnect_requested: bool,
 }
 
 fn byte_offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {

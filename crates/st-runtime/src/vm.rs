@@ -318,6 +318,69 @@ impl Vm {
             .collect()
     }
 
+    /// Catalog of every variable that the monitor panel COULD watch — names
+    /// and types only, no values. Includes globals + every PROGRAM POU's
+    /// declared local variables (regardless of whether the program has
+    /// actually run yet). Used by the Monitor panel to populate its
+    /// autocomplete at launch time, before the first scan cycle has
+    /// populated `retained_locals`.
+    pub fn monitorable_catalog(&self) -> Vec<(String, String)> {
+        let mut result: Vec<(String, String)> = self
+            .module
+            .globals
+            .slots
+            .iter()
+            .map(|slot| {
+                (
+                    slot.name.clone(),
+                    debug::format_var_type(slot.ty).to_string(),
+                )
+            })
+            .collect();
+        for func in &self.module.functions {
+            if func.kind != st_ir::PouKind::Program {
+                continue;
+            }
+            for slot in &func.locals.slots {
+                result.push((
+                    format!("{}.{}", func.name, slot.name),
+                    debug::format_var_type(slot.ty).to_string(),
+                ));
+            }
+        }
+        result
+    }
+
+    /// All variables suitable for live monitoring: globals + PROGRAM retained
+    /// locals. PROGRAM locals persist across scan cycles (they're saved in
+    /// `retained_locals` at cycle end), so they behave like globals from a
+    /// monitoring perspective. This is the same set a PLC monitor panel
+    /// would display in Codesys or TwinCAT.
+    pub fn monitorable_variables(&self) -> Vec<VariableInfo> {
+        let mut result = self.global_variables();
+        // Add retained locals for every PROGRAM POU.
+        for (func_idx, locals) in &self.retained_locals {
+            let func = &self.module.functions[*func_idx as usize];
+            if func.kind != st_ir::PouKind::Program {
+                continue;
+            }
+            let prefix = &func.name;
+            for (i, slot) in func.locals.slots.iter().enumerate() {
+                let value = locals
+                    .get(i)
+                    .cloned()
+                    .unwrap_or(Value::Void);
+                result.push(VariableInfo {
+                    name: format!("{prefix}.{}", slot.name),
+                    value: debug::format_value(&value),
+                    ty: debug::format_var_type(slot.ty).to_string(),
+                    var_ref: 0,
+                });
+            }
+        }
+        result
+    }
+
     /// Call depth (for stepping logic).
     pub fn call_depth(&self) -> usize {
         self.call_stack.len()
