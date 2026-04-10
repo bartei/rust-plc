@@ -1472,8 +1472,6 @@ impl<'a> LowerCtx<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     fn parse_errors(source: &str) -> Vec<(usize, String)> {
         let result = crate::parse(source);
         result.errors.iter().map(|e| {
