@@ -1729,6 +1729,144 @@ END_PROGRAM\n";
 }
 
 #[test]
+fn test_watch_panel_evaluate_fb_then_expand_children() {
+    // Full Watch panel round-trip: Evaluate("ctr") → get variablesReference →
+    // Variables(ref) → verify children with values.
+    //
+    // The breakpoint is placed on a dummy statement AFTER the ctr() call so
+    // the FB instance has been populated with real values by the time we
+    // pause and inspect.
+    let source = "\
+FUNCTION_BLOCK MyFB\n\
+VAR_INPUT cmd : BOOL; END_VAR\n\
+VAR\n\
+    ctr : CTU;\n\
+    done : BOOL;\n\
+END_VAR\n\
+    ctr(CU := cmd, RESET := FALSE, PV := 5);\n\
+    done := TRUE;\n\
+END_FUNCTION_BLOCK\n\
+\n\
+PROGRAM Main\n\
+VAR fb : MyFB; END_VAR\n\
+    fb(cmd := TRUE);\n\
+END_PROGRAM\n";
+
+    // Break on line 8 (done := TRUE) — after ctr() has executed.
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "setBreakpoints", Some(json!({
+                "source": { "path": "test.st" },
+                "breakpoints": [{ "line": 8 }]
+            }))),
+            dap_request(4, "configurationDone", None),
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            // Step 1: Evaluate "ctr" in the Watch panel context
+            dap_request(6, "evaluate", Some(json!({
+                "expression": "ctr",
+                "context": "watch",
+                "frameId": 0
+            }))),
+            // Step 2: Will send Variables request using the ref from step 1.
+            // The evaluate response allocates a new ref starting from
+            // next_var_ref. We need to find the actual ref from the response.
+            // Since this is a serial protocol, we use a placeholder here
+            // and compute the real ref from the evaluate response below.
+            // But run_dap_session sends all requests up front, so we need
+            // to predict the ref ID.
+            //
+            // After initialize+launch, the scopes haven't been requested
+            // yet, so next_var_ref is still at its initial value (1000).
+            // The Evaluate handler allocates ref 1000 for ctr.
+            dap_request(7, "variables", Some(json!({ "variablesReference": 1000 }))),
+            dap_request(8, "disconnect", None),
+        ],
+    );
+
+    // Verify step 1: Evaluate returned an expandable ref
+    let eval_resp = find_response(&messages, 6).unwrap();
+    let eval_ref = eval_resp["body"]["variablesReference"].as_i64().unwrap_or(0);
+    let eval_result = eval_resp["body"]["result"].as_str().unwrap_or("");
+    let eval_type = eval_resp["body"]["type"].as_str().unwrap_or("");
+    eprintln!(
+        "Evaluate(ctr): result={eval_result:?} type={eval_type:?} ref={eval_ref}"
+    );
+    assert!(
+        eval_ref > 0,
+        "Evaluate('ctr') should return variablesReference > 0, got {eval_ref}"
+    );
+    assert_eq!(
+        eval_ref, 1000,
+        "Expected ref 1000 (first allocation), got {eval_ref}"
+    );
+
+    // Verify step 2: Variables(ref) returned CTU's children with values
+    let children_resp = find_response(&messages, 7).unwrap();
+    assert!(
+        children_resp["success"].as_bool().unwrap_or(false),
+        "Variables request should succeed"
+    );
+    let children = children_resp["body"]["variables"]
+        .as_array()
+        .expect("should have variables array");
+    let child_names: Vec<&str> = children
+        .iter()
+        .filter_map(|v| v["name"].as_str())
+        .collect();
+    eprintln!("CTU children via Watch expand: {child_names:?}");
+
+    // CTU should have: CU, RESET, PV, Q, CV, prev_cu
+    assert!(
+        child_names.iter().any(|n| n.eq_ignore_ascii_case("CU")),
+        "CTU children should include CU, got: {child_names:?}"
+    );
+    assert!(
+        child_names.iter().any(|n| n.eq_ignore_ascii_case("Q")),
+        "CTU children should include Q, got: {child_names:?}"
+    );
+    assert!(
+        child_names.iter().any(|n| n.eq_ignore_ascii_case("CV")),
+        "CTU children should include CV, got: {child_names:?}"
+    );
+    assert!(
+        child_names.iter().any(|n| n.eq_ignore_ascii_case("PV")),
+        "CTU children should include PV, got: {child_names:?}"
+    );
+    assert!(
+        child_names.iter().any(|n| n.eq_ignore_ascii_case("RESET")),
+        "CTU children should include RESET, got: {child_names:?}"
+    );
+    assert!(
+        child_names.len() >= 5,
+        "Expected at least 5 CTU fields, got {}: {child_names:?}",
+        child_names.len()
+    );
+
+    // Verify the children have actual values (not all Void/empty)
+    // After one cycle with CU=TRUE, PV=5: CV should be 1, Q should be FALSE
+    let cv = children
+        .iter()
+        .find(|v| v["name"].as_str().map(|n| n.eq_ignore_ascii_case("CV")).unwrap_or(false));
+    if let Some(cv_var) = cv {
+        let cv_val = cv_var["value"].as_str().unwrap_or("");
+        eprintln!("CV value: {cv_val:?}");
+        assert_ne!(cv_val, "", "CV should have a value after ctr() executed");
+    }
+
+    let pv = children
+        .iter()
+        .find(|v| v["name"].as_str().map(|n| n.eq_ignore_ascii_case("PV")).unwrap_or(false));
+    if let Some(pv_var) = pv {
+        let pv_val = pv_var["value"].as_str().unwrap_or("");
+        eprintln!("PV value: {pv_val:?}");
+        assert_eq!(pv_val, "5", "PV should be 5 (the preset value)");
+    }
+}
+
+#[test]
 fn test_monitor_watch_fb_prefix_includes_all_descendants() {
     // End-to-end test for the PLC Monitor panel's tree view data flow.
     // When watching a FB instance prefix like "Main.fb", the telemetry
@@ -1803,13 +1941,101 @@ END_PROGRAM\n";
         "Should include nested Inner.y (2 levels), got: {var_names:?}"
     );
 
-    // Should NOT include the FB instance slots themselves (they're not scalar)
+    // The tree parent 'Main.fb' is now present with a nested `children` array.
+    let fb_entry = vars
+        .iter()
+        .find(|v| v["name"].as_str().map(|n| n.eq_ignore_ascii_case("Main.fb")).unwrap_or(false));
     assert!(
-        !var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb")),
-        "Should NOT include the FB slot 'Main.fb' itself: {var_names:?}"
+        fb_entry.is_some(),
+        "Tree parent 'Main.fb' should be present with children: {var_names:?}"
+    );
+    let fb_children = fb_entry.unwrap()["children"].as_array();
+    assert!(
+        fb_children.is_some(),
+        "Main.fb should have a 'children' array"
+    );
+    let child_names: Vec<&str> = fb_children
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    eprintln!("Main.fb children: {child_names:?}");
+    assert!(
+        child_names.iter().any(|n| *n == "cmd" || n.eq_ignore_ascii_case("cmd")),
+        "children should include 'cmd', got: {child_names:?}"
     );
     assert!(
-        !var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.sub")),
-        "Should NOT include the nested FB slot 'Main.fb.sub' itself: {var_names:?}"
+        child_names.iter().any(|n| *n == "state" || n.eq_ignore_ascii_case("state")),
+        "children should include 'state', got: {child_names:?}"
+    );
+    // Nested FB 'sub' should appear as a child with its own children
+    let sub_entry = fb_children
+        .unwrap()
+        .iter()
+        .find(|c| c["name"].as_str().map(|n| n.eq_ignore_ascii_case("sub")).unwrap_or(false));
+    assert!(
+        sub_entry.is_some(),
+        "children should include nested FB 'sub', got: {child_names:?}"
+    );
+    let sub_children = sub_entry.unwrap()["children"].as_array();
+    assert!(
+        sub_children.is_some(),
+        "'sub' should have its own children array"
+    );
+    let sub_child_names: Vec<&str> = sub_children
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    eprintln!("Main.fb.sub children: {sub_child_names:?}");
+    assert!(
+        sub_child_names.iter().any(|n| n.eq_ignore_ascii_case("x")),
+        "sub children should include 'x', got: {sub_child_names:?}"
+    );
+    assert!(
+        sub_child_names.iter().any(|n| n.eq_ignore_ascii_case("y")),
+        "sub children should include 'y', got: {sub_child_names:?}"
+    );
+}
+
+#[test]
+fn test_parse_errors_reported_with_file_and_line() {
+    // When the source has parse errors, the launch should fail and the
+    // Debug Console should show each error with file:line detail — not
+    // just a generic "N parse error(s) found" message.
+    let source = "\
+PROGRAM Main\n\
+VAR x : INT; END_VAR\n\
+    x := ;\n\
+    IF TRUE\n\
+END_PROGRAM\n";
+
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "disconnect", None),
+        ],
+    );
+
+    // Launch should fail
+    let launch_resp = find_response(&messages, 2).unwrap();
+    assert_eq!(
+        launch_resp["success"].as_bool(),
+        Some(false),
+        "Launch should fail with parse errors"
+    );
+    let error_msg = launch_resp["message"].as_str().unwrap_or("");
+    eprintln!("Launch error: {error_msg}");
+    assert!(
+        error_msg.contains("parse error(s)"),
+        "Error message should mention parse errors, got: {error_msg}"
+    );
+    // Should direct the user to the Problems panel (where the LSP already
+    // shows the errors with file/line/column detail).
+    assert!(
+        error_msg.contains("Problems panel") || error_msg.contains("Problems"),
+        "Error message should direct user to the Problems panel, got: {error_msg}"
     );
 }

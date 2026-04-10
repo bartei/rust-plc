@@ -28,10 +28,21 @@ impl Backend {
     async fn publish_diagnostics(&self, uri: &Url, doc: &Document) {
         let mut diags = Vec::new();
 
-        // Parse / lower errors
+        // Parse / lower errors — these ranges are in virtual concatenated
+        // space (from parse_multi), so we filter to this file's slice and
+        // convert to file-local offsets, same as semantic diagnostics below.
+        let file_start = doc.virtual_offset;
+        let file_end = file_start + doc.source.len();
         for err in &doc.lower_errors {
+            if err.range.start < file_start || err.range.start > file_end {
+                continue; // belongs to a different file
+            }
+            let local_range = st_syntax::ast::TextRange::new(
+                err.range.start.saturating_sub(file_start),
+                err.range.end.saturating_sub(file_start).min(doc.source.len()),
+            );
             diags.push(Diagnostic {
-                range: doc.text_range_to_lsp(err.range),
+                range: doc.text_range_to_lsp(local_range),
                 severity: Some(DiagnosticSeverity::ERROR),
                 source: Some("st".to_string()),
                 message: err.message.clone(),
@@ -40,14 +51,7 @@ impl Backend {
         }
 
         // Semantic diagnostics — only include diagnostics that originate from
-        // THIS file. In multi-file projects, parse_multi() shifts all byte
-        // ranges so each file occupies a unique slice of the virtual
-        // concatenated text. This file's slice is
-        //   [virtual_offset, virtual_offset + source.len())
-        // A diagnostic belongs here if its range falls within that slice.
-        let file_start = doc.virtual_offset;
-        let file_end = file_start + doc.source.len();
-
+        // THIS file's virtual slice [file_start, file_end).
         for d in &doc.analysis.diagnostics {
             if d.range.start < file_start || d.range.end > file_end {
                 continue;

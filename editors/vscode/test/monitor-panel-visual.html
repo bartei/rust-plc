@@ -62,6 +62,10 @@
     <button data-testid="btn-watch-cv" onclick="simulateAddWatch('Main.filler.counter.CV')">Watch counter.CV</button>
     <button data-testid="btn-tick" onclick="simulateTelemetry()">Simulate Telemetry Tick</button>
     <button data-testid="btn-clear" onclick="clearAll()">Clear All</button>
+    <button data-testid="btn-restore-expanded" onclick="restoreExpandedState()">Restore Expanded</button>
+    <button data-testid="btn-watch-with-children" onclick="simulateAddWatchWithChildren()">Watch filler (children)</button>
+    <button data-testid="btn-reset-session" onclick="simulateResetSession()">Reset Session</button>
+    <button data-testid="btn-empty-tick" onclick="simulateEmptyTelemetryTick()">Empty Tick</button>
   </div>
 
   <h2>Watch List</h2>
@@ -109,6 +113,9 @@
     let watchList = [];
     let valueMap = new Map();
     let expandedNodes = new Set();
+    let childrenMap = new Map();
+    /** Simulated persistence store (mirrors workspaceState). */
+    let persistedExpanded = [];
 
     function log(msg) {
       const el = document.getElementById("log");
@@ -120,7 +127,14 @@
     // Tree builder (copied from monitorPanel.ts)
     // ========================================================================
     function buildSubTree(prefix) {
-      const prefixLc = prefix.toLowerCase() + ".";
+      // If pre-built children from telemetry exist, use them directly.
+      const lc = prefix.toLowerCase();
+      const prebuilt = childrenMap.get(lc);
+      if (prebuilt && prebuilt.length > 0) {
+        return childrenToTree(prebuilt);
+      }
+      // Fallback: reconstruct from flat dotted-path entries in valueMap.
+      const prefixLc = lc + ".";
       const tree = {};
       valueMap.forEach((v, fullLc) => {
         if (!fullLc.startsWith(prefixLc)) return;
@@ -135,6 +149,27 @@
         const leaf = parts[parts.length - 1];
         node[leaf] = { __value: v, __children: node[leaf] ? node[leaf].__children : null };
       });
+      return tree;
+    }
+
+    /** Convert a DAP children array into the tree format used by renderTree. */
+    function childrenToTree(children) {
+      const tree = {};
+      for (const child of children) {
+        const entry = { __value: null, __children: null };
+        if (child.value !== undefined || child.type !== undefined) {
+          entry.__value = {
+            name: child.name,
+            value: child.value || "",
+            type: child.type || "",
+            forced: !!child.forced
+          };
+        }
+        if (child.children && child.children.length > 0) {
+          entry.__children = childrenToTree(child.children);
+        }
+        tree[child.name] = entry;
+      }
       return tree;
     }
 
@@ -226,6 +261,8 @@
         expandedNodes.add(lc);
       }
       log("Toggle: " + name + " → " + (expandedNodes.has(lc) ? "expanded" : "collapsed"));
+      // Persist expand state (simulates VS Code workspaceState).
+      persistedExpanded = Array.from(expandedNodes);
       renderWatchTable();
     }
 
@@ -272,6 +309,10 @@
         );
         if (matches) {
           valueMap.set(v.name.toLowerCase(), v);
+          // Store pre-built children tree from telemetry.
+          if (v.children && Array.isArray(v.children)) {
+            childrenMap.set(v.name.toLowerCase(), v.children);
+          }
         }
       }
       log("Telemetry tick " + cycle + ": " + valueMap.size + " vars in valueMap (was " + prevSize + ")");
@@ -280,6 +321,33 @@
       } else {
         updateValueCells();
       }
+    }
+
+    /** Simulate a new debug session starting (clears stale values).
+     *  Mirrors the resetSession message sent by the extension host
+     *  when a new plc/varCatalog event arrives. */
+    function simulateResetSession() {
+      valueMap.clear();
+      childrenMap.clear();
+      cycle = 0;
+      log("Session reset — valueMap and childrenMap cleared");
+      renderWatchTable();
+    }
+
+    /** Simulate a telemetry tick with empty variables (DAP running but
+     *  watch list not synced yet — this is what happens when the second
+     *  session starts and the watchVariables command hasn't arrived). */
+    function simulateEmptyTelemetryTick() {
+      cycle++;
+      log("Empty telemetry tick " + cycle + " (no variables — watch list not synced)");
+      // Cycle stats update but no variables — same as the real bug
+    }
+
+    /** Simulate restoring expanded state from persistence (like panel reload). */
+    function restoreExpandedState() {
+      expandedNodes = new Set(persistedExpanded);
+      log("Restored expanded nodes: " + JSON.stringify(persistedExpanded));
+      renderWatchTable();
     }
 
     function removeWatch(name) {
@@ -299,9 +367,60 @@
     function clearAll() {
       watchList = [];
       valueMap.clear();
+      childrenMap.clear();
       expandedNodes.clear();
+      persistedExpanded = [];
       cycle = 0;
       log("Cleared all");
+      renderWatchTable();
+    }
+
+    /** Simulate watching Main.filler with pre-built children (DAP tree format). */
+    function simulateAddWatchWithChildren() {
+      const name = "Main.filler";
+      if (!watchList.some(v => v.toLowerCase() === name.toLowerCase())) {
+        watchList.push(name);
+        log("addWatch (with children): " + name);
+      }
+      cycle++;
+      // Inject a tree-structured telemetry entry (as the DAP now sends).
+      const treeEntry = {
+        name: "Main.filler",
+        value: "",
+        type: "FillController",
+        children: [
+          { name: "start", value: cycle % 20 === 0 ? "TRUE" : "FALSE", type: "BOOL" },
+          { name: "target_fill", value: "5", type: "INT" },
+          { name: "valve_open", value: cycle > 5 ? "TRUE" : "FALSE", type: "BOOL" },
+          { name: "fill_done", value: "FALSE", type: "BOOL" },
+          { name: "fill_count", value: String(Math.floor(cycle / 2) % 6), type: "INT" },
+          { name: "filling", value: cycle > 5 ? "TRUE" : "FALSE", type: "BOOL" },
+          { name: "pulse_toggle", value: cycle % 2 === 0 ? "TRUE" : "FALSE", type: "BOOL" },
+          { name: "counter", children: [
+            { name: "CU", value: cycle % 2 === 0 ? "TRUE" : "FALSE", type: "BOOL" },
+            { name: "RESET", value: "FALSE", type: "BOOL" },
+            { name: "PV", value: "5", type: "INT" },
+            { name: "Q", value: Math.floor(cycle / 2) >= 5 ? "TRUE" : "FALSE", type: "BOOL" },
+            { name: "CV", value: String(Math.floor(cycle / 2) % 6), type: "INT" },
+            { name: "prev_cu", value: (cycle - 1) % 2 === 0 ? "TRUE" : "FALSE", type: "BOOL" },
+          ]},
+          { name: "edge", children: [
+            { name: "CLK", value: cycle % 20 === 0 ? "TRUE" : "FALSE", type: "BOOL" },
+            { name: "Q", value: cycle === 1 ? "TRUE" : "FALSE", type: "BOOL" },
+            { name: "prev", value: (cycle - 1) % 20 === 0 ? "TRUE" : "FALSE", type: "BOOL" },
+          ]},
+        ]
+      };
+      // Store in valueMap + childrenMap (same as the real panel does).
+      valueMap.set(treeEntry.name.toLowerCase(), treeEntry);
+      childrenMap.set(treeEntry.name.toLowerCase(), treeEntry.children);
+      // Also inject flat descendants for compatibility.
+      const flatData = mockTelemetryData();
+      for (const v of flatData) {
+        if (v.name.toLowerCase().startsWith("main.filler.")) {
+          valueMap.set(v.name.toLowerCase(), v);
+        }
+      }
       renderWatchTable();
     }
 

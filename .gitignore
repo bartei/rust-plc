@@ -6,6 +6,10 @@
 editors/vscode/node_modules/
 editors/vscode/out/
 editors/vscode/*.vsix
+editors/vscode/.vscode-test/
+editors/vscode/test/ui/node_modules/
+editors/vscode/test/ui/test-results/
+editors/vscode/test/ui/playwright-report/
 
 # IDE
 .idea/

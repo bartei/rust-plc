@@ -779,7 +779,10 @@ impl DapSession {
         };
 
         if !parse_result.errors.is_empty() {
-            let msg = format!("{} parse error(s) found", parse_result.errors.len());
+            let msg = format!(
+                "Cannot launch: {} parse error(s) — fix the errors shown in the Problems panel (Ctrl+Shift+M)",
+                parse_result.errors.len()
+            );
             self.pending_events.push(console_output(&msg));
             return err(seq, &msg);
         }
@@ -1666,11 +1669,15 @@ impl DapSession {
                     for name in &self.watched_variables {
                         let upper = name.to_uppercase();
                         let prefix = format!("{}.", upper);
-                        // Exact match (scalar variable)
-                        if let Some(v) = all.iter().find(|v| v.name.eq_ignore_ascii_case(name)) {
-                            if seen.insert(v.name.to_uppercase()) {
+
+                        // Collect ALL descendants under this prefix.
+                        let mut descendants = Vec::new();
+                        for v in &all {
+                            if v.name.to_uppercase().starts_with(&prefix)
+                                && seen.insert(v.name.to_uppercase())
+                            {
                                 let is_forced = forced.contains_key(&v.name.to_uppercase());
-                                result.push(serde_json::json!({
+                                descendants.push(serde_json::json!({
                                     "name": v.name,
                                     "value": v.value,
                                     "type": v.ty,
@@ -1678,20 +1685,43 @@ impl DapSession {
                                 }));
                             }
                         }
-                        // Prefix match: include ALL descendants. The panel
-                        // builds the tree from the dotted path names.
-                        for v in &all {
-                            if v.name.to_uppercase().starts_with(&prefix)
-                                && seen.insert(v.name.to_uppercase())
+
+                        if descendants.is_empty() {
+                            // Scalar variable — exact match only.
+                            if let Some(v) =
+                                all.iter().find(|v| v.name.eq_ignore_ascii_case(name))
                             {
-                                let is_forced = forced.contains_key(&v.name.to_uppercase());
-                                result.push(serde_json::json!({
-                                    "name": v.name,
-                                    "value": v.value,
-                                    "type": v.ty,
-                                    "forced": is_forced,
-                                }));
+                                if seen.insert(v.name.to_uppercase()) {
+                                    let is_forced =
+                                        forced.contains_key(&v.name.to_uppercase());
+                                    result.push(serde_json::json!({
+                                        "name": v.name,
+                                        "value": v.value,
+                                        "type": v.ty,
+                                        "forced": is_forced,
+                                    }));
+                                }
                             }
+                        } else {
+                            // FB instance — build nested children tree from
+                            // flat dotted-path descendants.
+                            let exact = all
+                                .iter()
+                                .find(|v| v.name.eq_ignore_ascii_case(name));
+                            let parent_type = exact.map(|v| v.ty.as_str()).unwrap_or("");
+                            let parent_value =
+                                exact.map(|v| v.value.as_str()).unwrap_or("");
+                            let children =
+                                Self::build_children_tree(name, &descendants);
+                            result.push(serde_json::json!({
+                                "name": name,
+                                "value": parent_value,
+                                "type": parent_type,
+                                "children": children,
+                            }));
+                            // Also emit flat descendants so existing panel
+                            // code (prefix matching) still works.
+                            result.extend(descendants);
                         }
                     }
                     result
@@ -1707,6 +1737,100 @@ impl DapSession {
             self.target_cycle_time,
             &variables,
         ));
+    }
+
+    /// Build a nested children tree from flat dotted-path descendants.
+    ///
+    /// Given prefix "Main.filler" and flat entries like:
+    ///   Main.filler.start (BOOL), Main.filler.counter.CV (INT), ...
+    /// produces:
+    ///   [ { name: "start", value: "FALSE", type: "BOOL" },
+    ///     { name: "counter", children: [ { name: "CV", ... } ] } ]
+    fn build_children_tree(
+        prefix: &str,
+        flat: &[serde_json::Value],
+    ) -> Vec<serde_json::Value> {
+        use std::collections::BTreeMap;
+
+        // Group by first path segment after the prefix.
+        struct Node {
+            /// Direct value (if this segment has one).
+            value: Option<serde_json::Value>,
+            /// Sub-entries keyed by next segment.
+            children: BTreeMap<String, Node>,
+        }
+
+        let prefix_dot = format!("{}.", prefix);
+        let mut root = BTreeMap::<String, Node>::new();
+
+        for entry in flat {
+            let full_name = entry["name"].as_str().unwrap_or("");
+            let Some(relative) = full_name
+                .get(prefix_dot.len()..)
+                .filter(|_| full_name.len() > prefix_dot.len())
+            else {
+                continue;
+            };
+            let parts: Vec<&str> = relative.split('.').collect();
+            // Insert into the tree, walking each segment.
+            fn insert_at(
+                map: &mut BTreeMap<String, Node>,
+                parts: &[&str],
+                entry: &serde_json::Value,
+            ) {
+                if parts.is_empty() {
+                    return;
+                }
+                let key = parts[0].to_string();
+                let node = map.entry(key).or_insert_with(|| Node {
+                    value: None,
+                    children: BTreeMap::new(),
+                });
+                if parts.len() == 1 {
+                    node.value = Some(entry.clone());
+                } else {
+                    insert_at(&mut node.children, &parts[1..], entry);
+                }
+            }
+            insert_at(&mut root, &parts, entry);
+        }
+
+        fn to_json(map: &BTreeMap<String, Node>) -> Vec<serde_json::Value> {
+            let mut out = Vec::new();
+            for (key, node) in map {
+                if node.children.is_empty() {
+                    // Leaf node
+                    if let Some(ref v) = node.value {
+                        let mut obj = serde_json::json!({
+                            "name": key,
+                            "value": v["value"],
+                            "type": v["type"],
+                        });
+                        if v["forced"].as_bool() == Some(true) {
+                            obj["forced"] = serde_json::json!(true);
+                        }
+                        out.push(obj);
+                    }
+                } else {
+                    // Intermediate node (FB instance)
+                    let children = to_json(&node.children);
+                    let mut obj = serde_json::json!({
+                        "name": key,
+                        "children": children,
+                    });
+                    // If this intermediate node also has a direct value
+                    // (e.g., from the flat list), include it.
+                    if let Some(ref v) = node.value {
+                        obj["value"] = v["value"].clone();
+                        obj["type"] = v["type"].clone();
+                    }
+                    out.push(obj);
+                }
+            }
+            out
+        }
+
+        to_json(&root)
     }
 
     /// One iteration of the DAP run loop. Either continues an in-flight
@@ -1739,7 +1863,12 @@ impl DapSession {
         } else {
             // Start of a fresh scan cycle: pull device inputs into VM globals.
             comm.read_inputs(vm);
-            vm.debug_mut().resume_with_source(mode, 0, 0);
+            // Only reset the debug state if there's no pending pause — otherwise
+            // resume_with_source would overwrite step_mode=Paused back to
+            // Continue, swallowing the user's Pause request.
+            if vm.debug_state().step_mode != StepMode::Paused {
+                vm.debug_mut().resume_with_source(mode, 0, 0);
+            }
             vm.reset_instruction_count();
             let now = Instant::now();
             *cycle_start = Some(now);
@@ -2009,21 +2138,16 @@ impl DapSession {
                         break;
                     }
 
-                    // Continue mode: enforce the configured cycle period.
-                    if let Some(target) = self.target_cycle_time {
-                        if let Some(remaining) = target.checked_sub(elapsed) {
-                            if !remaining.is_zero() && self.interruptible_sleep(remaining) {
-                                // A Pause/Disconnect arrived during the
-                                // sleep — let the next iteration handle it.
-                                continue;
-                            }
-                        }
-                    } else {
-                        // No cycle-time target → loop runs CPU-bound. Yield
-                        // periodically so the reader thread gets a chance
-                        // to push pending Pause/Disconnect requests.
-                        if cycles_in_this_resume.is_multiple_of(64) {
-                            std::thread::yield_now();
+                    // Enforce the cycle period. When no cycle_time is
+                    // configured, default to 1ms — free-spinning at max CPU
+                    // is never useful for debugging and starves the reader
+                    // thread (making Pause/Disconnect unreliable).
+                    const DEFAULT_CYCLE: Duration = Duration::from_millis(1);
+                    let target = self.target_cycle_time.unwrap_or(DEFAULT_CYCLE);
+                    if let Some(remaining) = target.checked_sub(elapsed) {
+                        if !remaining.is_zero() && self.interruptible_sleep(remaining) {
+                            // A Pause/Disconnect arrived during the sleep.
+                            continue;
                         }
                     }
 

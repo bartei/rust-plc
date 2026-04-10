@@ -24,20 +24,28 @@ npm run test:headed
 npm run test:debug
 ```
 
-## What's tested
+## What's tested (21 tests)
 
 - **Empty state** — placeholder message when no watches
 - **Scalar watch** — flat row with value, no tree toggle
+- **Remove / Clear** — removing a watch or clearing all empties the table
 - **FB instance watch** — tree toggle visible, collapsed by default
 - **Tree expansion** — clicking ▸ shows direct fields + nested FB groups
-- **Nested expansion** — expanding counter inside filler shows CTU fields (CU, Q, CV, PV, RESET, prev_cu)
+- **Nested expansion** — expanding counter inside filler shows CTU fields
 - **Collapse** — hides children, toggle reverts to ▸
-- **Direct FB watch** — watching `Main.filler.counter` shows only counter's fields, not filler-level
+- **Direct FB watch** — watching `Main.filler.counter` shows only counter's fields
 - **Value updates** — telemetry tick changes values without rebuilding DOM
 - **Tree value updates** — values inside expanded tree update live
 - **No duplicates** — overlapping watches don't produce duplicate rows
 - **Multiple watches** — independent watches render correctly
-- **Disambiguated names** — `counter.Q` and `edge.Q` are distinct rows at different tree paths
+- **Disambiguated names** — `counter.Q` and `edge.Q` are distinct rows
+- **Tree from telemetry children** — pre-built children array renders same as flat
+- **Nested children expansion** — children-based tree expands nested FBs correctly
+- **Expand/collapse persistence** — state survives simulated panel reload
+- **Collapse removes from persistence** — unchecked nodes removed from saved state
+- **Clear all resets persistence** — expanded state cleared on clear all
+- **Session reset scalar** — values show "…" after reset, update on new telemetry
+- **Session reset FB tree** — children disappear on reset, rebuild with persisted expand state
 
 ## Visual fixture
 

@@ -89,6 +89,10 @@ export class MonitorPanel {
   public updateCatalog(catalog: Array<{ name: string; type: string }>) {
     this.catalog = catalog;
     this.panel.webview.postMessage({ command: "updateCatalog", catalog });
+    // A new catalog signals a new debug session. Clear stale variable data
+    // from the previous session so the panel rebuilds cleanly when the first
+    // telemetry tick arrives.
+    this.panel.webview.postMessage({ command: "resetSession" });
     // Send the persisted watch list back to the new session — the DAP doesn't
     // know about it until we re-issue the command.
     if (this.watchList.length > 0) {
@@ -139,6 +143,11 @@ export class MonitorPanel {
           this.evaluate(`unforce ${msg.variable}`);
         }
         break;
+      case "expandedNodesChanged":
+        if (Array.isArray(msg.nodes)) {
+          this.saveExpandedNodes(msg.nodes);
+        }
+        break;
     }
   }
 
@@ -153,6 +162,15 @@ export class MonitorPanel {
       return;
     }
     session.customRequest("evaluate", { expression, context: "repl" });
+  }
+
+  /// Re-send the persisted watch list to the DAP. Called by the tracker
+  /// when telemetry arrives with an empty variables array — indicating the
+  /// initial sendWatchListToDap (fired during catalog delivery) was too early.
+  public resyncWatchList() {
+    if (this.watchList.length > 0) {
+      this.sendWatchListToDap();
+    }
   }
 
   private sendWatchListToDap() {
@@ -172,6 +190,12 @@ export class MonitorPanel {
     return `plcMonitor.watchList:${root}`;
   }
 
+  private expandedKey(): string {
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    const root = folder ? folder.uri.fsPath : "<no-workspace>";
+    return `plcMonitor.expandedNodes:${root}`;
+  }
+
   private loadWatchList(): string[] {
     const state = MonitorPanel.workspaceState;
     if (!state) return [];
@@ -185,11 +209,25 @@ export class MonitorPanel {
     void state.update(this.workspaceKey(), this.watchList);
   }
 
+  private loadExpandedNodes(): string[] {
+    const state = MonitorPanel.workspaceState;
+    if (!state) return [];
+    const v = state.get<string[]>(this.expandedKey());
+    return Array.isArray(v) ? v : [];
+  }
+
+  private saveExpandedNodes(nodes: string[]) {
+    const state = MonitorPanel.workspaceState;
+    if (!state) return;
+    void state.update(this.expandedKey(), nodes);
+  }
+
   // ── HTML ───────────────────────────────────────────────────────────
 
   private setInitialHtml() {
     const initialCatalog = JSON.stringify(this.catalog);
     const initialWatchList = JSON.stringify(this.watchList);
+    const initialExpanded = JSON.stringify(this.loadExpandedNodes());
     this.panel.webview.html = `<!DOCTYPE html>
 <html>
 <head>
@@ -383,6 +421,8 @@ export class MonitorPanel {
     let valueMap = new Map();
     /** name → type from the catalog, used as a fallback. */
     let typeMap = new Map();
+    /** Pre-built children trees from telemetry, keyed by lowercased name. */
+    let childrenMap = new Map();
 
     function fmtUs(us) {
       if (us >= 1000) {
@@ -446,18 +486,23 @@ export class MonitorPanel {
      * and mutate just the value/type cells without touching the input
      * elements — preserving focus and any half-typed force value.
      */
-    /** Set of expanded tree nodes (lowercased full paths). */
-    let expandedNodes = new Set();
+    /** Set of expanded tree nodes (lowercased full paths). Initialized
+     *  from persisted state so the tree survives panel close / reload. */
+    let expandedNodes = new Set(${initialExpanded});
 
     /**
-     * Build a tree from flat dotted-path variables under a prefix.
-     * E.g., for prefix "Main.filler" and entries like
-     *   Main.filler.start, Main.filler.counter.Q, Main.filler.counter.CV
-     * produces:
-     *   { start: {leaf}, counter: { Q: {leaf}, CV: {leaf} } }
+     * Build a tree from the children array (sent by the DAP in
+     * telemetry) or fall back to flat dotted-path prefix matching.
      */
     function buildSubTree(prefix) {
-      const prefixLc = prefix.toLowerCase() + ".";
+      // If the DAP sent a pre-built children array, use it directly.
+      const lc = prefix.toLowerCase();
+      const prebuilt = childrenMap.get(lc);
+      if (prebuilt && prebuilt.length > 0) {
+        return childrenToTree(prebuilt);
+      }
+      // Fallback: reconstruct from flat dotted-path entries in valueMap.
+      const prefixLc = lc + ".";
       const tree = {};
       valueMap.forEach((v, fullLc) => {
         if (!fullLc.startsWith(prefixLc)) return;
@@ -472,6 +517,27 @@ export class MonitorPanel {
         const leaf = parts[parts.length - 1];
         node[leaf] = { __value: v, __children: node[leaf] ? node[leaf].__children : null };
       });
+      return tree;
+    }
+
+    /** Convert a DAP children array into the tree format used by renderTree. */
+    function childrenToTree(children) {
+      const tree = {};
+      for (const child of children) {
+        const entry = { __value: null, __children: null };
+        if (child.value !== undefined || child.type !== undefined) {
+          entry.__value = {
+            name: child.name,
+            value: child.value || "",
+            type: child.type || "",
+            forced: !!child.forced
+          };
+        }
+        if (child.children && child.children.length > 0) {
+          entry.__children = childrenToTree(child.children);
+        }
+        tree[child.name] = entry;
+      }
       return tree;
     }
 
@@ -578,6 +644,11 @@ export class MonitorPanel {
         expandedNodes.add(lc);
       }
       renderWatchTable();
+      // Persist expanded state to the extension host.
+      vscode.postMessage({
+        command: "expandedNodesChanged",
+        nodes: Array.from(expandedNodes)
+      });
     }
 
     /**
@@ -728,6 +799,7 @@ export class MonitorPanel {
       if (watchList.length === 0) return;
       watchList = [];
       valueMap.clear();
+      childrenMap.clear();
       renderWatchTable();
       vscode.postMessage({ command: "clearWatch" });
     }
@@ -789,6 +861,10 @@ export class MonitorPanel {
         const prevSize = valueMap.size;
         for (const v of msg.variables) {
           valueMap.set(v.name.toLowerCase(), v);
+          // Store pre-built children tree from the DAP telemetry.
+          if (v.children && Array.isArray(v.children)) {
+            childrenMap.set(v.name.toLowerCase(), v.children);
+          }
         }
         // If new variable keys appeared (e.g., first telemetry after adding
         // a FB watch), rebuild the table structure so the tree can form.
@@ -798,6 +874,12 @@ export class MonitorPanel {
         } else {
           updateValueCells();
         }
+      } else if (msg.command === "resetSession") {
+        // New debug session — clear stale values from the previous session
+        // so the panel rebuilds when the first telemetry tick arrives.
+        valueMap.clear();
+        childrenMap.clear();
+        renderWatchTable();
       } else if (msg.command === "updateCatalog") {
         catalog = msg.catalog;
         refreshCatalogDatalist();

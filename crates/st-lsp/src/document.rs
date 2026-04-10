@@ -61,8 +61,11 @@ impl Document {
         self.version = version;
 
         if has_parse_errors {
-            // Keep the last good AST and analysis — prevents false error squiggles
-            // while typing. The tree and source are still updated for cursor tracking.
+            // Keep the last good AST and analysis — prevents false semantic
+            // squiggles while typing. But always update parse errors and
+            // virtual_offset so the user sees WHERE the syntax problems are.
+            self.lower_errors = lower_errors;
+            self.virtual_offset = virtual_offset;
         } else {
             self.ast = ast;
             self.lower_errors = lower_errors;

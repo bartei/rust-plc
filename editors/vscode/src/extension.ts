@@ -99,6 +99,8 @@ export function getPlcVarCatalog(): Array<{ name: string; type: string }> {
 }
 
 class PlcDapTracker implements vscode.DebugAdapterTracker {
+  private watchListSynced = false;
+
   onDidSendMessage(message: any): void {
     if (
       message?.type !== "event" ||
@@ -132,6 +134,16 @@ class PlcDapTracker implements vscode.DebugAdapterTracker {
         if (Array.isArray(vars)) {
           MonitorPanel.currentPanel.updateVariables(vars);
         }
+        // If the DAP is sending telemetry but the variables array is empty
+        // and we have a persisted watch list, re-send it. This handles the
+        // case where sendWatchListToDap fired too early during catalog
+        // delivery (before the session was fully active).
+        if (!this.watchListSynced && (!Array.isArray(vars) || vars.length === 0)) {
+          MonitorPanel.currentPanel.resyncWatchList();
+          this.watchListSynced = true;
+        } else if (Array.isArray(vars) && vars.length > 0) {
+          this.watchListSynced = true;
+        }
       }
       return;
     }
@@ -150,6 +162,7 @@ class PlcDapTracker implements vscode.DebugAdapterTracker {
 
   onWillStartSession(): void {
     plcVarCatalog = [];
+    this.watchListSynced = false;
   }
   onWillStopSession(): void {
     cycleStatusBar?.hide();

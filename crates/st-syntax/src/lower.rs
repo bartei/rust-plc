@@ -36,6 +36,32 @@ pub fn lower(tree: &tree_sitter::Tree, source: &str) -> LowerResult {
     }
 }
 
+/// Map tree-sitter node kind strings to user-friendly names.
+fn friendly_kind_name(kind: &str) -> &str {
+    match kind {
+        "identifier" => "identifier",
+        ";" | "MISSING ;" => "';'",
+        "END_IF" => "END_IF",
+        "END_FOR" => "END_FOR",
+        "END_WHILE" => "END_WHILE",
+        "END_CASE" => "END_CASE",
+        "END_REPEAT" => "END_REPEAT",
+        "END_VAR" => "END_VAR",
+        "END_PROGRAM" => "END_PROGRAM",
+        "END_FUNCTION" => "END_FUNCTION",
+        "END_FUNCTION_BLOCK" => "END_FUNCTION_BLOCK",
+        "END_CLASS" => "END_CLASS",
+        "THEN" => "THEN after IF condition",
+        "DO" => "DO after FOR/WHILE condition",
+        "OF" => "OF after CASE expression",
+        "statement_list" => "statement",
+        "expression" | "additive_expression" | "comparison_expression" => "expression",
+        "variable_declaration" => "variable declaration",
+        "assignment_statement" => "assignment",
+        _ => kind,
+    }
+}
+
 struct LowerCtx<'a> {
     source: &'a [u8],
     errors: Vec<LowerError>,
@@ -58,17 +84,123 @@ impl<'a> LowerCtx<'a> {
     }
 
     /// Walk the CST and collect ERROR / MISSING nodes as lowering errors.
+    ///
+    /// When tree-sitter encounters a parse error, it creates an ERROR node
+    /// that can span a large region (from the error to the next recovery
+    /// point). We report errors at the **start** of the ERROR node and
+    /// extract context from the node's children and parent to produce a
+    /// useful message like "unexpected token ';'" or "expected END_IF".
     fn collect_cst_errors(&mut self, node: Node) {
         if node.is_error() {
-            self.error("syntax error", node);
-        } else if node.is_missing() {
-            self.error(format!("missing {}", node.kind()), node);
+            let msg = self.describe_error(node);
+            // Report at the START of the error, not the entire span — the
+            // start is where the actual problem is.
+            let start = node.start_byte();
+            let end = std::cmp::min(
+                node.end_byte(),
+                // Limit the squiggle to one line for readability.
+                self.source.get(start..)
+                    .and_then(|s| s.iter().position(|&b| b == b'\n'))
+                    .map(|nl| start + nl)
+                    .unwrap_or(node.end_byte()),
+            );
+            self.errors.push(LowerError {
+                message: msg,
+                range: TextRange::new(start, end),
+            });
+            return; // Don't recurse into ERROR node children — one report is enough.
+        }
+        if node.is_missing() {
+            let kind = node.kind();
+            // Generate a friendly name for the missing element.
+            let friendly = friendly_kind_name(kind);
+            self.error(format!("expected {friendly}"), node);
         }
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.has_error() || child.is_error() || child.is_missing() {
                 self.collect_cst_errors(child);
             }
+        }
+    }
+
+    /// Produce a helpful error message by examining the ERROR node's content
+    /// and its surrounding context.
+    fn describe_error(&self, error_node: Node) -> String {
+        // Check what text the ERROR node contains — this is the unexpected input.
+        let error_text = self.text(error_node).trim();
+
+        // Look at the first non-error child to find the unexpected token.
+        let first_child = {
+            let mut cursor = error_node.walk();
+            error_node.children(&mut cursor)
+                .find(|c| !c.is_extra())
+                .map(|c| self.text(c).trim().to_string())
+        };
+
+        // Look at the parent to understand what was expected.
+        let parent = error_node.parent();
+        let parent_kind = parent.map(|p| p.kind()).unwrap_or("");
+
+        // Check what comes after the error for missing-keyword hints.
+        let next_sibling = error_node.next_named_sibling();
+
+        // Generate a contextual message.
+        match parent_kind {
+            "if_statement" => {
+                if error_text.contains("IF") || error_text.contains("if") {
+                    return "expected END_IF to close IF block".to_string();
+                }
+                return "syntax error in IF statement — check THEN/END_IF".to_string();
+            }
+            "for_statement" => {
+                return "syntax error in FOR statement — check DO/END_FOR".to_string();
+            }
+            "while_statement" => {
+                return "syntax error in WHILE statement — check DO/END_WHILE".to_string();
+            }
+            "case_statement" => {
+                return "syntax error in CASE statement — check END_CASE".to_string();
+            }
+            "program_declaration" => {
+                if next_sibling.is_none() {
+                    return "expected END_PROGRAM".to_string();
+                }
+            }
+            "function_declaration" => {
+                if next_sibling.is_none() {
+                    return "expected END_FUNCTION".to_string();
+                }
+            }
+            "function_block_declaration" => {
+                if next_sibling.is_none() {
+                    return "expected END_FUNCTION_BLOCK".to_string();
+                }
+            }
+            "class_declaration" => {
+                if next_sibling.is_none() {
+                    return "expected END_CLASS".to_string();
+                }
+            }
+            "var_block" => {
+                return "syntax error in variable declaration — check END_VAR".to_string();
+            }
+            _ => {}
+        }
+
+        // Use the first child or error text to describe the unexpected token.
+        let token = first_child
+            .as_deref()
+            .unwrap_or(error_text);
+        let token_short = if token.len() > 30 {
+            &token[..30]
+        } else {
+            token
+        };
+        if !token_short.is_empty() {
+            format!("unexpected '{token_short}'")
+        } else {
+            "syntax error".to_string()
         }
     }
 
@@ -109,7 +241,11 @@ impl<'a> LowerCtx<'a> {
                     ));
                 }
                 _ if child.is_error() => {
-                    self.error("syntax error", child);
+                    let msg = self.describe_error(child);
+                    self.errors.push(LowerError {
+                        message: msg,
+                        range: TextRange::new(child.start_byte(), child.start_byte() + 1),
+                    });
                 }
                 _ => {}
             }
@@ -719,7 +855,17 @@ impl<'a> LowerCtx<'a> {
             kind::EXIT_STATEMENT => Some(Statement::Exit(self.range(node))),
             kind::EMPTY_STATEMENT => Some(Statement::Empty(self.range(node))),
             _ if node.is_error() => {
-                self.error("syntax error in statement", node);
+                let msg = self.describe_error(node);
+                self.errors.push(LowerError {
+                    message: msg,
+                    range: TextRange::new(node.start_byte(), std::cmp::min(
+                        node.end_byte(),
+                        self.source.get(node.start_byte()..)
+                            .and_then(|s| s.iter().position(|&b| b == b'\n'))
+                            .map(|nl| node.start_byte() + nl)
+                            .unwrap_or(node.end_byte()),
+                    )),
+                });
                 None
             }
             _ => None,
@@ -1321,5 +1467,92 @@ impl<'a> LowerCtx<'a> {
 
     fn parse_elementary_type(&self, text: &str) -> ElementaryType {
         self.try_parse_elementary_type(text).unwrap_or(ElementaryType::Int)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_errors(source: &str) -> Vec<(usize, String)> {
+        let result = crate::parse(source);
+        result.errors.iter().map(|e| {
+            let line = source[..e.range.start].lines().count();
+            (line, e.message.clone())
+        }).collect()
+    }
+
+    #[test]
+    fn error_equals_instead_of_assign_points_to_correct_line() {
+        // Common mistake: using = instead of := for assignment
+        let source = "\
+PROGRAM Main\n\
+VAR\n\
+    filling : BOOL := FALSE;\n\
+    moving : BOOL := FALSE;\n\
+END_VAR\n\
+    IF TRUE THEN\n\
+        filling = TRUE;\n\
+        moving = FALSE;\n\
+    END_IF;\n\
+END_PROGRAM\n";
+        let errors = parse_errors(source);
+        eprintln!("= vs := errors: {errors:?}");
+        assert!(!errors.is_empty(), "Should have errors for = instead of :=");
+        // The errors should be on lines 7-8 (the bad assignments), NOT at the end
+        let has_early_error = errors.iter().any(|e| e.0 >= 7 && e.0 <= 8);
+        assert!(
+            has_early_error,
+            "Errors should point to lines 7-8 (the = assignments), got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn error_missing_end_if_points_to_if_line() {
+        let errors = parse_errors(
+            "PROGRAM Main\nVAR x : INT; END_VAR\n    IF x > 0 THEN\n        x := 1;\n    \n    x := 2;\nEND_PROGRAM\n"
+        );
+        eprintln!("Errors: {errors:?}");
+        assert!(!errors.is_empty(), "Should have errors for missing END_IF");
+        // The error should NOT be at the end of the file — it should be near
+        // the IF statement or the point where the parser lost sync.
+        let last_line = 7; // END_PROGRAM is line 7
+        assert!(
+            errors.iter().any(|e| e.0 < last_line),
+            "At least one error should point before the last line, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn error_missing_expression_gives_context() {
+        let errors = parse_errors(
+            "PROGRAM Main\nVAR x : INT; END_VAR\n    x := ;\nEND_PROGRAM\n"
+        );
+        eprintln!("Errors: {errors:?}");
+        assert!(!errors.is_empty());
+        // Error should be on the line with "x := ;" (line 3), not at the end.
+        assert!(
+            errors.iter().any(|e| e.0 == 3),
+            "Error should be on line 3 (the assignment), got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn error_messages_not_all_generic() {
+        let errors = parse_errors(
+            "PROGRAM Main\nVAR x : INT; END_VAR\n    IF TRUE THEN\n        x := 1;\nEND_PROGRAM\n"
+        );
+        eprintln!("Errors: {errors:?}");
+        // At least one error should have a more helpful message than just "syntax error"
+        let has_context = errors.iter().any(|e| {
+            e.1.contains("END_IF")
+                || e.1.contains("unexpected")
+                || e.1.contains("expected")
+                || e.1.contains("IF statement")
+        });
+        assert!(
+            has_context,
+            "At least one error should mention END_IF or give context, got: {errors:?}"
+        );
     }
 }
