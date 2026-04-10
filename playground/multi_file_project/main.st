@@ -12,6 +12,16 @@
  *   st-cli run                        # autodiscovers all .st files
  *   st-cli run -n 100                 # run 100 scan cycles
  *   st-cli check                      # check for errors
+ *
+ * Cross-reference / Call Hierarchy:
+ *   Open this project in VS Code, then right-click any function name
+ *   and select "Show Call Hierarchy" (or press Shift+Alt+H). You'll
+ *   see both incoming (who calls this?) and outgoing (what does it call?)
+ *   links. For example:
+ *     - Right-click on "ClampSpeed" → incoming calls show Main
+ *     - Right-click on "Main"       → outgoing calls show FillController,
+ *       ConveyorController, ClampSpeed, BOOL_TO_INT
+ *     - Right-click on "FillController" → incoming calls show Main
  *)
 
 VAR_GLOBAL

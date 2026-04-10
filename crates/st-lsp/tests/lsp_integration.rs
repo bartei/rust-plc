@@ -1122,3 +1122,1180 @@ fn test_workspace_symbol() {
 
     client.shutdown();
 }
+
+// =============================================================================
+// Selection Range (smart expand / shrink selection)
+// =============================================================================
+
+#[test]
+fn test_selection_range_returns_nested_chain() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    // Source with nested structure: PROGRAM > IF > assignment
+    // Lines (0-indexed):
+    //   0  PROGRAM Main
+    //   1  VAR
+    //   2      x : INT := 0;
+    //   3  END_VAR
+    //   4      IF x > 0 THEN
+    //   5          x := 1;         <-- cursor here (line 5, char 10, inside "1")
+    //   6      END_IF;
+    //   7  END_PROGRAM
+    let uri = file_uri("selrange.st");
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    IF x > 0 THEN\n        x := 1;\n    END_IF;\nEND_PROGRAM\n"
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    let resp = client.request(
+        "textDocument/selectionRange",
+        json!({
+            "textDocument": { "uri": uri },
+            "positions": [{ "line": 5, "character": 13 }]
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(result.is_array(), "Expected array of SelectionRange, got: {result:?}");
+    let ranges = result.as_array().unwrap();
+    assert_eq!(ranges.len(), 1, "One range per position");
+
+    // Walk the chain outward and collect each level's range
+    let mut levels = Vec::new();
+    let mut current = Some(&ranges[0]);
+    while let Some(sr) = current {
+        let r = &sr["range"];
+        let start_line = r["start"]["line"].as_u64().unwrap();
+        let end_line = r["end"]["line"].as_u64().unwrap();
+        levels.push((start_line, end_line));
+        current = sr.get("parent").filter(|p| !p.is_null());
+    }
+
+    // We expect at least 3 levels: word/expression, statement, PROGRAM
+    assert!(
+        levels.len() >= 3,
+        "Expected at least 3 nesting levels (word → statement → PROGRAM), got {} levels: {:?}",
+        levels.len(),
+        levels
+    );
+
+    // Innermost should be on line 5 (the expression/statement)
+    assert_eq!(levels[0].0, 5, "Innermost range should start on line 5");
+
+    // Outermost should span the whole PROGRAM (lines 0-7)
+    let outermost = levels.last().unwrap();
+    assert_eq!(outermost.0, 0, "Outermost range should start at line 0 (PROGRAM)");
+    assert!(
+        outermost.1 >= 7,
+        "Outermost range should end at or past line 7 (END_PROGRAM)"
+    );
+
+    // Each level should be strictly larger than (or equal to) the previous
+    for window in levels.windows(2) {
+        let inner_span = window[0].1 - window[0].0;
+        let outer_span = window[1].1 - window[1].0;
+        assert!(
+            outer_span >= inner_span,
+            "Each parent range must be >= its child: child span {inner_span}, parent span {outer_span}"
+        );
+    }
+
+    client.shutdown();
+}
+
+#[test]
+fn test_selection_range_multiple_positions() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("selrange2.st");
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": "PROGRAM Main\nVAR\n    x : INT := 0;\n    y : INT := 0;\nEND_VAR\n    x := 1;\n    y := 2;\nEND_PROGRAM\n"
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    // Two positions: one in the VAR block (line 2), one in the body (line 6)
+    let resp = client.request(
+        "textDocument/selectionRange",
+        json!({
+            "textDocument": { "uri": uri },
+            "positions": [
+                { "line": 2, "character": 4 },
+                { "line": 6, "character": 4 }
+            ]
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(result.is_array(), "Expected array");
+    let ranges = result.as_array().unwrap();
+    assert_eq!(ranges.len(), 2, "Should return one SelectionRange per position");
+
+    // Both should have a parent chain (at least 2 levels: current + PROGRAM)
+    for (i, sr) in ranges.iter().enumerate() {
+        assert!(
+            sr.get("parent").is_some() && !sr["parent"].is_null(),
+            "Position {i}: expected at least one parent level"
+        );
+    }
+
+    client.shutdown();
+}
+
+#[test]
+fn test_selection_range_on_keyword() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("selrange3.st");
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    x := x + 1;\nEND_PROGRAM\n"
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    // Cursor on "PROGRAM" keyword (line 0, char 3 = inside "GRAM")
+    let resp = client.request(
+        "textDocument/selectionRange",
+        json!({
+            "textDocument": { "uri": uri },
+            "positions": [{ "line": 0, "character": 3 }]
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(result.is_array());
+    let ranges = result.as_array().unwrap();
+    assert_eq!(ranges.len(), 1);
+
+    // The innermost range should cover the word "PROGRAM" (line 0, chars 0-7)
+    let inner = &ranges[0]["range"];
+    assert_eq!(inner["start"]["line"].as_u64(), Some(0));
+    assert_eq!(inner["start"]["character"].as_u64(), Some(0));
+    assert_eq!(inner["end"]["character"].as_u64(), Some(7)); // "PROGRAM" = 7 chars
+
+    client.shutdown();
+}
+
+#[test]
+fn test_selection_range_capability_advertised() {
+    let mut client = TestClient::start();
+    let resp = client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+
+    let caps = &resp["result"]["capabilities"];
+    assert!(
+        caps["selectionRangeProvider"].as_bool().unwrap_or(false),
+        "selectionRangeProvider should be advertised: {caps:?}"
+    );
+    assert!(
+        caps["inlayHintProvider"].as_bool().unwrap_or(false),
+        "inlayHintProvider should be advertised: {caps:?}"
+    );
+
+    client.notify("initialized", json!({}));
+    client.shutdown();
+}
+
+// =============================================================================
+// Inlay Hints (parameter names at call sites)
+// =============================================================================
+
+#[test]
+fn test_inlay_hint_parameter_names() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    // Source: a function with two parameters, called with positional args.
+    //   0  FUNCTION Add : INT
+    //   1  VAR_INPUT
+    //   2      a : INT;
+    //   3      b : INT;
+    //   4  END_VAR
+    //   5      Add := a + b;
+    //   6  END_FUNCTION
+    //   7
+    //   8  PROGRAM Main
+    //   9  VAR
+    //  10      result : INT := 0;
+    //  11  END_VAR
+    //  12      result := Add(10, 20);   <-- positional call, expect hints
+    //  13  END_PROGRAM
+    let uri = file_uri("inlayhint.st");
+    let source = "FUNCTION Add : INT\nVAR_INPUT\n    a : INT;\n    b : INT;\nEND_VAR\n    Add := a + b;\nEND_FUNCTION\n\nPROGRAM Main\nVAR\n    result : INT := 0;\nEND_VAR\n    result := Add(10, 20);\nEND_PROGRAM\n";
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    let resp = client.request(
+        "textDocument/inlayHint",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 13, "character": 0 }
+            }
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(result.is_array(), "Expected inlay hints array, got: {result:?}");
+    let hints = result.as_array().unwrap();
+
+    // Should have 2 hints: "a:" before 10, "b:" before 20
+    assert_eq!(
+        hints.len(),
+        2,
+        "Expected 2 parameter hints (a: and b:), got {}: {hints:?}",
+        hints.len()
+    );
+
+    // First hint: "a:" at position of "10"
+    assert_eq!(hints[0]["label"].as_str(), Some("a:"));
+    assert_eq!(hints[0]["kind"].as_u64(), Some(2)); // InlayHintKind::PARAMETER = 2
+    assert_eq!(hints[0]["position"]["line"].as_u64(), Some(12));
+
+    // Second hint: "b:" at position of "20"
+    assert_eq!(hints[1]["label"].as_str(), Some("b:"));
+    assert_eq!(hints[1]["position"]["line"].as_u64(), Some(12));
+
+    client.shutdown();
+}
+
+#[test]
+fn test_inlay_hint_skips_named_arguments() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    // Named arguments already show the parameter name — no hint needed.
+    let uri = file_uri("inlayhint_named.st");
+    let source = "FUNCTION Add : INT\nVAR_INPUT\n    a : INT;\n    b : INT;\nEND_VAR\n    Add := a + b;\nEND_FUNCTION\n\nPROGRAM Main\nVAR\n    result : INT := 0;\nEND_VAR\n    result := Add(a := 10, b := 20);\nEND_PROGRAM\n";
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    let resp = client.request(
+        "textDocument/inlayHint",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 13, "character": 0 }
+            }
+        }),
+    );
+
+    // Named args → no hints should be generated
+    let result = &resp["result"];
+    assert!(
+        result.is_null() || result.as_array().map_or(false, |a| a.is_empty()),
+        "Expected no hints for named arguments, got: {result:?}"
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn test_inlay_hint_skips_when_arg_matches_param_name() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    // When the argument text matches the parameter name, the hint is
+    // redundant and should be suppressed (e.g., `Add(a, b)` where the
+    // params are also named a and b).
+    let uri = file_uri("inlayhint_match.st");
+    let source = "FUNCTION Add : INT\nVAR_INPUT\n    a : INT;\n    b : INT;\nEND_VAR\n    Add := a + b;\nEND_FUNCTION\n\nPROGRAM Main\nVAR\n    a : INT := 10;\n    b : INT := 20;\nEND_VAR\n    a := Add(a, b);\nEND_PROGRAM\n";
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    let resp = client.request(
+        "textDocument/inlayHint",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 14, "character": 0 }
+            }
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(
+        result.is_null() || result.as_array().map_or(false, |a| a.is_empty()),
+        "Expected no hints when arg names match param names, got: {result:?}"
+    );
+
+    client.shutdown();
+}
+
+// =============================================================================
+// Call Hierarchy (cross-reference: who calls what)
+// =============================================================================
+
+/// Source with a call chain: Main → Helper → Validate
+const CALL_HIERARCHY_SOURCE: &str = "\
+FUNCTION Validate : BOOL\n\
+VAR_INPUT\n\
+    val : INT;\n\
+END_VAR\n\
+    Validate := val > 0;\n\
+END_FUNCTION\n\
+\n\
+FUNCTION Helper : INT\n\
+VAR_INPUT\n\
+    x : INT;\n\
+END_VAR\n\
+    IF Validate(val := x) THEN\n\
+        Helper := x * 2;\n\
+    ELSE\n\
+        Helper := 0;\n\
+    END_IF;\n\
+END_FUNCTION\n\
+\n\
+PROGRAM Main\n\
+VAR\n\
+    a : INT := 0;\n\
+    b : INT := 0;\n\
+END_VAR\n\
+    a := Helper(x := 10);\n\
+    b := Helper(x := 20);\n\
+END_PROGRAM\n";
+
+#[test]
+fn test_prepare_call_hierarchy_on_function() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("callhier.st");
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": CALL_HIERARCHY_SOURCE
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    // Cursor on "Helper" function declaration (line 7 = FUNCTION Helper)
+    let resp = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 7, "character": 12 }
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(result.is_array(), "Expected array, got: {result:?}");
+    let items = result.as_array().unwrap();
+    assert_eq!(items.len(), 1, "Expected one CallHierarchyItem");
+    assert_eq!(
+        items[0]["name"].as_str().unwrap().to_uppercase(),
+        "HELPER",
+        "Expected item named Helper"
+    );
+    assert!(items[0]["kind"].is_number(), "Expected a symbol kind");
+
+    client.shutdown();
+}
+
+#[test]
+fn test_incoming_calls_finds_callers() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("callhier_in.st");
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": CALL_HIERARCHY_SOURCE
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    // First, prepare on "Helper" to get its CallHierarchyItem
+    let prep = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 7, "character": 12 }
+        }),
+    );
+    let item = &prep["result"][0];
+
+    // Then ask for incoming calls (who calls Helper?)
+    let resp = client.request(
+        "callHierarchy/incomingCalls",
+        json!({ "item": item }),
+    );
+
+    let result = &resp["result"];
+    assert!(result.is_array(), "Expected incoming calls array, got: {result:?}");
+    let calls = result.as_array().unwrap();
+
+    // Helper is called by Main (twice: lines 23 and 24)
+    assert!(
+        !calls.is_empty(),
+        "Expected at least one caller of Helper"
+    );
+    let caller_names: Vec<&str> = calls
+        .iter()
+        .filter_map(|c| c["from"]["name"].as_str())
+        .collect();
+    assert!(
+        caller_names.iter().any(|n| n.eq_ignore_ascii_case("Main")),
+        "Expected Main to call Helper, got callers: {caller_names:?}"
+    );
+
+    // The from_ranges should have 2 entries (two calls on lines 23 and 24)
+    let main_call = calls
+        .iter()
+        .find(|c| {
+            c["from"]["name"]
+                .as_str()
+                .map_or(false, |n| n.eq_ignore_ascii_case("Main"))
+        })
+        .unwrap();
+    let from_ranges = main_call["fromRanges"].as_array().unwrap();
+    assert_eq!(
+        from_ranges.len(),
+        2,
+        "Main calls Helper twice, expected 2 ranges, got {}",
+        from_ranges.len()
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn test_outgoing_calls_finds_callees() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("callhier_out.st");
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": CALL_HIERARCHY_SOURCE
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    // Prepare on "Helper"
+    let prep = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 7, "character": 12 }
+        }),
+    );
+    let item = &prep["result"][0];
+
+    // Ask for outgoing calls (what does Helper call?)
+    let resp = client.request(
+        "callHierarchy/outgoingCalls",
+        json!({ "item": item }),
+    );
+
+    let result = &resp["result"];
+    assert!(result.is_array(), "Expected outgoing calls array, got: {result:?}");
+    let calls = result.as_array().unwrap();
+
+    // Helper calls Validate (once, inside the IF)
+    let callee_names: Vec<&str> = calls
+        .iter()
+        .filter_map(|c| c["to"]["name"].as_str())
+        .collect();
+    assert!(
+        callee_names.iter().any(|n| n.eq_ignore_ascii_case("Validate")),
+        "Expected Helper to call Validate, got callees: {callee_names:?}"
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn test_incoming_calls_of_validate_finds_helper() {
+    // Validate is called only by Helper (not by Main directly).
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("callhier_val.st");
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": CALL_HIERARCHY_SOURCE
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    // Prepare on "Validate" (line 0 = FUNCTION Validate)
+    let prep = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 0, "character": 12 }
+        }),
+    );
+    let item = &prep["result"][0];
+
+    let resp = client.request(
+        "callHierarchy/incomingCalls",
+        json!({ "item": item }),
+    );
+
+    let calls = resp["result"].as_array().unwrap();
+    let caller_names: Vec<&str> = calls
+        .iter()
+        .filter_map(|c| c["from"]["name"].as_str())
+        .collect();
+    assert!(
+        caller_names.iter().any(|n| n.eq_ignore_ascii_case("Helper")),
+        "Expected Helper to call Validate, got callers: {caller_names:?}"
+    );
+    // Main does NOT call Validate directly
+    assert!(
+        !caller_names.iter().any(|n| n.eq_ignore_ascii_case("Main")),
+        "Main should NOT appear as a direct caller of Validate"
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn test_call_hierarchy_capability_advertised() {
+    let mut client = TestClient::start();
+    let resp = client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+
+    let caps = &resp["result"]["capabilities"];
+    assert!(
+        caps["callHierarchyProvider"].as_bool().unwrap_or(false),
+        "callHierarchyProvider should be advertised: {caps:?}"
+    );
+    assert!(
+        caps["documentOnTypeFormattingProvider"].is_object(),
+        "documentOnTypeFormattingProvider should be advertised: {caps:?}"
+    );
+
+    client.notify("initialized", json!({}));
+    client.shutdown();
+}
+
+// =============================================================================
+// On-Type Formatting (auto-indent after Enter / ;)
+// =============================================================================
+
+#[test]
+fn test_on_type_formatting_indent_after_if_then() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    // Source BEFORE the user presses Enter after THEN:
+    //   0  PROGRAM Main
+    //   1  VAR
+    //   2      x : INT := 0;
+    //   3  END_VAR
+    //   4      IF x > 0 THEN
+    //   5  <cursor here after Enter — new empty line>
+    //   6      END_IF;
+    //   7  END_PROGRAM
+    let uri = file_uri("ontypefmt_then.st");
+    let source = "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    IF x > 0 THEN\n\n    END_IF;\nEND_PROGRAM\n";
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    // Simulate Enter at line 5 (the empty line after THEN)
+    let resp = client.request(
+        "textDocument/onTypeFormatting",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 5, "character": 0 },
+            "ch": "\n",
+            "options": { "tabSize": 4, "insertSpaces": true }
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(
+        result.is_array(),
+        "Expected TextEdit array for auto-indent after THEN, got: {result:?}"
+    );
+    let edits = result.as_array().unwrap();
+    assert!(!edits.is_empty(), "Expected at least one indent edit");
+
+    // The edit should set the new line's indent to 8 spaces (4 for IF scope + 4 for THEN body)
+    let new_text = edits[0]["newText"].as_str().unwrap_or("");
+    assert_eq!(
+        new_text.len(),
+        8,
+        "Expected 8 spaces of indent (2 levels × 4), got {} spaces: {:?}",
+        new_text.len(),
+        new_text
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn test_on_type_formatting_indent_after_var() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    // Source with cursor on empty line after VAR
+    //   0  PROGRAM Main
+    //   1  VAR
+    //   2  <cursor — empty line after VAR>
+    //   3  END_VAR
+    //   4      x := 1;
+    //   5  END_PROGRAM
+    let uri = file_uri("ontypefmt_var.st");
+    let source = "PROGRAM Main\nVAR\n\nEND_VAR\n    x := 1;\nEND_PROGRAM\n";
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    let resp = client.request(
+        "textDocument/onTypeFormatting",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 2, "character": 0 },
+            "ch": "\n",
+            "options": { "tabSize": 4, "insertSpaces": true }
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(result.is_array(), "Expected edits, got: {result:?}");
+    let edits = result.as_array().unwrap();
+    assert!(!edits.is_empty());
+
+    // VAR at indent 0 → body should be at indent 4
+    let new_text = edits[0]["newText"].as_str().unwrap_or("");
+    assert_eq!(
+        new_text.len(),
+        4,
+        "Expected 4 spaces indent after VAR, got {}: {:?}",
+        new_text.len(),
+        new_text
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn test_on_type_formatting_no_indent_change_for_normal_line() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    // Source where previous line is a normal statement (no opener)
+    //   0  PROGRAM Main
+    //   1  VAR
+    //   2      x : INT := 0;
+    //   3  END_VAR
+    //   4      x := 1;
+    //   5  <cursor — should match indent of line 4>
+    //   6  END_PROGRAM
+    let uri = file_uri("ontypefmt_normal.st");
+    let source = "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    x := 1;\n\nEND_PROGRAM\n";
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    let resp = client.request(
+        "textDocument/onTypeFormatting",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 5, "character": 0 },
+            "ch": "\n",
+            "options": { "tabSize": 4, "insertSpaces": true }
+        }),
+    );
+
+    let result = &resp["result"];
+    // Either null (no change needed) or an edit that sets 4-space indent
+    // (matching the previous statement's indent level).
+    if result.is_array() {
+        let edits = result.as_array().unwrap();
+        if !edits.is_empty() {
+            let new_text = edits[0]["newText"].as_str().unwrap_or("");
+            assert_eq!(
+                new_text.len(),
+                4,
+                "Normal line should match previous indent (4 spaces), got {}",
+                new_text.len()
+            );
+        }
+    }
+    // null is also acceptable (previous indent matches, no edit needed)
+
+    client.shutdown();
+}
+
+#[test]
+fn test_on_type_formatting_semicolon_reindents_end_if() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    // Source where END_IF; is at the WRONG indent level (too deep).
+    // After typing ';', the formatter should reindent it.
+    //   0  PROGRAM Main
+    //   1  VAR
+    //   2      x : INT := 0;
+    //   3  END_VAR
+    //   4      IF x > 0 THEN
+    //   5          x := 1;
+    //   6          END_IF;   <-- too deep, should be 4 spaces
+    //   7  END_PROGRAM
+    let uri = file_uri("ontypefmt_semi.st");
+    let source = "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    IF x > 0 THEN\n        x := 1;\n        END_IF;\nEND_PROGRAM\n";
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    // Simulate ';' typed at the end of "        END_IF;" (line 6)
+    let resp = client.request(
+        "textDocument/onTypeFormatting",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 6, "character": 14 },
+            "ch": ";",
+            "options": { "tabSize": 4, "insertSpaces": true }
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(
+        result.is_array(),
+        "Expected TextEdit for END_IF reindent, got: {result:?}"
+    );
+    let edits = result.as_array().unwrap();
+    assert!(!edits.is_empty(), "Expected a reindent edit");
+
+    // The edit should reduce indent from 8 to 4 spaces.
+    let new_text = edits[0]["newText"].as_str().unwrap_or("");
+    assert_eq!(
+        new_text.len(),
+        4,
+        "END_IF should be reindented to 4 spaces, got {}: {:?}",
+        new_text.len(),
+        new_text
+    );
+
+    client.shutdown();
+}
+
+// =============================================================================
+// Linked Editing Range (matching keyword pairs: IF ↔ END_IF, etc.)
+// =============================================================================
+
+#[test]
+fn test_linked_editing_range_if_end_if() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    // Source:
+    //   0  PROGRAM Main
+    //   1  VAR
+    //   2      x : INT := 0;
+    //   3  END_VAR
+    //   4      IF x > 0 THEN
+    //   5          x := 1;
+    //   6      END_IF;
+    //   7  END_PROGRAM
+    let uri = file_uri("linked_if.st");
+    let source = "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    IF x > 0 THEN\n        x := 1;\n    END_IF;\nEND_PROGRAM\n";
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    // Cursor on "IF" keyword (line 4, character 4 = inside "IF")
+    let resp = client.request(
+        "textDocument/linkedEditingRange",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 4, "character": 5 }
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(
+        result.is_object(),
+        "Expected LinkedEditingRanges object, got: {result:?}"
+    );
+    let ranges = result["ranges"].as_array().unwrap();
+    assert_eq!(
+        ranges.len(),
+        2,
+        "Expected 2 linked ranges (IF + END_IF), got {}: {ranges:?}",
+        ranges.len()
+    );
+
+    // First range should be "IF" (line 4)
+    assert_eq!(ranges[0]["start"]["line"].as_u64(), Some(4));
+    // Second range should be "END_IF" (line 6)
+    assert_eq!(ranges[1]["start"]["line"].as_u64(), Some(6));
+
+    client.shutdown();
+}
+
+#[test]
+fn test_linked_editing_range_from_end_keyword() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("linked_end.st");
+    let source = "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    IF x > 0 THEN\n        x := 1;\n    END_IF;\nEND_PROGRAM\n";
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    // Cursor on "END_IF" keyword (line 6, inside the word)
+    let resp = client.request(
+        "textDocument/linkedEditingRange",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 6, "character": 6 }
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(
+        result.is_object(),
+        "Expected linked ranges from END_IF cursor, got: {result:?}"
+    );
+    let ranges = result["ranges"].as_array().unwrap();
+    assert_eq!(ranges.len(), 2);
+
+    // Should link END_IF back to IF
+    let lines: Vec<u64> = ranges
+        .iter()
+        .filter_map(|r| r["start"]["line"].as_u64())
+        .collect();
+    assert!(lines.contains(&4), "Expected IF on line 4: {lines:?}");
+    assert!(lines.contains(&6), "Expected END_IF on line 6: {lines:?}");
+
+    client.shutdown();
+}
+
+#[test]
+fn test_linked_editing_range_program_end_program() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("linked_prog.st");
+    let source = "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    x := 1;\nEND_PROGRAM\n";
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    // Cursor on "PROGRAM" (line 0, character 3)
+    let resp = client.request(
+        "textDocument/linkedEditingRange",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 0, "character": 3 }
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(result.is_object(), "Expected linked ranges, got: {result:?}");
+    let ranges = result["ranges"].as_array().unwrap();
+    assert_eq!(ranges.len(), 2);
+    assert_eq!(ranges[0]["start"]["line"].as_u64(), Some(0)); // PROGRAM
+    assert_eq!(ranges[1]["start"]["line"].as_u64(), Some(5)); // END_PROGRAM
+
+    client.shutdown();
+}
+
+#[test]
+fn test_linked_editing_range_var_end_var() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("linked_var.st");
+    let source = "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    x := 1;\nEND_PROGRAM\n";
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    // Cursor on "VAR" (line 1)
+    let resp = client.request(
+        "textDocument/linkedEditingRange",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 1, "character": 1 }
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(result.is_object(), "Expected linked ranges for VAR, got: {result:?}");
+    let ranges = result["ranges"].as_array().unwrap();
+    assert_eq!(ranges.len(), 2);
+    assert_eq!(ranges[0]["start"]["line"].as_u64(), Some(1)); // VAR
+    assert_eq!(ranges[1]["start"]["line"].as_u64(), Some(3)); // END_VAR
+
+    client.shutdown();
+}
+
+#[test]
+fn test_linked_editing_range_no_result_on_non_keyword() {
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("linked_none.st");
+    let source = "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    x := 1;\nEND_PROGRAM\n";
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    // Cursor on "x" (a variable, not a keyword)
+    let resp = client.request(
+        "textDocument/linkedEditingRange",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 4, "character": 5 }
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(
+        result.is_null(),
+        "Expected null for non-keyword position, got: {result:?}"
+    );
+
+    client.shutdown();
+}

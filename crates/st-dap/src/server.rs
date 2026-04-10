@@ -340,6 +340,19 @@ enum ScopeKind {
     Globals,
 }
 
+/// Reference to a FB instance for hierarchical variable expansion.
+/// When VS Code expands a FB in the Variables panel, we use this to
+/// fetch the instance's field values from `vm.fb_instances`.
+#[derive(Debug, Clone, Copy)]
+struct FbVarRef {
+    /// The caller identity (encodes who owns this FB instance).
+    caller_id: u32,
+    /// The slot index of this FB instance in its parent's locals.
+    slot_idx: u16,
+    /// The function index of the FB's definition (for locals layout).
+    fb_func_idx: u16,
+}
+
 struct DapSession {
     source_path: String,
     source: String,
@@ -356,8 +369,19 @@ struct DapSession {
     pending_breakpoints: std::collections::HashMap<String, (String, Vec<u32>)>,
     /// Maps variable reference IDs to scope kinds for Variables requests.
     scope_refs: std::collections::HashMap<i64, ScopeKind>,
+    /// Maps variable reference IDs to FB instance locations for hierarchical
+    /// expansion. When VS Code expands a FB instance in the Variables panel,
+    /// it sends a Variables request with the ref ID → we look up the FB
+    /// instance state and return its fields as children.
+    fb_var_refs: std::collections::HashMap<i64, FbVarRef>,
     /// Communication manager for simulated devices (read inputs / write outputs each scan).
     comm: CommManager,
+    /// Per-file byte offsets in the virtual concatenated text produced by
+    /// `parse_multi()`. Maps file path → virtual offset. Used by
+    /// `set_line_breakpoints` to align file-local line numbers with the
+    /// compiled module's source_map entries. For single-file mode, the
+    /// only entry is `(self.source_path, stdlib_total_length)`.
+    file_virtual_offsets: std::collections::HashMap<String, usize>,
     /// Comm setup data (config, profiles, generated source) loaded from plc-project.yaml.
     comm_setup: Option<comm_setup::CommSetup>,
     /// Live scan cycle statistics (populated by the DAP run loop).
@@ -418,8 +442,10 @@ impl DapSession {
             project_files: Vec::new(),
             pending_breakpoints: std::collections::HashMap::new(),
             scope_refs: std::collections::HashMap::new(),
+            fb_var_refs: std::collections::HashMap::new(),
             next_var_ref: 1000,
             comm: CommManager::new(),
+            file_virtual_offsets: std::collections::HashMap::new(),
             comm_setup: None,
             cycle_stats: CycleStats {
                 min_cycle_time: Duration::MAX,
@@ -438,6 +464,69 @@ impl DapSession {
             deferred_requests: Vec::new(),
             deferred_responses: Vec::new(),
         }
+    }
+
+    /// Build a compact summary string for a FB instance, e.g., "CV=2, Q=FALSE".
+    fn fb_summary_value(
+        &self,
+        vm: &st_runtime::vm::Vm,
+        caller_id: u32,
+        slot_idx: u16,
+        fb_func_idx: u16,
+    ) -> String {
+        let fb_func = &vm.module().functions[fb_func_idx as usize];
+        let instance_key = (caller_id, slot_idx);
+        let fb_state = vm.fb_instances_ref().get(&instance_key);
+        let mut parts = Vec::new();
+        // Show VAR_OUTPUT fields first (most interesting), then VAR_INPUT
+        for (j, fb_slot) in fb_func.locals.slots.iter().enumerate() {
+            if matches!(fb_slot.ty, st_ir::VarType::FbInstance(_) | st_ir::VarType::ClassInstance(_)) {
+                continue; // skip nested FB/class instances in the summary
+            }
+            let val = fb_state
+                .and_then(|s| s.get(j))
+                .cloned()
+                .unwrap_or(st_ir::Value::Void);
+            if val == st_ir::Value::Void {
+                continue;
+            }
+            parts.push(format!("{}={}", fb_slot.name, st_runtime::debug::format_value(&val)));
+            if parts.len() >= 4 {
+                parts.push("...".to_string());
+                break;
+            }
+        }
+        if parts.is_empty() {
+            "(no state)".to_string()
+        } else {
+            parts.join(", ")
+        }
+    }
+
+    /// Look up the virtual offset for a file path. Falls back to:
+    /// 1. Exact match in `file_virtual_offsets`
+    /// 2. Canonical-path match
+    /// 3. The primary source file's offset (single-file default)
+    /// 4. Zero
+    fn resolve_virtual_offset(&self, path: Option<&str>) -> usize {
+        if let Some(p) = path {
+            if let Some(v) = self.file_virtual_offsets.get(p) {
+                return *v;
+            }
+            if let Ok(canon) = std::fs::canonicalize(p) {
+                for (k, v) in &self.file_virtual_offsets {
+                    if std::fs::canonicalize(k).ok().as_ref() == Some(&canon) {
+                        return *v;
+                    }
+                }
+            }
+        }
+        // Fall back to the primary source file's offset (for single-file
+        // tests where VS Code sends a synthetic path like "test.st").
+        self.file_virtual_offsets
+            .get(&self.source_path)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Install the request channel receiver. Called by `run_dap` after the
@@ -633,7 +722,23 @@ impl DapSession {
             let mut all_sources: Vec<&str> = stdlib.to_vec();
             // The comm globals come from `_io_map.st` which is on disk and
             // already part of `sources` via project autodiscovery.
+            let source_paths: Vec<String> = sources.iter()
+                .map(|(p, _)| p.to_string_lossy().to_string())
+                .collect();
             let owned: Vec<String> = sources.into_iter().map(|(_, content)| content).collect();
+
+            // Compute per-file virtual offsets before pushing sources.
+            // Offset = sum of all preceding source lengths.
+            let stdlib_len: usize = all_sources.iter().map(|s| s.len()).sum();
+            let mut cumulative = stdlib_len;
+            self.file_virtual_offsets.clear();
+            for (i, s) in owned.iter().enumerate() {
+                if i < source_paths.len() {
+                    self.file_virtual_offsets.insert(source_paths[i].clone(), cumulative);
+                }
+                cumulative += s.len();
+            }
+
             for s in &owned {
                 all_sources.push(s.as_str());
             }
@@ -651,6 +756,10 @@ impl DapSession {
             // Include stdlib
             let stdlib = st_syntax::multi_file::builtin_stdlib();
             let mut all_sources: Vec<&str> = stdlib.to_vec();
+            let stdlib_offset: usize = all_sources.iter().map(|s| s.len()).sum();
+            self.file_virtual_offsets.clear();
+            self.file_virtual_offsets
+                .insert(self.source_path.clone(), stdlib_offset);
             all_sources.push(&self.source);
 
             Ok(st_syntax::multi_file::parse_multi(&all_sources))
@@ -820,58 +929,56 @@ impl DapSession {
     ) -> Response {
         let mut breakpoints = Vec::new();
 
-        if let Some(ref mut vm) = self.vm {
-            let module = vm.module().clone();
-            if let Some(ref source_bps) = args.breakpoints {
-                let lines: Vec<u32> = source_bps.iter().map(|bp| bp.line as u32).collect();
+        // Pre-compute source content and virtual offsets BEFORE borrowing
+        // self.vm mutably, since resolve_virtual_offset borrows self.
+        let bp_source_path = args.source.path.as_ref().map(|p| p.to_string());
+        let bp_source_content = if let Some(ref path) = bp_source_path {
+            self.project_files.iter()
+                .find(|(p, _)| {
+                    let p_canon = std::fs::canonicalize(p).ok();
+                    let bp_canon = std::fs::canonicalize(path).ok();
+                    p_canon.is_some() && p_canon == bp_canon
+                })
+                .map(|(_, content)| content.clone())
+                .or_else(|| std::fs::read_to_string(path).ok())
+                .unwrap_or_else(|| self.source.clone())
+        } else {
+            self.source.clone()
+        };
 
-                // Determine which source file these breakpoints are for.
-                // VS Code sends the file path in args.source.
-                let bp_source_path = args.source.path.as_ref()
-                    .map(|p| p.to_string());
+        if let Some(ref source_bps) = args.breakpoints {
+            let lines: Vec<u32> = source_bps.iter().map(|bp| bp.line as u32).collect();
 
-                let bp_source_content = if let Some(ref path) = bp_source_path {
-                    // Try to find this file in project_files
-                    self.project_files.iter()
-                        .find(|(p, _)| {
-                            // Compare canonical paths to handle symlinks/relative paths
-                            let p_canon = std::fs::canonicalize(p).ok();
-                            let bp_canon = std::fs::canonicalize(path).ok();
-                            p_canon.is_some() && p_canon == bp_canon
-                        })
-                        .map(|(_, content)| content.clone())
-                        .or_else(|| {
-                            // Fallback: try reading the file directly
-                            std::fs::read_to_string(path).ok()
-                        })
-                        .unwrap_or_else(|| self.source.clone())
-                } else {
-                    self.source.clone()
-                };
+            // Store pending breakpoints per file path
+            if let Some(ref path) = bp_source_path {
+                self.pending_breakpoints.insert(path.clone(), (bp_source_content.clone(), lines.clone()));
+            } else {
+                self.pending_breakpoints.insert(self.source_path.clone(), (bp_source_content.clone(), lines.clone()));
+            }
+
+            // Pre-compute all virtual offsets
+            let mut bp_offsets: Vec<(String, String, Vec<u32>, usize)> = Vec::new();
+            for (path, (source, file_lines)) in &self.pending_breakpoints {
+                let voff = self.resolve_virtual_offset(Some(path));
+                bp_offsets.push((path.clone(), source.clone(), file_lines.clone(), voff));
+            }
+            let bp_voff = self.resolve_virtual_offset(bp_source_path.as_deref());
+
+            if let Some(ref mut vm) = self.vm {
+                let module = vm.module().clone();
 
                 eprintln!("[DAP] SetBreakpoints: file={:?} lines={lines:?}, source len={}",
                     bp_source_path, bp_source_content.len());
 
-                // Don't clear ALL breakpoints — only set new ones additively.
-                // VS Code sends complete breakpoint list per file, so we rebuild from scratch.
                 vm.debug_mut().clear_breakpoints();
 
-                // Re-apply breakpoints for ALL files we know about
-                // (VS Code sends SetBreakpoints per file, but we need to accumulate)
-                // Store pending breakpoints per file path
-                if let Some(path) = bp_source_path {
-                    self.pending_breakpoints.insert(path, (bp_source_content.clone(), lines.clone()));
-                } else {
-                    self.pending_breakpoints.insert(self.source_path.clone(), (bp_source_content.clone(), lines.clone()));
-                }
-
-                // Apply ALL accumulated breakpoints
-                for (source, file_lines) in self.pending_breakpoints.values() {
-                    vm.debug_mut().set_line_breakpoints(&module, source, file_lines);
+                // Apply ALL accumulated breakpoints with their virtual offsets
+                for (_, source, file_lines, voff) in &bp_offsets {
+                    vm.debug_mut().set_line_breakpoints(&module, source, file_lines, *voff);
                 }
 
                 // Report results for THIS file's breakpoints
-                let results = vm.debug_mut().set_line_breakpoints(&module, &bp_source_content, &lines);
+                let results = vm.debug_mut().set_line_breakpoints(&module, &bp_source_content, &lines, bp_voff);
                 eprintln!("[DAP] Breakpoint results: {results:?}");
 
                 for (i, result) in results.iter().enumerate() {
@@ -919,7 +1026,19 @@ impl DapSession {
                         )
                     };
 
-                let (line, _) = byte_offset_to_line_col(source_text, frame.source_offset);
+                // frame.source_offset is in virtual space — subtract
+                // the file's virtual offset to get file-local byte offset.
+                let voff = self.file_virtual_offsets.get(&source_path)
+                    .or_else(|| {
+                        let canon = std::fs::canonicalize(&source_path).ok()?;
+                        self.file_virtual_offsets.iter()
+                            .find(|(k, _)| std::fs::canonicalize(k).ok().as_ref() == Some(&canon))
+                            .map(|(_, v)| v)
+                    })
+                    .copied()
+                    .unwrap_or(0);
+                let local_offset = frame.source_offset.saturating_sub(voff);
+                let (line, _) = byte_offset_to_line_col(source_text, local_offset);
                 stack_frames.push(StackFrame {
                     id: i as i64,
                     name: frame.func_name.clone(),
@@ -968,26 +1087,131 @@ impl DapSession {
         }))
     }
 
-    fn handle_variables(&self, seq: i64, args: &dap::requests::VariablesArguments) -> Response {
+    fn handle_variables(&mut self, seq: i64, args: &dap::requests::VariablesArguments) -> Response {
         let mut variables = Vec::new();
+        let ref_id = args.variables_reference;
 
         if let Some(ref vm) = self.vm {
-            let scope_kind = self.scope_refs.get(&args.variables_reference)
-                .copied()
-                .unwrap_or(ScopeKind::Locals);
-            let vars = match scope_kind {
-                ScopeKind::Locals => vm.current_locals(),
-                ScopeKind::Globals => vm.global_variables(),
-            };
+            // Check if this is a request for FB instance children.
+            if let Some(fb_ref) = self.fb_var_refs.get(&ref_id).copied() {
+                let fb_func = &vm.module().functions[fb_ref.fb_func_idx as usize];
+                let instance_key = (fb_ref.caller_id, fb_ref.slot_idx);
+                let fb_state = vm.fb_instances_ref().get(&instance_key);
 
-            for v in vars {
-                variables.push(Variable {
-                    name: v.name,
-                    value: v.value,
-                    type_field: Some(v.ty),
-                    variables_reference: 0,
-                    ..Default::default()
-                });
+                for (j, fb_slot) in fb_func.locals.slots.iter().enumerate() {
+                    let fb_value = fb_state
+                        .and_then(|s| s.get(j))
+                        .cloned()
+                        .unwrap_or(st_ir::Value::Void);
+
+                    // Nested FBs get their own variablesReference for further expansion.
+                    let child_ref = if let st_ir::VarType::FbInstance(nested_idx) = fb_slot.ty {
+                        let id = self.next_var_ref;
+                        self.next_var_ref += 1;
+                        // caller_id for nested = (parent_slot << 16) | parent_fb_func
+                        let nested_caller =
+                            ((fb_ref.slot_idx as u32) << 16) | (fb_ref.fb_func_idx as u32);
+                        self.fb_var_refs.insert(
+                            id,
+                            FbVarRef {
+                                caller_id: nested_caller,
+                                slot_idx: j as u16,
+                                fb_func_idx: nested_idx,
+                            },
+                        );
+                        id
+                    } else {
+                        0
+                    };
+
+                    variables.push(Variable {
+                        name: fb_slot.name.clone(),
+                        value: st_runtime::debug::format_value(&fb_value),
+                        type_field: Some(
+                            st_runtime::debug::format_var_type_with_width(
+                                fb_slot.ty,
+                                fb_slot.int_width,
+                            )
+                            .to_string(),
+                        ),
+                        variables_reference: child_ref,
+                        ..Default::default()
+                    });
+                }
+                return ok(
+                    seq,
+                    ResponseBody::Variables(dap::responses::VariablesResponse { variables }),
+                );
+            }
+
+            // Normal scope-based dispatch (Locals or Globals).
+            let scope_kind = self.scope_refs.get(&ref_id).copied().unwrap_or(ScopeKind::Locals);
+
+            if matches!(scope_kind, ScopeKind::Locals) {
+                // Build locals with FB instances as expandable tree nodes.
+                if let Some(frame) = vm.stack_frames().first() {
+                    let func_index = frame.func_index;
+                    let func = &vm.module().functions[func_index as usize];
+                    let caller_id = vm.caller_identity_pub();
+
+                    for (i, slot) in func.locals.slots.iter().enumerate() {
+                        if let st_ir::VarType::FbInstance(fb_idx) = slot.ty {
+                            // FB instance → expandable node with variablesReference.
+                            let fb_ref_id = self.next_var_ref;
+                            self.next_var_ref += 1;
+                            self.fb_var_refs.insert(
+                                fb_ref_id,
+                                FbVarRef {
+                                    caller_id,
+                                    slot_idx: i as u16,
+                                    fb_func_idx: fb_idx,
+                                },
+                            );
+                            let fb_func = &vm.module().functions[fb_idx as usize];
+                            // Build a summary value like "CTU (CV=2, Q=FALSE)"
+                            let summary = self.fb_summary_value(vm, caller_id, i as u16, fb_idx);
+                            variables.push(Variable {
+                                name: slot.name.clone(),
+                                value: summary,
+                                type_field: Some(fb_func.name.clone()),
+                                variables_reference: fb_ref_id,
+                                ..Default::default()
+                            });
+                        } else if matches!(slot.ty, st_ir::VarType::ClassInstance(_)) {
+                            // Skip class instances for now
+                        } else {
+                            let value = vm.current_locals()
+                                .iter()
+                                .find(|v| v.name.eq_ignore_ascii_case(&slot.name))
+                                .map(|v| v.value.clone())
+                                .unwrap_or_else(|| "?".to_string());
+                            variables.push(Variable {
+                                name: slot.name.clone(),
+                                value,
+                                type_field: Some(
+                                    st_runtime::debug::format_var_type_with_width(
+                                        slot.ty,
+                                        slot.int_width,
+                                    )
+                                    .to_string(),
+                                ),
+                                variables_reference: 0,
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+            } else {
+                let vars = vm.global_variables();
+                for v in vars {
+                    variables.push(Variable {
+                        name: v.name,
+                        value: v.value,
+                        type_field: Some(v.ty),
+                        variables_reference: 0,
+                        ..Default::default()
+                    });
+                }
             }
         }
 
@@ -1037,27 +1261,87 @@ impl DapSession {
             return self.eval_text_response(seq, "Catalog pushed");
         }
 
-        // Normal variable lookup
+        // Normal variable lookup: first check locals + globals by exact name,
+        // then fall back to monitorable_variables which includes FB instance
+        // fields like `Main.filler.counter.Q`. For dotted expressions like
+        // `counter.Q` typed in the debug console while paused inside a FB,
+        // we also try qualifying with the current POU name.
         let mut result_str = "<unknown>".to_string();
+        let mut var_ref: i64 = 0;
+        let mut type_name: Option<String> = None;
 
         if let Some(ref vm) = self.vm {
-            let locals = vm.current_locals();
-            let globals = vm.global_variables();
+            // First: check if the expression matches a FB instance local
+            // in the current frame. If so, return it as expandable.
+            if let Some(frame) = vm.stack_frames().first() {
+                let func = &vm.module().functions[frame.func_index as usize];
+                let caller_id = vm.caller_identity_pub();
+                if let Some((slot_idx, slot)) = func.locals.find_slot(expr) {
+                    if let st_ir::VarType::FbInstance(fb_idx) = slot.ty {
+                        // FB instance → expandable in the Watch panel
+                        let ref_id = self.next_var_ref;
+                        self.next_var_ref += 1;
+                        self.fb_var_refs.insert(
+                            ref_id,
+                            FbVarRef {
+                                caller_id,
+                                slot_idx,
+                                fb_func_idx: fb_idx,
+                            },
+                        );
+                        let fb_func = &vm.module().functions[fb_idx as usize];
+                        result_str = self.fb_summary_value(vm, caller_id, slot_idx, fb_idx);
+                        var_ref = ref_id;
+                        type_name = Some(fb_func.name.clone());
+                    } else {
+                        // Scalar local — look up via current_locals()
+                        let locals = vm.current_locals();
+                        if let Some(v) = locals.iter().find(|v| v.name.eq_ignore_ascii_case(expr)) {
+                            result_str = v.value.clone();
+                            type_name = Some(v.ty.clone());
+                        }
+                    }
+                }
+            }
 
-            if let Some(v) = locals
-                .iter()
-                .chain(globals.iter())
-                .find(|v| v.name.eq_ignore_ascii_case(expr))
-            {
-                result_str = v.value.clone();
+            // If not found in locals, try globals + FB field paths
+            if result_str == "<unknown>" {
+                let globals = vm.global_variables();
+                if let Some(v) = globals
+                    .iter()
+                    .find(|v| v.name.eq_ignore_ascii_case(expr))
+                {
+                    result_str = v.value.clone();
+                    type_name = Some(v.ty.clone());
+                } else if expr.contains('.') {
+                    // Dotted path: try resolving as a FB instance field
+                    if let Some(v) = vm.resolve_fb_field(expr) {
+                        result_str = v.value;
+                        type_name = Some(v.ty);
+                    } else {
+                        let all = vm.monitorable_variables();
+                        if let Some(v) = all
+                            .iter()
+                            .find(|v| {
+                                v.name.eq_ignore_ascii_case(expr)
+                                    || v.name.to_uppercase().ends_with(
+                                        &format!(".{}", expr.to_uppercase()),
+                                    )
+                            })
+                        {
+                            result_str = v.value.clone();
+                            type_name = Some(v.ty.clone());
+                        }
+                    }
+                }
             }
         }
 
         ok(seq, ResponseBody::Evaluate(dap::responses::EvaluateResponse {
             result: result_str,
-            type_field: None,
+            type_field: type_name,
             presentation_hint: None,
-            variables_reference: 0,
+            variables_reference: var_ref,
             named_variables: None,
             indexed_variables: None,
             memory_reference: None,
@@ -1377,23 +1661,40 @@ impl DapSession {
                 .map(|vm| {
                     let all = vm.monitorable_variables();
                     let forced = vm.forced_variables();
-                    self.watched_variables
-                        .iter()
-                        .filter_map(|name| {
-                            all.iter()
-                                .find(|v| v.name.eq_ignore_ascii_case(name))
-                                .map(|v| {
-                                    let is_forced =
-                                        forced.contains_key(&v.name.to_uppercase());
-                                    serde_json::json!({
-                                        "name": v.name,
-                                        "value": v.value,
-                                        "type": v.ty,
-                                        "forced": is_forced,
-                                    })
-                                })
-                        })
-                        .collect()
+                    let mut result = Vec::new();
+                    let mut seen = std::collections::HashSet::new();
+                    for name in &self.watched_variables {
+                        let upper = name.to_uppercase();
+                        let prefix = format!("{}.", upper);
+                        // Exact match (scalar variable)
+                        if let Some(v) = all.iter().find(|v| v.name.eq_ignore_ascii_case(name)) {
+                            if seen.insert(v.name.to_uppercase()) {
+                                let is_forced = forced.contains_key(&v.name.to_uppercase());
+                                result.push(serde_json::json!({
+                                    "name": v.name,
+                                    "value": v.value,
+                                    "type": v.ty,
+                                    "forced": is_forced,
+                                }));
+                            }
+                        }
+                        // Prefix match: include ALL descendants. The panel
+                        // builds the tree from the dotted path names.
+                        for v in &all {
+                            if v.name.to_uppercase().starts_with(&prefix)
+                                && seen.insert(v.name.to_uppercase())
+                            {
+                                let is_forced = forced.contains_key(&v.name.to_uppercase());
+                                result.push(serde_json::json!({
+                                    "name": v.name,
+                                    "value": v.value,
+                                    "type": v.ty,
+                                    "forced": is_forced,
+                                }));
+                            }
+                        }
+                    }
+                    result
                 })
                 .unwrap_or_default()
         };
@@ -1467,12 +1768,18 @@ impl DapSession {
         vm.stack_frames()
             .first()
             .map(|f| {
-                let src = self
+                let (src, src_path) = self
                     .func_source_map
                     .get(&f.func_name)
-                    .map(|(_, c)| c.as_str())
-                    .unwrap_or(&self.source);
-                let (line, _) = byte_offset_to_line_col(src, f.source_offset);
+                    .map(|(p, c)| (c.as_str(), p.as_str()))
+                    .unwrap_or((&self.source, &self.source_path));
+                let voff = self
+                    .file_virtual_offsets
+                    .get(src_path)
+                    .copied()
+                    .unwrap_or(0);
+                let local_offset = f.source_offset.saturating_sub(voff);
+                let (line, _) = byte_offset_to_line_col(src, local_offset);
                 format!("{} line {line}", f.func_name)
             })
             .unwrap_or_else(|| "<unknown>".to_string())
@@ -1607,6 +1914,7 @@ impl DapSession {
         // of pause/resume cycles in a long debug session. The next `Scopes`
         // request after the next Stopped event will allocate fresh refs.
         self.scope_refs.clear();
+        self.fb_var_refs.clear();
 
         // Setup: tell the VM what stepping mode we're in and where we are.
         let (depth, current_source_offset, program_name) = {

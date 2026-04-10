@@ -247,6 +247,7 @@ export class MonitorPanel {
       display: flex;
       gap: 6px;
       margin-bottom: 8px;
+      position: relative;
     }
     .add-row input {
       flex: 1;
@@ -289,6 +290,42 @@ export class MonitorPanel {
       padding: 12px;
     }
     .pending { color: var(--vscode-descriptionForeground); }
+    .tree-toggle {
+      cursor: pointer;
+      font-size: 11px;
+      user-select: none;
+      display: inline-block;
+      width: 12px;
+    }
+    .tree-child td.name { padding-left: 28px; }
+    .autocomplete-dropdown {
+      display: none;
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 48px;
+      max-height: 200px;
+      overflow-y: auto;
+      background: var(--vscode-editorSuggestWidget-background, var(--vscode-editor-background));
+      border: 1px solid var(--vscode-editorSuggestWidget-border, var(--vscode-panel-border));
+      z-index: 1000;
+      font-size: 13px;
+    }
+    .autocomplete-dropdown.visible { display: block; }
+    .autocomplete-item {
+      padding: 4px 8px;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+    }
+    .autocomplete-item:hover, .autocomplete-item.selected {
+      background: var(--vscode-list-hoverBackground);
+    }
+    .autocomplete-item .item-type {
+      color: var(--vscode-descriptionForeground);
+      font-style: italic;
+      margin-left: 12px;
+    }
     .forced td.value { color: var(--vscode-charts-orange, #d18616); font-weight: bold; }
     .forced td.name::before {
       content: "🔒 ";
@@ -325,11 +362,10 @@ export class MonitorPanel {
   <div class="add-row">
     <input
       id="add-input"
-      list="catalog"
       placeholder="Add variable to watch (start typing for suggestions)..."
       autocomplete="off"
     />
-    <datalist id="catalog"></datalist>
+    <div id="autocomplete-dropdown" class="autocomplete-dropdown"></div>
     <button onclick="addFromInput()">Add</button>
   </div>
   <table>
@@ -359,13 +395,49 @@ export class MonitorPanel {
       document.getElementById(id).style.display = visible ? "" : "none";
     }
 
+    let selectedIdx = -1;
     function refreshCatalogDatalist() {
-      const dl = document.getElementById("catalog");
-      dl.innerHTML = catalog.map(c =>
-        '<option value="' + c.name + '">' + c.type + '</option>'
-      ).join("");
       typeMap = new Map(catalog.map(c => [c.name.toLowerCase(), c.type]));
     }
+
+    function showDropdown() {
+      const input = document.getElementById("add-input");
+      const dd = document.getElementById("autocomplete-dropdown");
+      const query = input.value.trim().toLowerCase();
+      if (!query || catalog.length === 0) {
+        dd.classList.remove("visible");
+        return;
+      }
+      const matches = catalog.filter(c => c.name.toLowerCase().includes(query));
+      if (matches.length === 0) {
+        dd.classList.remove("visible");
+        return;
+      }
+      selectedIdx = -1;
+      dd.innerHTML = matches.slice(0, 50).map((c, i) =>
+        '<div class="autocomplete-item" data-name="' + c.name + '" data-idx="' + i + '">' +
+          '<span>' + c.name + '</span>' +
+          '<span class="item-type">' + c.type + '</span>' +
+        '</div>'
+      ).join("");
+      dd.classList.add("visible");
+      dd.querySelectorAll(".autocomplete-item").forEach(item => {
+        item.addEventListener("mousedown", function(e) {
+          e.preventDefault();
+          input.value = this.getAttribute("data-name");
+          dd.classList.remove("visible");
+          addFromInput();
+        });
+      });
+    }
+
+    document.getElementById("add-input").addEventListener("input", showDropdown);
+    document.getElementById("add-input").addEventListener("focus", showDropdown);
+    document.getElementById("add-input").addEventListener("blur", function() {
+      setTimeout(function() {
+        document.getElementById("autocomplete-dropdown").classList.remove("visible");
+      }, 150);
+    });
 
     /**
      * Build the table STRUCTURE from the current watchList. Called only
@@ -374,6 +446,75 @@ export class MonitorPanel {
      * and mutate just the value/type cells without touching the input
      * elements — preserving focus and any half-typed force value.
      */
+    /** Set of expanded tree nodes (lowercased full paths). */
+    let expandedNodes = new Set();
+
+    /**
+     * Build a tree from flat dotted-path variables under a prefix.
+     * E.g., for prefix "Main.filler" and entries like
+     *   Main.filler.start, Main.filler.counter.Q, Main.filler.counter.CV
+     * produces:
+     *   { start: {leaf}, counter: { Q: {leaf}, CV: {leaf} } }
+     */
+    function buildSubTree(prefix) {
+      const prefixLc = prefix.toLowerCase() + ".";
+      const tree = {};
+      valueMap.forEach((v, fullLc) => {
+        if (!fullLc.startsWith(prefixLc)) return;
+        const relative = v.name.substring(prefix.length + 1);
+        const parts = relative.split(".");
+        let node = tree;
+        for (let i = 0; i < parts.length - 1; i++) {
+          const seg = parts[i];
+          if (!node[seg]) node[seg] = { __children: {} };
+          node = node[seg].__children;
+        }
+        const leaf = parts[parts.length - 1];
+        node[leaf] = { __value: v, __children: node[leaf] ? node[leaf].__children : null };
+      });
+      return tree;
+    }
+
+    function renderTree(tree, parentPath, depth) {
+      let html = "";
+      const indent = "\\u00a0\\u00a0\\u00a0\\u00a0".repeat(depth);
+      const sortedKeys = Object.keys(tree).sort();
+      for (const key of sortedKeys) {
+        const entry = tree[key];
+        const fullPath = parentPath + "." + key;
+        const fullLc = fullPath.toLowerCase();
+        const hasChildren = entry.__children && Object.keys(entry.__children).length > 0;
+        const isExpanded = expandedNodes.has(fullLc);
+        const v = entry.__value;
+
+        if (hasChildren) {
+          // Intermediate node (FB instance) — expandable
+          const toggle = '<span class="tree-toggle" onclick="toggleNode(\\'' +
+            fullPath.replace(/'/g, "\\\\'") + '\\')">' +
+            (isExpanded ? '\\u25BE' : '\\u25B8') + '</span> ';
+          const value = v ? v.value : '';
+          const type = v ? v.type : '';
+          html += '<tr data-var="' + fullLc + '">' +
+            '<td class="name">' + indent + toggle + key + '</td>' +
+            '<td class="value">' + value + '</td>' +
+            '<td class="type"><i>' + type + '</i></td>' +
+            '<td></td></tr>';
+          if (isExpanded) {
+            html += renderTree(entry.__children, fullPath, depth + 1);
+          }
+        } else if (v) {
+          // Leaf node (scalar field)
+          const isForced = !!v.forced;
+          html += '<tr data-var="' + fullLc + '"' + (isForced ? ' class="forced"' : '') + '>' +
+            '<td class="name">' + indent + '\\u00a0\\u00a0 ' + key + '</td>' +
+            '<td class="value">' + v.value + '</td>' +
+            '<td class="type"><i>' + v.type + '</i></td>' +
+            '<td></td></tr>';
+        }
+      }
+      return html;
+    }
+
     function renderWatchTable() {
       const tbody = document.getElementById("var-body");
       if (watchList.length === 0) {
@@ -381,26 +522,62 @@ export class MonitorPanel {
           'Watch list is empty. Add a variable above.</td></tr>';
         return;
       }
-      tbody.innerHTML = watchList.map(name => {
+      let html = "";
+      for (const name of watchList) {
         const lc = name.toLowerCase();
         const v = valueMap.get(lc);
-        const value = v ? v.value : '<span class="pending">…</span>';
-        const type = (v && v.type) || typeMap.get(lc) || '';
-        const isForced = !!(v && v.forced);
         const safeName = name.replace(/'/g, "\\\\'");
-        const placeholder = type ? placeholderForType(type) : "value";
-        return '<tr data-var="' + lc + '"' + (isForced ? ' class="forced"' : '') + '>' +
-          '<td class="name">' + name + '</td>' +
-          '<td class="value">' + value + '</td>' +
-          '<td class="type">' + type + '</td>' +
-          '<td>' +
-            '<input class="force-input" placeholder="' + placeholder + '" />' +
-            ' <button onclick="forceVar(\\'' + safeName + '\\')">Force</button>' +
-            ' <button class="secondary" onclick="unforceVar(\\'' + safeName + '\\')">Unforce</button>' +
-            ' <button class="secondary" onclick="removeWatch(\\'' + safeName + '\\')">Remove</button>' +
-          '</td>' +
-        '</tr>';
-      }).join("");
+
+        // Check if there are descendant values under this prefix
+        const tree = buildSubTree(name);
+        const hasChildren = Object.keys(tree).length > 0;
+        const isExpanded = expandedNodes.has(lc);
+
+        if (hasChildren) {
+          // FB instance or prefix with children — show tree toggle
+          const toggle = '<span class="tree-toggle" onclick="toggleNode(\\'' +
+            safeName + '\\')">' + (isExpanded ? '\\u25BE' : '\\u25B8') + '</span> ';
+          const value = v ? v.value : '';
+          const type = v ? v.type : '';
+          html += '<tr data-var="' + lc + '">' +
+            '<td class="name">' + toggle + name + '</td>' +
+            '<td class="value">' + value + '</td>' +
+            '<td class="type"><i>' + type + '</i></td>' +
+            '<td>' +
+              '<button class="secondary" onclick="removeWatch(\\'' + safeName + '\\')">Remove</button>' +
+            '</td></tr>';
+          if (isExpanded) {
+            html += renderTree(tree, name, 1);
+          }
+        } else {
+          // Scalar variable — flat row with force controls
+          const value = v ? v.value : '<span class="pending">\\u2026</span>';
+          const type = (v && v.type) || typeMap.get(lc) || '';
+          const isForced = !!(v && v.forced);
+          const placeholder = type ? placeholderForType(type) : "value";
+          html += '<tr data-var="' + lc + '"' + (isForced ? ' class="forced"' : '') + '>' +
+            '<td class="name">' + name + '</td>' +
+            '<td class="value">' + value + '</td>' +
+            '<td class="type"><i>' + type + '</i></td>' +
+            '<td>' +
+              '<input class="force-input" placeholder="' + placeholder + '" />' +
+              ' <button onclick="forceVar(\\'' + safeName + '\\')">Force</button>' +
+              ' <button class="secondary" onclick="unforceVar(\\'' + safeName + '\\')">Unforce</button>' +
+              ' <button class="secondary" onclick="removeWatch(\\'' + safeName + '\\')">Remove</button>' +
+            '</td></tr>';
+        }
+      }
+      tbody.innerHTML = html;
+    }
+
+    function toggleNode(name) {
+      const lc = name.toLowerCase();
+      if (expandedNodes.has(lc)) {
+        expandedNodes.delete(lc);
+      } else {
+        expandedNodes.add(lc);
+      }
+      renderWatchTable();
     }
 
     /**
@@ -414,12 +591,15 @@ export class MonitorPanel {
      * effect on the runtime.
      */
     function updateValueCells() {
-      for (const name of watchList) {
-        const lc = name.toLowerCase();
+      // Update both watch-list rows AND any expanded child rows
+      const tbody = document.getElementById("var-body");
+      const rows = tbody.children;
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const lc = row.getAttribute && row.getAttribute("data-var");
+        if (!lc) continue;
         const v = valueMap.get(lc);
         if (!v) continue;
-        const row = findRow(lc);
-        if (!row) continue;
         const valueCell = row.querySelector(".value");
         const typeCell = row.querySelector(".type");
         if (valueCell && valueCell.textContent !== v.value) {
@@ -513,9 +693,27 @@ export class MonitorPanel {
     }
 
     document.getElementById("add-input").addEventListener("keydown", function(e) {
-      if (e.key === "Enter") {
-        addFromInput();
+      const dd = document.getElementById("autocomplete-dropdown");
+      const items = dd.querySelectorAll(".autocomplete-item");
+      if (e.key === "ArrowDown" && dd.classList.contains("visible")) {
         e.preventDefault();
+        selectedIdx = Math.min(selectedIdx + 1, items.length - 1);
+        items.forEach((el, i) => el.classList.toggle("selected", i === selectedIdx));
+        if (items[selectedIdx]) items[selectedIdx].scrollIntoView({ block: "nearest" });
+      } else if (e.key === "ArrowUp" && dd.classList.contains("visible")) {
+        e.preventDefault();
+        selectedIdx = Math.max(selectedIdx - 1, 0);
+        items.forEach((el, i) => el.classList.toggle("selected", i === selectedIdx));
+        if (items[selectedIdx]) items[selectedIdx].scrollIntoView({ block: "nearest" });
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        if (selectedIdx >= 0 && selectedIdx < items.length) {
+          this.value = items[selectedIdx].getAttribute("data-name");
+          dd.classList.remove("visible");
+        }
+        addFromInput();
+      } else if (e.key === "Escape") {
+        dd.classList.remove("visible");
       }
     });
 
@@ -588,13 +786,18 @@ export class MonitorPanel {
           document.getElementById("s-jitter").innerHTML = fmtUs(ci.jitter_max_us);
         }
       } else if (msg.command === "updateVariables") {
+        const prevSize = valueMap.size;
         for (const v of msg.variables) {
           valueMap.set(v.name.toLowerCase(), v);
         }
-        // Only update text content on existing cells — DO NOT rebuild the
-        // table, that would destroy the force input fields and steal
-        // focus from the user mid-typing.
-        updateValueCells();
+        // If new variable keys appeared (e.g., first telemetry after adding
+        // a FB watch), rebuild the table structure so the tree can form.
+        // Otherwise just update values in-place to avoid focus loss.
+        if (valueMap.size !== prevSize) {
+          renderWatchTable();
+        } else {
+          updateValueCells();
+        }
       } else if (msg.command === "updateCatalog") {
         catalog = msg.catalog;
         refreshCatalogDatalist();

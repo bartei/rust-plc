@@ -97,9 +97,15 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Create a new engine from a compiled module.
+    /// Create a new engine from a compiled module. Runs the synthetic
+    /// `__global_init` function (if present) so `VAR_GLOBAL x : T := <expr>;`
+    /// initial values are applied before the first scan cycle.
     pub fn new(module: Module, program_name: String, config: EngineConfig) -> Self {
-        let vm = Vm::new(module, config.vm_config.clone());
+        let mut vm = Vm::new(module, config.vm_config.clone());
+        // If global init fails (e.g. division by zero in an initializer)
+        // we leave the engine constructible — the VM keeps its default
+        // values and the user will see the issue at runtime.
+        let _ = vm.run_global_init();
         Self {
             vm,
             config,

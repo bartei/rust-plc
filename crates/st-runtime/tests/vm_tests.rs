@@ -965,6 +965,259 @@ END_PROGRAM
 }
 
 // =============================================================================
+// Global variable initialization (VAR_GLOBAL := <expr>)
+// =============================================================================
+//
+// Globals declared with `:= <expr>` get their initial value applied via a
+// synthetic `__global_init` function the compiler generates and the engine
+// runs once at construction time. The tests below cover every elementary
+// type plus a few combinations to make sure the init pipeline doesn't drop
+// values on the way through.
+
+fn check_global_init(source: &str, name: &str, expected_value: Value) {
+    // Run with 0 cycles so the only thing that touches globals is
+    // __global_init from Engine::new. If the test passes with 0 cycles
+    // we know the init ran independently of the program body.
+    let parse_result = st_syntax::parse(source);
+    assert!(parse_result.errors.is_empty(), "parse: {:?}", parse_result.errors);
+    let module = st_compiler::compile(&parse_result.source_file).unwrap();
+    let engine = Engine::new(
+        module,
+        "Main".into(),
+        EngineConfig { max_cycles: 0, ..Default::default() },
+    );
+    assert_eq!(
+        engine.vm().get_global(name),
+        Some(&expected_value),
+        "global '{name}' was not initialized to {expected_value:?}"
+    );
+}
+
+/// Builds a minimal source file with the given global declarations and a
+/// no-op PROGRAM body. Used by every elementary-type init test below.
+fn global_only_source(globals: &str) -> String {
+    format!(
+        "VAR_GLOBAL\n{globals}\nEND_VAR\n\
+PROGRAM Main\nVAR _dummy : INT := 0; END_VAR\n  _dummy := _dummy + 1;\nEND_PROGRAM\n"
+    )
+}
+
+#[test]
+fn global_init_bool() {
+    let src = global_only_source("    b : BOOL := TRUE;");
+    check_global_init(&src, "b", Value::Bool(true));
+}
+
+#[test]
+fn global_init_sint() {
+    let src = global_only_source("    x : SINT := -100;");
+    check_global_init(&src, "x", Value::Int(-100));
+}
+
+#[test]
+fn global_init_usint() {
+    let src = global_only_source("    x : USINT := 250;");
+    check_global_init(&src, "x", Value::UInt(250));
+}
+
+#[test]
+fn global_init_int() {
+    let src = global_only_source("    x : INT := -32000;");
+    check_global_init(&src, "x", Value::Int(-32000));
+}
+
+#[test]
+fn global_init_uint() {
+    let src = global_only_source("    x : UINT := 60000;");
+    check_global_init(&src, "x", Value::UInt(60000));
+}
+
+#[test]
+fn global_init_dint() {
+    let src = global_only_source("    x : DINT := -2000000000;");
+    check_global_init(&src, "x", Value::Int(-2000000000));
+}
+
+#[test]
+fn global_init_udint() {
+    let src = global_only_source("    x : UDINT := 4000000000;");
+    check_global_init(&src, "x", Value::UInt(4000000000));
+}
+
+#[test]
+fn global_init_lint() {
+    let src = global_only_source("    x : LINT := 9000000000000000000;");
+    check_global_init(&src, "x", Value::Int(9000000000000000000));
+}
+
+#[test]
+fn global_init_ulint() {
+    // Stay within i64::MAX since the parser stores integer literals as
+    // i64. Larger ULINT/LWORD literals would need explicit `ULINT#...`
+    // or hex syntax — covered separately by the lword test below.
+    let src = global_only_source("    x : ULINT := 9000000000000000000;");
+    check_global_init(&src, "x", Value::UInt(9000000000000000000));
+}
+
+#[test]
+fn global_init_byte() {
+    let src = global_only_source("    b : BYTE := 16#FF;");
+    check_global_init(&src, "b", Value::UInt(0xFF));
+}
+
+#[test]
+fn global_init_word() {
+    let src = global_only_source("    w : WORD := 16#ABCD;");
+    check_global_init(&src, "w", Value::UInt(0xABCD));
+}
+
+#[test]
+fn global_init_dword() {
+    let src = global_only_source("    d : DWORD := 16#DEADBEEF;");
+    check_global_init(&src, "d", Value::UInt(0xDEADBEEF));
+}
+
+#[test]
+fn global_init_lword() {
+    // Same caveat as ULINT — stay within i64::MAX. The narrowing logic
+    // already covers the U64 width passthrough; this just verifies
+    // the init pipeline reaches LWORD slots at all.
+    let src = global_only_source("    l : LWORD := 16#7FEEDDCCBBAA9988;");
+    check_global_init(&src, "l", Value::UInt(0x7FEEDDCCBBAA9988));
+}
+
+#[test]
+fn global_init_real() {
+    let src = global_only_source("    r : REAL := 3.14;");
+    let parse_result = st_syntax::parse(&src);
+    let module = st_compiler::compile(&parse_result.source_file).unwrap();
+    let engine = Engine::new(
+        module,
+        "Main".into(),
+        EngineConfig { max_cycles: 0, ..Default::default() },
+    );
+    let r = engine.vm().get_global("r").unwrap();
+    if let Value::Real(f) = r {
+        assert!((*f - 3.14).abs() < 1e-6, "expected ~3.14, got {f}");
+    } else {
+        panic!("expected Value::Real, got {r:?}");
+    }
+}
+
+#[test]
+fn global_init_lreal() {
+    let src = global_only_source("    r : LREAL := -1.5e10;");
+    let parse_result = st_syntax::parse(&src);
+    let module = st_compiler::compile(&parse_result.source_file).unwrap();
+    let engine = Engine::new(
+        module,
+        "Main".into(),
+        EngineConfig { max_cycles: 0, ..Default::default() },
+    );
+    let r = engine.vm().get_global("r").unwrap();
+    if let Value::Real(f) = r {
+        assert!((*f - (-1.5e10)).abs() < 1e-3, "expected -1.5e10, got {f}");
+    } else {
+        panic!("expected Value::Real, got {r:?}");
+    }
+}
+
+#[test]
+fn global_init_string() {
+    let src = global_only_source("    s : STRING := 'hello plc';");
+    check_global_init(&src, "s", Value::String("hello plc".into()));
+}
+
+#[test]
+fn global_init_multiple_mixed_types() {
+    // All in one declaration block — make sure each one gets the right
+    // value (not zero-defaulted, not swapped, not narrowed wrong).
+    let src = global_only_source(
+        "    b   : BOOL  := TRUE;\n\
+         \x20   s   : SINT  := -42;\n\
+         \x20   us  : USINT := 200;\n\
+         \x20   i   : INT   := 12345;\n\
+         \x20   di  : DINT  := 100000;\n\
+         \x20   r   : REAL  := 1.0;\n\
+         \x20   msg : STRING := 'init';",
+    );
+    let parse_result = st_syntax::parse(&src);
+    let module = st_compiler::compile(&parse_result.source_file).unwrap();
+    let engine = Engine::new(
+        module,
+        "Main".into(),
+        EngineConfig { max_cycles: 0, ..Default::default() },
+    );
+    let vm = engine.vm();
+    assert_eq!(vm.get_global("b"),   Some(&Value::Bool(true)));
+    assert_eq!(vm.get_global("s"),   Some(&Value::Int(-42)));
+    assert_eq!(vm.get_global("us"),  Some(&Value::UInt(200)));
+    assert_eq!(vm.get_global("i"),   Some(&Value::Int(12345)));
+    assert_eq!(vm.get_global("di"),  Some(&Value::Int(100000)));
+    assert_eq!(vm.get_global("msg"), Some(&Value::String("init".into())));
+}
+
+#[test]
+fn global_init_narrows_overflow() {
+    // 200 doesn't fit in SINT — the synthetic init function's StoreGlobal
+    // must narrow via the same wrap-around path as the rest of the VM.
+    let src = global_only_source("    x : SINT := 200;");
+    check_global_init(&src, "x", Value::Int(-56));
+}
+
+#[test]
+fn global_init_runs_before_first_cycle() {
+    // The program body increments counter — the test verifies that the
+    // VALUE seen on the very first cycle includes the init applied by
+    // __global_init (so counter starts at 100, not 0).
+    let src = "\
+VAR_GLOBAL
+    counter : INT := 100;
+END_VAR
+PROGRAM Main
+    counter := counter + 1;
+END_PROGRAM
+";
+    let engine = run_program(src, 1);
+    // 100 + 1 = 101 after one cycle; without global init it would be 1.
+    assert_eq!(engine.vm().get_global("counter"), Some(&Value::Int(101)));
+}
+
+#[test]
+fn global_init_does_not_re_run_each_cycle() {
+    // After the first cycle, __global_init must NOT be re-executed —
+    // otherwise the user's modifications would be wiped on every cycle.
+    let src = "\
+VAR_GLOBAL
+    counter : INT := 100;
+END_VAR
+PROGRAM Main
+    counter := counter + 1;
+END_PROGRAM
+";
+    let engine = run_program(src, 50);
+    // 100 + 50 = 150. If init re-ran each cycle, we'd see 101.
+    assert_eq!(engine.vm().get_global("counter"), Some(&Value::Int(150)));
+}
+
+#[test]
+fn global_init_with_no_initializers_is_noop() {
+    // Modules with no global initializers don't get a __global_init
+    // function — the engine's run_global_init becomes a no-op. Verify
+    // construction still works and globals are zero-defaulted.
+    let src = global_only_source("    x : INT;\n    y : REAL;");
+    let parse_result = st_syntax::parse(&src);
+    let module = st_compiler::compile(&parse_result.source_file).unwrap();
+    let engine = Engine::new(
+        module,
+        "Main".into(),
+        EngineConfig { max_cycles: 0, ..Default::default() },
+    );
+    assert_eq!(engine.vm().get_global("x"), Some(&Value::Int(0)));
+    assert_eq!(engine.vm().get_global("y"), Some(&Value::Real(0.0)));
+}
+
+// =============================================================================
 // Integer overflow / wrapping (IEC 61131-3 two's complement)
 // =============================================================================
 
@@ -1303,4 +1556,375 @@ END_PROGRAM
     let engine = run_program(source, 1);
     assert_eq!(engine.vm().get_global("g_a"), Some(&Value::Int(15))); // 10 + 5
     assert_eq!(engine.vm().get_global("g_b"), Some(&Value::Int(40))); // 20 * 2
+}
+
+// =============================================================================
+// Global initialization — user-defined types
+// =============================================================================
+//
+// TYPE aliases and ENUM (with integer-literal init) work end-to-end through
+// the global init pipeline. Initializing an enum global by VARIANT NAME, and
+// initializing STRUCT/ARRAY globals at the field/element level, are
+// pre-existing runtime limitations — the compiler currently maps user-
+// defined types to a placeholder `VarType::Int` slot and doesn't materialize
+// `type_defs` at runtime. Those scenarios have `#[ignore]` placeholder tests
+// below so we'll catch them when the runtime support lands.
+
+#[test]
+fn global_init_type_alias_to_int() {
+    // TYPE aliases to elementary types should be transparent — the alias
+    // resolves to its underlying type and the literal initializer flows
+    // through normally.
+    let src = r#"
+TYPE
+    TempC : INT;
+END_TYPE
+VAR_GLOBAL
+    setpoint : TempC := 75;
+END_VAR
+PROGRAM Main
+VAR _d : INT := 0; END_VAR
+    _d := _d + 1;
+END_PROGRAM
+"#;
+    check_global_init(src, "setpoint", Value::Int(75));
+}
+
+#[test]
+fn global_init_type_alias_to_real() {
+    let src = r#"
+TYPE
+    Pressure : REAL;
+END_TYPE
+VAR_GLOBAL
+    sp : Pressure := 1.5;
+END_VAR
+PROGRAM Main
+VAR _d : INT := 0; END_VAR
+    _d := _d + 1;
+END_PROGRAM
+"#;
+    let parse_result = st_syntax::parse(src);
+    let module = st_compiler::compile(&parse_result.source_file).unwrap();
+    let engine = Engine::new(
+        module,
+        "Main".into(),
+        EngineConfig { max_cycles: 0, ..Default::default() },
+    );
+    if let Some(Value::Real(f)) = engine.vm().get_global("sp") {
+        assert!((*f - 1.5).abs() < 1e-6, "expected ~1.5, got {f}");
+    } else {
+        panic!("expected Value::Real for aliased Pressure global");
+    }
+}
+
+#[test]
+fn global_init_enum_with_integer_literal() {
+    // Enums currently surface as INT slots at the runtime layer. Initializing
+    // by integer literal works because the literal flows straight through
+    // the synthetic init function — same code path as a plain INT global.
+    let src = r#"
+TYPE
+    Color : (RED, GREEN, BLUE);
+END_TYPE
+VAR_GLOBAL
+    light : Color := 2;
+END_VAR
+PROGRAM Main
+VAR _d : INT := 0; END_VAR
+    _d := _d + 1;
+END_PROGRAM
+"#;
+    check_global_init(src, "light", Value::Int(2));
+}
+
+#[test]
+#[ignore = "enum-variant-name init not yet supported by the compiler"]
+fn global_init_enum_with_variant_name() {
+    // TODO: when the compiler resolves enum variant names in initializer
+    // expressions (currently `:= GREEN` silently produces 0), drop the
+    // ignore attribute. The semantic checker accepts the syntax already.
+    let src = r#"
+TYPE
+    Color : (RED, GREEN, BLUE);
+END_TYPE
+VAR_GLOBAL
+    light : Color := GREEN;
+END_VAR
+PROGRAM Main
+VAR _d : INT := 0; END_VAR
+    _d := _d + 1;
+END_PROGRAM
+"#;
+    check_global_init(src, "light", Value::Int(1));
+}
+
+#[test]
+#[ignore = "struct fields not materialized at runtime — placeholder VarType::Int slot"]
+fn global_init_struct_with_field_defaults() {
+    // TODO: when the compiler emits per-field VarSlots for struct globals
+    // (and the VM has StructAccess instructions to read/write them), this
+    // test verifies that field-level `:= <expr>` defaults from the TYPE
+    // declaration flow through into a global instance.
+    let src = r#"
+TYPE
+    Point : STRUCT
+        x : INT := 10;
+        y : INT := 20;
+    END_STRUCT;
+END_TYPE
+VAR_GLOBAL
+    p : Point;
+END_VAR
+PROGRAM Main
+VAR _d : INT := 0; END_VAR
+    _d := _d + 1;
+END_PROGRAM
+"#;
+    let parse_result = st_syntax::parse(src);
+    let module = st_compiler::compile(&parse_result.source_file).unwrap();
+    let engine = Engine::new(
+        module,
+        "Main".into(),
+        EngineConfig { max_cycles: 0, ..Default::default() },
+    );
+    // Per-field access via the eventual `p.x` / `p.y` API.
+    assert_eq!(engine.vm().get_global("p.x"), Some(&Value::Int(10)));
+    assert_eq!(engine.vm().get_global("p.y"), Some(&Value::Int(20)));
+}
+
+#[test]
+#[ignore = "array elements not materialized at runtime — placeholder VarType::Int slot"]
+fn global_init_array_default_zero() {
+    // TODO: when ARRAY globals get per-element VarSlots, verify that an
+    // uninitialized array is zero-filled (the IEC default), and that an
+    // explicit `:= [1, 2, 3, 4]` initializer applies element values.
+    let src = r#"
+VAR_GLOBAL
+    buf : ARRAY[0..3] OF INT;
+END_VAR
+PROGRAM Main
+VAR _d : INT := 0; END_VAR
+    _d := _d + 1;
+END_PROGRAM
+"#;
+    let parse_result = st_syntax::parse(src);
+    let module = st_compiler::compile(&parse_result.source_file).unwrap();
+    let engine = Engine::new(
+        module,
+        "Main".into(),
+        EngineConfig { max_cycles: 0, ..Default::default() },
+    );
+    for i in 0..4 {
+        let name = format!("buf[{i}]");
+        assert_eq!(engine.vm().get_global(&name), Some(&Value::Int(0)));
+    }
+}
+
+#[test]
+fn ctu_fb_increments_on_rising_edge() {
+    // Direct end-to-end test: does the CTU stdlib FB actually count?
+    // The CTU should increment CV on each rising edge of CU.
+    // We toggle CU every cycle (FALSE→TRUE→FALSE→TRUE...) so there's
+    // a rising edge on even cycles (2, 4, 6, ...).
+    let source = r#"
+VAR_GLOBAL
+    g_cv : INT;
+    g_q  : BOOL;
+END_VAR
+PROGRAM Main
+VAR
+    counter : CTU;
+    cycle   : INT := 0;
+END_VAR
+    cycle := cycle + 1;
+    counter(CU := (cycle MOD 2) = 0, RESET := FALSE, PV := 3);
+    g_cv := counter.CV;
+    g_q  := counter.Q;
+END_PROGRAM
+"#;
+    let stdlib = st_syntax::multi_file::builtin_stdlib();
+    let mut all: Vec<&str> = stdlib;
+    all.push(source);
+    let parse = st_syntax::multi_file::parse_multi(&all);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    let module = st_compiler::compile(&parse.source_file).unwrap();
+
+    let config = EngineConfig {
+        max_cycles: 10,
+        ..Default::default()
+    };
+    let mut engine = Engine::new(module, "Main".into(), config);
+
+    for i in 1..=10 {
+        engine.run_one_cycle().unwrap();
+        let cv = engine.vm().get_global("g_cv").cloned().unwrap_or(Value::Int(-999));
+        let q = engine.vm().get_global("g_q").cloned().unwrap_or(Value::Bool(false));
+        eprintln!("cycle {i}: g_cv={cv:?} g_q={q:?}");
+    }
+
+    // After 10 cycles with CU toggling every cycle, we should have:
+    // Rising edges on cycles 2, 4, 6, 8, 10 → CV should be 5
+    // PV=3, so Q should be TRUE (5 >= 3)
+    let cv = engine.vm().get_global("g_cv").unwrap();
+    let q = engine.vm().get_global("g_q").unwrap();
+
+    assert!(
+        cv.as_int() > 0,
+        "CTU CV should have incremented past 0, got {cv:?} — the CTU FB is broken!"
+    );
+    assert_eq!(
+        cv.as_int(), 5,
+        "Expected 5 rising edges in 10 cycles (toggle every cycle), got {cv:?}"
+    );
+    assert_eq!(
+        q, &Value::Bool(true),
+        "CTU Q should be TRUE (CV=5 >= PV=3), got {q:?}"
+    );
+}
+
+#[test]
+fn fill_controller_counter_increments() {
+    // End-to-end: does the FillController's CTU instance (counter) actually
+    // count when the filling sequence is triggered?
+    let source = r#"
+VAR_GLOBAL
+    g_cv : INT;
+    g_filling : BOOL;
+END_VAR
+PROGRAM Main
+VAR
+    filler : FillController;
+    pulse  : INT := 0;
+END_VAR
+    pulse := pulse + 1;
+    (* Trigger start on cycle 5 with a one-cycle pulse *)
+    filler(start := pulse = 5, target_fill := 3);
+    g_cv := filler.fill_count;
+    g_filling := filler.filling;
+END_PROGRAM
+
+FUNCTION_BLOCK FillController
+VAR_INPUT
+    start : BOOL;
+    target_fill : INT;
+END_VAR
+VAR_OUTPUT
+    valve_open : BOOL;
+    fill_done : BOOL;
+    fill_count : INT;
+END_VAR
+VAR
+    counter : CTU;
+    filling : BOOL := FALSE;
+    edge : R_TRIG;
+END_VAR
+    edge(CLK := start);
+    IF edge.Q AND NOT filling THEN
+        filling := TRUE;
+        fill_count := 0;
+    END_IF;
+    IF filling THEN
+        valve_open := TRUE;
+        counter(CU := TRUE, RESET := NOT filling, PV := target_fill);
+        fill_count := counter.CV;
+        IF counter.Q THEN
+            filling := FALSE;
+            valve_open := FALSE;
+            fill_done := TRUE;
+        END_IF;
+    ELSE
+        valve_open := FALSE;
+    END_IF;
+END_FUNCTION_BLOCK
+"#;
+    let stdlib = st_syntax::multi_file::builtin_stdlib();
+    let mut all: Vec<&str> = stdlib;
+    all.push(source);
+    let parse = st_syntax::multi_file::parse_multi(&all);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    let module = st_compiler::compile(&parse.source_file).unwrap();
+
+    let mut engine = Engine::new(
+        module,
+        "Main".into(),
+        EngineConfig { max_cycles: 20, ..Default::default() },
+    );
+
+    for i in 1..=20 {
+        engine.run_one_cycle().unwrap();
+        let cv = engine.vm().get_global("g_cv").cloned().unwrap_or(Value::Int(-999));
+        let filling = engine.vm().get_global("g_filling").cloned().unwrap_or(Value::Bool(false));
+        eprintln!("cycle {i}: g_cv={cv:?} g_filling={filling:?}");
+    }
+
+    // After 20 cycles:
+    // - Cycle 5: start=TRUE → R_TRIG fires → filling=TRUE
+    // - Cycle 6: counter(CU:=TRUE) → first call, prev_cu=FALSE → rising edge → CV=1
+    // - Cycle 7: counter(CU:=TRUE) → prev_cu=TRUE → NO rising edge → CV stays 1
+    //
+    // The issue: CU is held TRUE so the CTU only sees ONE rising edge.
+    // CV can never exceed 1. The filling never completes (PV=3 > CV=1).
+    //
+    // This IS the expected behavior of CTU — it counts RISING EDGES,
+    // not cycles with CU=TRUE. The playground code has a design issue:
+    // CU should be pulsed, not held TRUE.
+    let cv = engine.vm().get_global("g_cv").unwrap();
+    eprintln!("\nFinal g_cv = {cv:?}");
+    assert!(
+        cv.as_int() >= 1,
+        "FillController.counter.CV should be at least 1 (one rising edge), got {cv:?}"
+    );
+}
+
+#[test]
+fn fb_field_access_correct_index_when_program_before_fb() {
+    // Regression for the compiler bug where PROGRAM compiled before its
+    // callee's FB would resolve all field accesses to index 0 (because
+    // the FB's locals were empty at that point). The fix: compile FBs
+    // before PROGRAMs in a separate pass.
+    let source = r#"
+VAR_GLOBAL g_cv : INT; END_VAR
+PROGRAM Main
+VAR filler : FillController; END_VAR
+    filler(start := FALSE, target_fill := 3);
+    g_cv := filler.fill_count;
+END_PROGRAM
+
+FUNCTION_BLOCK FillController
+VAR_INPUT
+    start : BOOL;
+    target_fill : INT;
+END_VAR
+VAR_OUTPUT
+    valve_open : BOOL;
+    fill_done : BOOL;
+    fill_count : INT;
+END_VAR
+VAR
+    filling : BOOL := FALSE;
+END_VAR
+    fill_count := 42;
+END_FUNCTION_BLOCK
+"#;
+    let stdlib = st_syntax::multi_file::builtin_stdlib();
+    let mut all: Vec<&str> = stdlib;
+    all.push(source);
+    let parse = st_syntax::multi_file::parse_multi(&all);
+    let module = st_compiler::compile(&parse.source_file).unwrap();
+
+    let mut engine = Engine::new(
+        module,
+        "Main".into(),
+        EngineConfig { max_cycles: 1, ..Default::default() },
+    );
+    engine.run().unwrap();
+
+    // g_cv should be 42 (filler.fill_count), NOT 0 or Bool(false)
+    assert_eq!(
+        engine.vm().get_global("g_cv"),
+        Some(&Value::Int(42)),
+        "filler.fill_count should be 42 — field index must point at fill_count (slot 4), \
+         not start (slot 0). If this fails, the compiler resolved the wrong field index."
+    );
 }

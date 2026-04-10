@@ -20,12 +20,17 @@ fn breakpoint_resolves_in_multi_file_project() {
 
     let mut main_source = String::new();
     let mut main_path = String::new();
+    let mut main_virtual_offset = 0usize;
+    let stdlib_len: usize = stdlib.iter().map(|s| s.len()).sum();
+    let mut cumulative = stdlib_len;
     for (path, content) in &sources {
-        all_sources.push(content.as_str());
         if path.ends_with("main.st") {
             main_source = content.clone();
             main_path = path.to_string_lossy().to_string();
+            main_virtual_offset = cumulative;
         }
+        all_sources.push(content.as_str());
+        cumulative += content.len();
     }
     assert!(!main_source.is_empty(), "main.st not found in project");
 
@@ -74,7 +79,7 @@ fn breakpoint_resolves_in_multi_file_project() {
 
     // Set a breakpoint on that line
     let mut debug = DebugState::new();
-    let results = debug.set_line_breakpoints(&module, &main_source, &[target_line as u32]);
+    let results = debug.set_line_breakpoints(&module, &main_source, &[target_line as u32], main_virtual_offset);
     eprintln!("Breakpoint result: {results:?}");
     assert!(results[0].is_some(), "Breakpoint on line {target_line} should resolve");
 
@@ -88,14 +93,16 @@ fn breakpoint_resolves_in_multi_file_project() {
     assert!(found_in_main.is_some(),
         "Breakpoint offset {bp_offset} must exist in Main's source_map for check_breakpoint to trigger");
 
-    // Also verify: the byte offset is from main.st (not some other file)
-    assert!(bp_offset < main_source.len(),
-        "Breakpoint offset {bp_offset} should be within main.st ({} bytes)", main_source.len());
+    // Verify: the byte offset is in virtual space at main.st's slice
+    let local_bp = bp_offset.saturating_sub(main_virtual_offset);
+    assert!(local_bp < main_source.len(),
+        "Breakpoint local offset {local_bp} (virtual {bp_offset}) should be within main.st ({} bytes)",
+        main_source.len());
 
     // Verify the source text at that offset makes sense
-    if bp_offset < main_source.len() {
-        let end = main_source[bp_offset..].find('\n').map(|n| bp_offset + n).unwrap_or(main_source.len());
-        let text = &main_source[bp_offset..end];
+    if local_bp < main_source.len() {
+        let end = main_source[local_bp..].find('\n').map(|n| local_bp + n).unwrap_or(main_source.len());
+        let text = &main_source[local_bp..end];
         eprintln!("Source at breakpoint: {:?}", text.trim());
     }
 }
@@ -117,7 +124,7 @@ END_PROGRAM
     let mut vm = st_runtime::vm::Vm::new(module.clone(), st_runtime::vm::VmConfig::default());
 
     // Set breakpoint on line 5 ("x := x + 1;")
-    let results = vm.debug_mut().set_line_breakpoints(&module, source, &[5]);
+    let results = vm.debug_mut().set_line_breakpoints(&module, source, &[5], 0);
     eprintln!("BP results: {results:?}");
     assert!(results[0].is_some(), "Breakpoint should resolve");
 
@@ -161,7 +168,8 @@ END_PROGRAM
     let mut vm = st_runtime::vm::Vm::new(module.clone(), st_runtime::vm::VmConfig::default());
 
     // Set breakpoint on line 5 of file_main ("x := x + 1;")
-    let results = vm.debug_mut().set_line_breakpoints(&module, file_main, &[5]);
+    // file_main's virtual offset = file_class.len()
+    let results = vm.debug_mut().set_line_breakpoints(&module, file_main, &[5], file_class.len());
     eprintln!("Multi-file BP results: {results:?}");
     assert!(results[0].is_some(), "Breakpoint should resolve");
 
@@ -214,7 +222,8 @@ END_PROGRAM
     eprintln!("file_b target line: {target_line}");
 
     let mut debug = DebugState::new();
-    let results = debug.set_line_breakpoints(&module, file_b, &[target_line as u32]);
+    // file_b's virtual offset = file_a.len()
+    let results = debug.set_line_breakpoints(&module, file_b, &[target_line as u32], file_a.len());
     eprintln!("Results: {results:?}");
     assert!(results[0].is_some(), "Should resolve breakpoint");
 

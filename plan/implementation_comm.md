@@ -1,83 +1,7 @@
-# IEC 61131-3 Compiler + LSP + Online Debugger — Implementation Plan
+# Communication Layer — Implementation Plan
 
-## Project Overview
-
-A Rust-based IEC 61131-3 Structured Text compiler with LSP support, online debugging via DAP, a bytecode VM runtime, and a VSCode extension (TypeScript). Architecture follows the same model as `rust-analyzer`: Rust core process + thin TypeScript VSCode extension.
-
----
-
-## Phases 0–11: Core Platform (COMPLETED)
-
-All foundational phases are complete. 714+ tests, zero clippy warnings.
-
-| Phase | Scope | Status |
-|-------|-------|--------|
-| **0** | Project scaffolding, workspace, CI, VSCode extension scaffold | Done |
-| **1** | Tree-sitter ST grammar (case-insensitive, incremental, 11 tests) | Done |
-| **2** | AST types + CST→AST lowering (21 tests) | Done |
-| **3** | Semantic analysis: scopes, types, 30+ diagnostics (127 tests) | Done |
-| **4** | LSP server skeleton + VSCode extension (hover, diagnostics, go-to-def, semantic tokens) | Done |
-| **5** | Advanced LSP (completion, signature help, rename, formatting, code actions, multi-file workspace) | Done |
-| **6** | Register-based IR + AST→IR compiler (50+ instructions, 35 tests) | Done |
-| **7** | Bytecode VM + scan cycle engine + stdlib + pointers (31 tests + stdlib tests) | Done |
-| **8** | DAP debugger (breakpoints, stepping, variables, force/unforce, 30 tests) | Done |
-| **9** | Online change manager (hot-reload with variable migration, 30 tests) | Done |
-| **10** | WebSocket monitor server + VSCode panel (26 tests) | Done |
-| **11** | CLI tool (check, run, serve, debug, compile, fmt, --json) | Done |
-
-### Multi-file IDE support (completed during Phase 12 work):
-- [x] LSP: project-aware analysis (discovers plc-project.yaml, includes all project files)
-- [x] LSP: cross-file go-to-definition (opens the correct file at the symbol)
-- [x] LSP: cross-file type resolution (hover shows correct type info)
-- [x] DAP: multi-file project loading and compilation
-- [x] DAP: per-file source mapping for stack traces (correct file + line per frame)
-- [x] DAP: breakpoints work in any project file (accumulated per-file, correct source resolution)
-- [x] DAP: step-into crosses file boundaries correctly
-- [x] DAP: Initialized event after Launch (per DAP spec, so breakpoints arrive after VM exists)
-- [x] JSON Schema for plc-project.yaml and device profiles (VS Code autocompletion)
-
-### Remaining LSP features (low priority):
-- [ ] `textDocument/selectionRange` — smart expand/shrink selection
-- [ ] `textDocument/inlayHint` — show inferred types, parameter names at call sites
-- [ ] `textDocument/onTypeFormatting` — auto-indent after `;` or `THEN`
-- [ ] `textDocument/callHierarchy` — show callers/callees of a function
-- [ ] `textDocument/linkedEditingRange` — edit matching IF/END_IF pairs simultaneously
-
-### Remaining minor items:
-- [ ] Online change: DAP custom request + VSCode toolbar
-- [ ] Monitor: trend recording / time-series chart
-- [ ] Monitor: cross-reference view
-
----
-
-## Phase 12: IEC 61131-3 Object-Oriented Extensions — Classes (COMPLETED)
-
-Full implementation of CLASS, METHOD, INTERFACE, PROPERTY across the entire pipeline.
-Grammar → AST → Semantics → Compiler → IR → VM, with multi-file support.
-
-**199 new tests** covering: grammar parsing, semantic analysis (inheritance, interfaces,
-abstract/final, access specifiers, THIS/SUPER), compiler (method compilation, vtable,
-inherited vars), runtime (method return values, state persistence, instance isolation,
-cross-file calls, pointer integration), and DAP integration.
-
-**5 single-file playground examples** (10–14) + **1 multi-file OOP project** (oop_project/).
-
-**Runtime bugs found and fixed during playground testing:**
-- Methods couldn't access class instance variables
-- Method return values lost (return_reg protocol mismatch)
-- Inherited fields invisible to subclass methods
-- Pointer cross-function dereference read wrong frame
-- Pointer vs NULL comparison always returned equal
-- StoreField unimplemented in compiler + VM
-- Nested class instances inside different FB instances shared state
-
-### Remaining Phase 12 items:
-- [ ] Constructor/destructor support (FB_INIT / FB_EXIT pattern)
-- [ ] Refactor existing stdlib FBs as classes where appropriate
-- [ ] Migration guide: FUNCTION_BLOCK to CLASS
-- [ ] Online change compatibility with classes
-
----
+> **Parent plan:** [implementation.md](implementation.md) — core platform (Phases 0-12), cross-cutting concerns.
+> **See also:** [implementation_native.md](implementation_native.md) — LLVM native compilation + hardware targets (Phase 14).
 
 ## Phase 13: Communication Extension System & Modbus Implementation
 
@@ -732,10 +656,13 @@ manager → engine integration → then real protocol implementations (Modbus, e
 #### Phase 13a: Core API + Simulated Device (build and test the framework)
 
 Status: **mostly complete** — core framework, simulated device, web UI, scan-cycle
-integration, CLI/DAP wiring, on-disk symbol map, and a working playground are all
-in place on `feature/phase13-comm-framework`. Outstanding items are advanced
-features (multi-rate scheduling, register scaling, diagnostics surface) that
-aren't blocking the first end-to-end demo.
+integration, CLI/DAP wiring, on-disk symbol map, configurable cycle time with
+jitter tracking, live PLC Monitor with watch list and force/unforce, integer
+overflow wrapping, literal context typing, global variable initialization, and
+a working playground are all in place on `feature/phase13-comm-framework`.
+Outstanding items are advanced features (multi-rate scheduling, register scaling,
+diagnostics surface, Siemens-style watch tables) that aren't blocking the first
+end-to-end demo.
 
 - [x] **`st-comm-api` crate** (shared traits + types):
   - [x] `CommLink` trait (open, close, send, receive, diagnostics)
@@ -1000,6 +927,73 @@ implicit in Tier 1 design but became its own work item):
       target ~500ms between updates regardless of cycle period (10ms cycle →
       every 50, 100ms cycle → every 5, etc.). Free-run defaults to every 20.
 
+**Integer width tracking + two's complement overflow** (added in this session):
+- [x] **Bug**: SINT/INT/DINT declared variables were stored as raw i64 and
+      never narrowed — a `cycle : SINT` counter grew to 1750 instead of
+      wrapping at 127→-128. Also, the Monitor panel showed "INT" for all
+      signed integer types (SINT/INT/DINT/LINT all collapsed to VarType::Int).
+- [x] **Fix (IR)**: new `IntWidth` enum (I8/U8/I16/U16/I32/U32/I64/U64/None)
+      added to `VarSlot` with `#[serde(default)]` for backward compat.
+      Helper `IntWidth::display_name()` returns "SINT"/"USINT"/"DINT" etc.
+- [x] **Fix (compiler)**: `int_width_from_ast()` maps every `ElementaryType`
+      to its `IntWidth`. All VarSlot creation sites propagate the width.
+- [x] **Fix (VM)**: `narrow_value(val, width)` applies two's complement
+      wrapping at every store boundary: `local_set`, `set_global`,
+      `set_global_by_slot`, `StoreGlobal` instruction, `force_variable`.
+      Add/Sub/Mul switched to `i64::wrapping_*` so debug builds don't panic.
+- [x] **Fix (display)**: `format_var_type_with_width()` returns "SINT"/
+      "USINT"/"DINT" etc. Monitor panel and watch list show correct types.
+- [x] 8 regression tests: SINT local/global wrap, USINT wrap, INT wrap,
+      DINT no-wrap, comm `set_global_by_slot` narrowing, forced-value
+      narrowing, cross-variant normalization (Int→UInt for ULINT slots)
+
+**Literal context typing (semantic checker)** (added in this session):
+- [x] `cycle : SINT := 0` and `cycle := cycle + 1` no longer error —
+      the checker now allows integer literals to narrow to the assignment
+      target when the value fits (matching Codesys/TwinCAT behavior)
+- [x] `integer_type_range()`, `literal_fits_in_target()`, and
+      `integer_literal_value()` helpers in st-semantics
+- [x] `check_binary` does literal context typing: `cycle + 1` types as
+      SINT (not INT) when `cycle` is SINT and 1 fits in SINT range
+- [x] Out-of-range literals still error (e.g. `x : SINT := 200` → error)
+- [x] 3 semantic tests: the user's exact program, in-range multi-type,
+      out-of-range rejection
+
+**Force variable improvements** (added in this session):
+- [x] **Real PLC force semantics**: `forced_global_slots: HashSet<u16>`
+      on Vm. `set_global_by_slot`, `set_global`, `StoreGlobal` all skip
+      writes to forced slots. `force_variable` writes the forced value
+      INTO the slot so every reader sees it naturally.
+- [x] **Forced values narrowed**: typing 200 into a SINT force field
+      stores -56 (the actual two's complement representation)
+- [x] **Monitor panel**: forced rows show 🔒 lock icon + orange value;
+      `forced: bool` per variable in telemetry; immediate telemetry push
+      on force/unforce so the panel updates instantly
+- [x] **Type validation**: force input validates against the variable's
+      declared type (BOOL: true/false/0/1; INT: signed decimal; REAL:
+      float; STRING: anything). Invalid input flashes red with a tooltip.
+- [x] **Inflight evaluate**: `process_inflight_requests` handles
+      `Evaluate` inline so addWatch/force/unforce take effect mid-run
+- [x] 4 force regression tests + 1 DAP test for multi-var freeze scenario
+
+**Global variable initialization** (added in this session):
+- [x] **Bug**: `VAR_GLOBAL counter : USINT := 250;` was silently ignored —
+      the compiler's `GlobalVarDeclaration` handler didn't emit init code,
+      so all globals started at `Value::default_for_type` (0/false/empty).
+- [x] **Fix**: compiler collects `(slot, init_expr)` pairs during pass 1,
+      then generates a synthetic `__global_init` function containing one
+      `StoreGlobal` per initializer. The engine calls `vm.run_global_init()`
+      once at construction time.
+- [x] 24 tests covering every elementary type (BOOL, SINT..ULINT, BYTE..
+      LWORD, REAL, LREAL, STRING), multiple mixed-type declarations,
+      overflow narrowing in init, init-runs-before-first-cycle,
+      init-does-not-re-run, no-init-is-noop
+- [x] User-defined type tests: TYPE alias to INT/REAL (works), ENUM with
+      integer literal (works), ENUM by variant name (ignored — compiler
+      doesn't resolve enum names in initializers yet), STRUCT field
+      defaults (ignored — struct fields not materialized at runtime),
+      ARRAY (ignored — array elements not materialized at runtime)
+
 #### Phase 13a.3: Live Variable Monitor + Siemens-Style Watch Tables
 
 Goal: a Codesys/TwinCAT/TIA Portal-grade variable monitor that streams live
@@ -1106,6 +1100,107 @@ watch list.
 - [ ] Documentation: `docs/src/cli/watch-tables.md` quickstart with
       screenshots and a TIA-Portal-comparison cheat sheet
 
+**Hierarchical FB instance display in debugger + Monitor panel** (future):
+
+When the user watches a variable that is a FUNCTION_BLOCK instance (e.g.,
+`counter : CTU` or `filler : FillController`), it should be displayed as a
+collapsible tree — the parent node shows the instance name + type, and
+expanding it reveals each field with its live value. This matches how
+Codesys, TwinCAT, and TIA Portal display structured variables.
+
+Currently, FB fields are shown flat (`counter.Q`, `counter.CV`, etc.). The
+tree view is more natural for nested FBs like `filler.counter.Q` where
+there are two levels of expansion.
+
+Implementation plan:
+
+- [x] **DAP: tree variables via `variablesReference`** (debugger Variables
+      panel + Watch panel):
+  - [x] FB instance locals are returned with `variablesReference > 0` (expandable)
+        instead of being flattened. Scalar locals keep `variablesReference: 0`.
+  - [x] `fb_var_refs: HashMap<i64, FbVarRef>` on DapSession maps ref IDs
+        to `(caller_id, slot_idx, fb_func_idx)`. Cleared on `resume_execution`.
+  - [x] Variables request with a FB ref returns the FB's fields as children.
+        Nested FBs (e.g., CTU inside FillController) get their own refs
+        for recursive expansion.
+  - [x] Parent FB shows a summary value (e.g., `CU=TRUE, PV=5, Q=FALSE, CV=2`).
+  - [x] Evaluate handler resolves dotted FB field paths (`ctr.Q`) via
+        `resolve_fb_field` using the current frame's caller identity.
+  - [x] 3 DAP integration tests:
+    - `test_evaluate_fb_field_while_paused_inside_fb`: ctr.Q resolves, ctr
+      has variablesReference > 0
+    - `test_fb_instance_tree_expansion`: ctr is expandable with type "CTU"
+    - `test_fb_children_request`: full round-trip — request ctr's children,
+      verify CU/RESET/PV/Q/CV/prev_cu are returned as child Variables
+
+- [x] **DAP Watch panel: expandable FB instances via Evaluate**:
+  The VS Code Watch panel sends `evaluate` requests (not `variables`) when
+  the user adds an expression. To make `filler` or `counter` expandable
+  in the Watch panel, the Evaluate response needs `variablesReference > 0`.
+
+  - [ ] Change `handle_evaluate` to detect when the expression resolves to
+        a FB instance (check the resolved symbol's `VarType::FbInstance`).
+        When it does, allocate a `variablesReference` and store a `FbVarRef`
+        — the same mechanism used in `handle_variables` for the Locals panel.
+  - [ ] Set `EvaluateResponse.variablesReference` to the allocated ref ID
+        so VS Code shows the expand arrow.
+  - [ ] The `result` field should show the summary value (same as
+        `fb_summary_value` used in the Locals panel).
+  - [ ] Test: add `counter` to Watch while paused inside FillController →
+        Watch shows "CTU (CU=TRUE, CV=2, ...)" with expand arrow → expand
+        shows Q, CV, PV, etc.
+
+- [x] **Monitor panel: tree-view watch list**:
+  - [ ] Change the watch list data model from flat `string[]` to a tree:
+        ```ts
+        interface WatchEntry {
+          name: string;        // e.g. "Main.filler"
+          path: string;        // full dotted path for the DAP
+          children?: WatchEntry[];  // null for scalars, populated for FBs
+          expanded?: boolean;
+        }
+        ```
+  - [ ] When the user adds a variable that resolves to a FB type (the catalog
+        includes type info), auto-query the catalog for its children and build
+        the tree node. Use HTML `<details>/<summary>` elements or a custom
+        toggle UI for expand/collapse.
+  - [ ] Telemetry payload: when a watched variable is a FB instance, the DAP
+        should send the parent entry + all child values in a nested structure
+        rather than requiring the panel to request children separately.
+        Proposed schema change:
+        ```json
+        {
+          "name": "Main.filler.counter",
+          "type": "CTU",
+          "value": "CV=3, Q=TRUE",
+          "children": [
+            { "name": "CU", "value": "TRUE", "type": "BOOL" },
+            { "name": "RESET", "value": "FALSE", "type": "BOOL" },
+            { "name": "PV", "value": "5", "type": "INT" },
+            { "name": "Q", "value": "TRUE", "type": "BOOL" },
+            { "name": "CV", "value": "3", "type": "INT" }
+          ]
+        }
+        ```
+  - [ ] Persist expand/collapse state in the workspace state alongside the
+        watch list so the tree structure survives panel close / reload.
+  - [ ] When a FB instance has many children (e.g., a large IO module with
+        dozens of fields), add a "Collapse all" / "Expand all" action.
+
+- [ ] **Catalog enhancement**: the `plc/varCatalog` event should include
+      a `children` list for each FB-typed entry so the panel knows the tree
+      structure before any values arrive. The catalog already has `type` — add
+      an optional `childNames: [{name, type}, ...]` field for FB entries.
+
+- [ ] **Tests**:
+  - [ ] DAP integration: tree expansion for single-level FB (CTU) and
+        two-level nested FB (FillController → CTU)
+  - [ ] Monitor panel: verify the tree renders with correct expand/collapse
+  - [ ] Verify tree state persists across panel close / reload
+  - [ ] Performance: verify that a FB with 50+ fields doesn't bloat the
+        telemetry payload beyond reasonable size (only send children for
+        expanded nodes, or cap at first-level expansion)
+
 #### Phase 13b: Real Protocol Implementations
 
 - [ ] **`st-comm-link-tcp` crate** (TCP link):
@@ -1154,263 +1249,3 @@ watch list.
   - [ ] `st-comm-ethernet-ip` — EtherNet/IP (Allen-Bradley) device extension
 
 ---
-
-## Phase 14 (Future): Native Compilation & Hardware Target Platform System
-
-Two major capabilities: (1) LLVM native compilation backend, and (2) a plugin-based platform system
-that lets each hardware target define its peripherals, I/O mapping, and compilation settings as a
-self-contained extension — no framework recompilation required.
-
-### 13a: LLVM Native Compilation Backend
-
-- [ ] Integrate `inkwell` (Rust LLVM bindings)
-- [ ] IR → LLVM IR lowering for all 50+ bytecode instructions
-- [ ] JIT compilation for development mode (fast iteration on host)
-- [ ] AOT cross-compilation for embedded targets (ARM Cortex-M, RISC-V, Xtensa)
-- [ ] Adapt online change for native code (requires careful relocation strategy)
-- [ ] Benchmark: VM interpreter vs LLVM-compiled cycle times
-
-### 13b: Hardware Target Platform System
-
-The platform system allows each hardware target (ESP32, STM32, Raspberry Pi, etc.) to be defined
-as a **platform extension** — a self-contained package that provides:
-1. **Compilation target**: LLVM triple, linker scripts, startup code
-2. **Peripheral definitions**: typed ST variables/FBs that map to hardware registers
-3. **Configuration schema**: user-configurable pin assignments, clock settings, peripheral modes
-4. **Runtime HAL**: hardware abstraction layer bridging ST I/O to physical pins
-
-A platform extension is loaded at compile time — the user selects a target in `plc-project.yaml`
-and the platform's peripheral definitions become available as typed variables in their ST code.
-No recompilation of the rust-plc framework is needed to add new platforms.
-
-#### Architecture
-
-```
-plc-project.yaml
-  target: esp32-wroom-32
-  peripherals:
-    gpio:
-      pin_2: { mode: output, alias: LED }
-      pin_4: { mode: input, pull: up, alias: BUTTON }
-    uart:
-      uart0: { baud: 115200, tx: 1, rx: 3 }
-    adc:
-      adc1_ch0: { pin: 36, attenuation: 11db, alias: TEMP_SENSOR }
-
-↓ Platform extension generates:
-
-VAR_GLOBAL
-    LED           : BOOL;        (* GPIO2 output — mapped by platform *)
-    BUTTON        : BOOL;        (* GPIO4 input — mapped by platform *)
-    TEMP_SENSOR   : INT;         (* ADC1_CH0 — mapped by platform *)
-    UART0_TX_DATA : STRING[256]; (* UART0 transmit buffer *)
-END_VAR
-```
-
-The user's ST program reads/writes these variables like any other global.
-The platform runtime maps them to hardware registers in the scan cycle.
-
-#### Platform Extension Structure
-
-```
-platforms/
-├── esp32/
-│   ├── platform.yaml          # Platform metadata + LLVM triple
-│   ├── peripherals/
-│   │   ├── gpio.yaml          # GPIO pin definitions, modes, pull-up/down
-│   │   ├── uart.yaml          # UART channels, baud rates, pin mappings
-│   │   ├── spi.yaml           # SPI bus definitions
-│   │   ├── i2c.yaml           # I2C bus definitions
-│   │   ├── adc.yaml           # ADC channels, resolution, attenuation
-│   │   ├── dac.yaml           # DAC channels
-│   │   ├── pwm.yaml           # PWM/LEDC channels
-│   │   └── timer.yaml         # Hardware timer definitions
-│   ├── stdlib/                # Platform-specific ST function blocks
-│   │   ├── esp_wifi.st        # WiFi connection FB
-│   │   ├── esp_ble.st         # BLE communication FB
-│   │   └── esp_sleep.st       # Deep sleep control
-│   ├── hal/                   # Rust HAL implementation
-│   │   └── lib.rs             # Maps ST globals ↔ hardware registers
-│   ├── linker.ld              # Linker script for the target
-│   └── startup.s              # Startup / vector table
-├── stm32f103/
-│   ├── platform.yaml
-│   ├── peripherals/
-│   │   ├── gpio.yaml          # PA0-PA15, PB0-PB15, PC13, etc.
-│   │   ├── uart.yaml          # USART1, USART2, USART3
-│   │   ├── spi.yaml           # SPI1, SPI2
-│   │   ├── i2c.yaml           # I2C1, I2C2
-│   │   ├── adc.yaml           # ADC1 (10 channels)
-│   │   ├── pwm.yaml           # TIM1-TIM4 PWM channels
-│   │   └── can.yaml           # CAN bus
-│   ├── stdlib/
-│   │   └── stm32_flash.st     # Flash read/write FB
-│   ├── hal/
-│   │   └── lib.rs
-│   └── linker.ld
-├── raspberry-pi/
-│   ├── platform.yaml
-│   ├── peripherals/
-│   │   ├── gpio.yaml          # BCM GPIO 0-27
-│   │   ├── uart.yaml          # /dev/ttyAMA0, /dev/ttyS0
-│   │   ├── spi.yaml           # SPI0, SPI1
-│   │   ├── i2c.yaml           # I2C1
-│   │   └── pwm.yaml           # Hardware PWM channels
-│   ├── stdlib/
-│   │   └── rpi_camera.st      # Camera interface FB
-│   └── hal/
-│       └── lib.rs             # Uses rppal or embedded-hal
-├── raspberry-pico/
-│   ├── platform.yaml          # RP2040 / RP2350
-│   ├── peripherals/
-│   │   ├── gpio.yaml          # GP0-GP29
-│   │   ├── uart.yaml          # UART0, UART1
-│   │   ├── spi.yaml           # SPI0, SPI1
-│   │   ├── i2c.yaml           # I2C0, I2C1
-│   │   ├── adc.yaml           # ADC0-ADC3 + temp sensor
-│   │   ├── pwm.yaml           # 16 PWM channels
-│   │   └── pio.yaml           # Programmable I/O state machines
-│   └── hal/
-│       └── lib.rs             # Uses embassy-rp or rp-hal
-└── risc-v/                    # Generic RISC-V target
-    ├── platform.yaml
-    └── hal/
-        └── lib.rs
-```
-
-#### platform.yaml Schema
-
-```yaml
-name: ESP32-WROOM-32
-vendor: Espressif
-arch: xtensa
-llvm_target: xtensa-esp32-none-elf
-flash_size: 4MB
-ram_size: 520KB
-clock_speed: 240MHz
-
-# Rust HAL crate to use for the runtime
-hal_crate: esp-hal
-hal_version: "0.22"
-
-# Supported peripherals (references files in peripherals/)
-peripherals:
-  - gpio
-  - uart
-  - spi
-  - i2c
-  - adc
-  - dac
-  - pwm
-  - timer
-
-# Build settings
-build:
-  toolchain: esp       # rustup toolchain
-  runner: espflash      # flash tool
-  flash_command: "espflash flash --monitor"
-```
-
-#### User Configuration in plc-project.yaml
-
-```yaml
-name: MyIoTProject
-target: esp32
-
-peripherals:
-  gpio:
-    pin_2:  { mode: output, alias: STATUS_LED }
-    pin_4:  { mode: input, pull: up, alias: START_BUTTON }
-    pin_5:  { mode: output, alias: MOTOR_EN }
-    pin_18: { mode: alternate, function: spi_clk }
-    pin_19: { mode: alternate, function: spi_miso }
-    pin_23: { mode: alternate, function: spi_mosi }
-  uart:
-    uart0: { baud: 115200, tx: 1, rx: 3, alias: DEBUG }
-    uart2: { baud: 9600, tx: 17, rx: 16, alias: MODBUS }
-  adc:
-    adc1_ch0: { pin: 36, attenuation: 11db, alias: TEMP_SENSOR }
-    adc1_ch3: { pin: 39, attenuation: 11db, alias: PRESSURE }
-  spi:
-    spi2: { clk: 18, miso: 19, mosi: 23, cs: 15, speed: 1000000, alias: DISPLAY }
-```
-
-This generates auto-included ST globals:
-```st
-(* Auto-generated from platform config — DO NOT EDIT *)
-VAR_GLOBAL
-    STATUS_LED    : BOOL;    (* GPIO2 output *)
-    START_BUTTON  : BOOL;    (* GPIO4 input, pull-up *)
-    MOTOR_EN      : BOOL;    (* GPIO5 output *)
-    TEMP_SENSOR   : INT;     (* ADC1_CH0, 12-bit, 0-3.3V *)
-    PRESSURE      : INT;     (* ADC1_CH3, 12-bit, 0-3.3V *)
-END_VAR
-```
-
-#### Implementation Plan
-
-- [ ] **Platform registry**: discover and load platform extensions from `platforms/` directory
-- [ ] **Peripheral YAML schema**: define the configuration grammar for GPIO, UART, SPI, I2C, ADC, DAC, PWM
-- [ ] **Config-to-ST generator**: read user's `plc-project.yaml` peripheral config, generate `VAR_GLOBAL` declarations with hardware-mapped names
-- [ ] **LLVM cross-compilation**:
-  - [ ] Target triple selection from platform.yaml
-  - [ ] Linker script and startup code integration
-  - [ ] `st-cli build --target esp32` compiles to flashable binary
-- [ ] **Platform HAL runtime**:
-  - [ ] Scan cycle integration: read physical inputs → execute program → write physical outputs
-  - [ ] Map ST global variable slots to hardware register addresses
-  - [ ] Interrupt-safe I/O access
-- [ ] **Platform-specific stdlib**: each platform can ship additional `.st` files (e.g., WiFi FBs, BLE FBs)
-- [ ] **CLI integration**:
-  - [ ] `st-cli build --target esp32` — cross-compile for target
-  - [ ] `st-cli flash --target esp32` — compile and flash to device
-  - [ ] `st-cli targets` — list available platform extensions
-  - [ ] `st-cli target-info esp32` — show peripherals, pins, capabilities
-- [ ] **Initial platform implementations**:
-  - [ ] ESP32 (Xtensa, via esp-hal)
-  - [ ] STM32F103 (ARM Cortex-M3, via stm32f1xx-hal)
-  - [ ] Raspberry Pi (Linux/ARM64, via rppal)
-  - [ ] Raspberry Pi Pico / RP2040 (ARM Cortex-M0+, via embassy-rp)
-  - [ ] Generic RISC-V (via riscv-hal)
-- [ ] **Tests**:
-  - [ ] Platform discovery and loading
-  - [ ] Peripheral config parsing and validation
-  - [ ] Config-to-ST generation (verify correct VAR_GLOBAL output)
-  - [ ] Cross-compilation smoke test (compile to ELF, verify target arch)
-  - [ ] Platform-specific stdlib compilation
-- [ ] **Documentation**:
-  - [ ] "Creating a Platform Extension" guide
-  - [ ] Per-platform quickstart (ESP32, STM32, RPi, Pico)
-  - [ ] Peripheral configuration reference
-  - [ ] Hardware I/O mapping tutorial
-
----
-
-## Cross-Cutting Concerns
-
-- [x] **Testing:** 502 tests across 10 crates — unit, integration, LSP protocol, DAP protocol, WebSocket, end-to-end
-- [x] **CI/CD:** GitHub Actions (check, test, clippy, audit, cargo-deny, docs deploy), release-plz for semver
-- [x] **Documentation:** mdBook site (20+ pages) with architecture, tutorials, language reference, stdlib docs
-- [x] **Tracing / logging:** DAP server logs to stderr + Debug Console, `tracing` crate available throughout
-- [x] **Devcontainer:** Full VSCode dev environment with auto-build, extension install, playground
-- [x] **Error quality:** Line:column source locations, severity levels, diagnostic codes
-- [ ] **IEC 61131-3 compliance tracking:** Maintain a checklist of spec sections implemented vs. pending
-
----
-
-## Dependency Graph
-
-```
-Phase 0 (scaffolding)
-  └─► Phase 1 (tree-sitter grammar)
-        └─► Phase 2 (AST)
-              ├─► Phase 3 (semantics)
-              │     └─► Phase 4 (LSP skeleton) ──► Phase 5 (advanced LSP)
-              └─► Phase 6 (IR + compiler)
-                    └─► Phase 7 (runtime)
-                          ├─► Phase 8 (DAP debugger)
-                          ├─► Phase 9 (online change)
-                          └─► Phase 10 (monitor UI)
-Phase 11 (CLI) — can start after Phase 7, grows with each phase
-Phase 12 (LLVM) — independent, after Phase 6
-```

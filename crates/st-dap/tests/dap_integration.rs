@@ -1432,3 +1432,384 @@ END_PROGRAM
     eprintln!("g_result = {result_str}");
     assert_eq!(result_str, "42", "g_result should be 42 (10+32)");
 }
+
+// =============================================================================
+// FB instance field resolution in debugger
+// =============================================================================
+
+#[test]
+fn test_evaluate_fb_field_while_paused_inside_fb() {
+    // When paused inside a FillController-like FB, the user hovers over
+    // `counter.Q` or types it in the Watch panel. The DAP must resolve
+    // this dotted path by looking up the CTU instance's state from the
+    // current frame context.
+    let source = "\
+FUNCTION_BLOCK MyFB\n\
+VAR_INPUT cmd : BOOL; END_VAR\n\
+VAR\n\
+    ctr : CTU;\n\
+END_VAR\n\
+    ctr(CU := cmd, RESET := FALSE, PV := 5);\n\
+END_FUNCTION_BLOCK\n\
+\n\
+PROGRAM Main\n\
+VAR\n\
+    fb : MyFB;\n\
+END_VAR\n\
+    fb(cmd := TRUE);\n\
+END_PROGRAM\n";
+
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            // Set breakpoint on the ctr() call line inside MyFB (line 6)
+            dap_request(3, "setBreakpoints", Some(json!({
+                "source": { "path": "test.st" },
+                "breakpoints": [{ "line": 6 }]
+            }))),
+            dap_request(4, "configurationDone", None),
+            // Continue — should hit breakpoint inside MyFB
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            // Now evaluate `ctr.Q` while paused inside MyFB
+            dap_request(6, "evaluate", Some(json!({
+                "expression": "ctr.Q",
+                "frameId": 0
+            }))),
+            // Also evaluate a flat local
+            dap_request(7, "evaluate", Some(json!({
+                "expression": "cmd",
+                "frameId": 0
+            }))),
+            // Check the Variables/Locals scope
+            dap_request(8, "scopes", Some(json!({ "frameId": 0 }))),
+            dap_request(9, "variables", Some(json!({ "variablesReference": 1000 }))),
+            dap_request(10, "disconnect", None),
+        ],
+    );
+
+    // ctr.Q should resolve (not <unknown>)
+    let eval_resp = find_response(&messages, 6).unwrap();
+    let ctr_q = eval_resp["body"]["result"].as_str().unwrap_or("<missing>");
+    eprintln!("ctr.Q = {ctr_q}");
+    assert_ne!(
+        ctr_q, "<unknown>",
+        "ctr.Q should resolve to a value when paused inside MyFB, got <unknown>"
+    );
+
+    // cmd should also resolve
+    let cmd_resp = find_response(&messages, 7).unwrap();
+    let cmd_val = cmd_resp["body"]["result"].as_str().unwrap_or("<missing>");
+    eprintln!("cmd = {cmd_val}");
+    assert_ne!(cmd_val, "<unknown>", "cmd should resolve");
+
+    // The locals scope should include "ctr" as an expandable FB instance
+    // (variablesReference > 0), NOT flat "ctr.Q" / "ctr.CV" entries.
+    let vars_resp = find_response(&messages, 9).unwrap();
+    let vars = vars_resp["body"]["variables"].as_array().unwrap();
+    let var_names: Vec<&str> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+    eprintln!("Locals: {var_names:?}");
+    assert!(
+        var_names.iter().any(|n| n.eq_ignore_ascii_case("ctr")),
+        "Locals should include 'ctr' as a FB instance node, got: {var_names:?}"
+    );
+    // ctr should have variablesReference > 0 (expandable)
+    let ctr_var = vars.iter().find(|v| {
+        v["name"].as_str().map_or(false, |n| n.eq_ignore_ascii_case("ctr"))
+    }).unwrap();
+    let ctr_ref = ctr_var["variablesReference"].as_i64().unwrap_or(0);
+    assert!(
+        ctr_ref > 0,
+        "ctr should have variablesReference > 0 (expandable FB), got {ctr_ref}"
+    );
+    eprintln!("ctr variablesReference = {ctr_ref}");
+}
+
+#[test]
+fn test_fb_instance_tree_expansion() {
+    // End-to-end: expand a FB instance to see its fields as children.
+    // 1. Pause inside MyFB at a breakpoint
+    // 2. Request Locals scope → get 'ctr' with variablesReference > 0
+    // 3. Request Variables(ctr_ref) → get CTU's fields (CU, RESET, PV, Q, CV, prev_cu)
+    let source = "\
+FUNCTION_BLOCK MyFB\n\
+VAR_INPUT cmd : BOOL; END_VAR\n\
+VAR\n\
+    ctr : CTU;\n\
+END_VAR\n\
+    ctr(CU := cmd, RESET := FALSE, PV := 5);\n\
+END_FUNCTION_BLOCK\n\
+\n\
+PROGRAM Main\n\
+VAR fb : MyFB; END_VAR\n\
+    fb(cmd := TRUE);\n\
+END_PROGRAM\n";
+
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "setBreakpoints", Some(json!({
+                "source": { "path": "test.st" },
+                "breakpoints": [{ "line": 6 }]
+            }))),
+            dap_request(4, "configurationDone", None),
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            // Get locals scope
+            dap_request(6, "scopes", Some(json!({ "frameId": 0 }))),
+            dap_request(7, "variables", Some(json!({ "variablesReference": 1000 }))),
+            dap_request(8, "disconnect", None),
+        ],
+    );
+
+    // Find ctr in locals and get its variablesReference
+    let locals_resp = find_response(&messages, 7).unwrap();
+    let locals = locals_resp["body"]["variables"].as_array().unwrap();
+    let ctr = locals.iter().find(|v| {
+        v["name"].as_str().map_or(false, |n| n.eq_ignore_ascii_case("ctr"))
+    });
+    assert!(ctr.is_some(), "Expected 'ctr' in locals, got: {:?}",
+        locals.iter().map(|v| v["name"].as_str()).collect::<Vec<_>>());
+    let ctr = ctr.unwrap();
+    let ctr_ref = ctr["variablesReference"].as_i64().unwrap_or(0);
+    assert!(ctr_ref > 0, "ctr should be expandable (variablesReference > 0)");
+
+    // ctr should show a type name
+    let type_str = ctr["type"].as_str().unwrap_or("");
+    eprintln!("ctr type = {type_str}");
+    assert!(
+        type_str.to_uppercase().contains("CTU"),
+        "ctr type should mention CTU, got '{type_str}'"
+    );
+
+    // Now expand ctr by requesting its children. We need to do this in a
+    // SECOND session because the first one has already disconnected. But
+    // since we can't easily extend the test, let's verify the structure
+    // from what we have. The key assertion: ctr IS expandable.
+    eprintln!("ctr summary value = {:?}", ctr["value"].as_str());
+}
+
+#[test]
+fn test_fb_children_request() {
+    // Full round-trip: get the ctr variablesReference, then request its children.
+    let source = "\
+FUNCTION_BLOCK MyFB\n\
+VAR_INPUT cmd : BOOL; END_VAR\n\
+VAR\n\
+    ctr : CTU;\n\
+END_VAR\n\
+    ctr(CU := cmd, RESET := FALSE, PV := 5);\n\
+END_FUNCTION_BLOCK\n\
+\n\
+PROGRAM Main\n\
+VAR fb : MyFB; END_VAR\n\
+    fb(cmd := TRUE);\n\
+END_PROGRAM\n";
+
+    // We need two Variables requests: first for locals (ref 1000), then
+    // for the ctr FB children (the ref ID allocated for ctr).
+    // The ref for ctr will be allocated after the locals_ref (1000) and
+    // globals_ref (1001), so it should be 1002.
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "setBreakpoints", Some(json!({
+                "source": { "path": "test.st" },
+                "breakpoints": [{ "line": 6 }]
+            }))),
+            dap_request(4, "configurationDone", None),
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "scopes", Some(json!({ "frameId": 0 }))),
+            // Request locals (allocates ctr's FB ref)
+            dap_request(7, "variables", Some(json!({ "variablesReference": 1000 }))),
+            // Request ctr's children (ref should be 1002 — after locals=1000, globals=1001)
+            dap_request(8, "variables", Some(json!({ "variablesReference": 1002 }))),
+            dap_request(9, "disconnect", None),
+        ],
+    );
+
+    // Check the children response
+    let children_resp = find_response(&messages, 8).unwrap();
+    let children = children_resp["body"]["variables"].as_array().unwrap();
+    let child_names: Vec<&str> = children.iter().filter_map(|v| v["name"].as_str()).collect();
+    eprintln!("CTU children: {child_names:?}");
+
+    // CTU should have: CU, RESET, PV, Q, CV, prev_cu
+    assert!(
+        child_names.iter().any(|n| n.eq_ignore_ascii_case("Q")),
+        "CTU children should include Q, got: {child_names:?}"
+    );
+    assert!(
+        child_names.iter().any(|n| n.eq_ignore_ascii_case("CV")),
+        "CTU children should include CV, got: {child_names:?}"
+    );
+    assert!(
+        child_names.iter().any(|n| n.eq_ignore_ascii_case("PV")),
+        "CTU children should include PV, got: {child_names:?}"
+    );
+    assert!(
+        child_names.len() >= 5,
+        "Expected at least 5 CTU fields (CU, RESET, PV, Q, CV, prev_cu), got {}",
+        child_names.len()
+    );
+}
+
+#[test]
+fn test_evaluate_fb_instance_is_expandable_in_watch() {
+    // When the user adds "ctr" to the Watch panel (or hovers over it),
+    // VS Code sends an Evaluate request. If ctr is a FB instance, the
+    // EvaluateResponse should have variablesReference > 0 so VS Code
+    // shows the expand arrow. Clicking it sends a Variables request
+    // with that ref to get the children.
+    let source = "\
+FUNCTION_BLOCK MyFB\n\
+VAR_INPUT cmd : BOOL; END_VAR\n\
+VAR\n\
+    ctr : CTU;\n\
+END_VAR\n\
+    ctr(CU := cmd, RESET := FALSE, PV := 5);\n\
+END_FUNCTION_BLOCK\n\
+\n\
+PROGRAM Main\n\
+VAR fb : MyFB; END_VAR\n\
+    fb(cmd := TRUE);\n\
+END_PROGRAM\n";
+
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "setBreakpoints", Some(json!({
+                "source": { "path": "test.st" },
+                "breakpoints": [{ "line": 6 }]
+            }))),
+            dap_request(4, "configurationDone", None),
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            // Evaluate "ctr" as a Watch expression
+            dap_request(6, "evaluate", Some(json!({
+                "expression": "ctr",
+                "context": "watch",
+                "frameId": 0
+            }))),
+            // Evaluate a scalar for comparison
+            dap_request(7, "evaluate", Some(json!({
+                "expression": "cmd",
+                "context": "watch",
+                "frameId": 0
+            }))),
+            dap_request(8, "disconnect", None),
+        ],
+    );
+
+    // "ctr" should be expandable (variablesReference > 0)
+    let ctr_resp = find_response(&messages, 6).unwrap();
+    let ctr_ref = ctr_resp["body"]["variablesReference"].as_i64().unwrap_or(0);
+    let ctr_result = ctr_resp["body"]["result"].as_str().unwrap_or("");
+    let ctr_type = ctr_resp["body"]["type"].as_str().unwrap_or("");
+    eprintln!("Watch ctr: result={ctr_result:?} type={ctr_type:?} ref={ctr_ref}");
+    assert!(
+        ctr_ref > 0,
+        "Evaluate('ctr') should return variablesReference > 0 for expandable FB, got {ctr_ref}"
+    );
+    assert!(
+        ctr_type.to_uppercase().contains("CTU"),
+        "Type should mention CTU, got '{ctr_type}'"
+    );
+    assert_ne!(ctr_result, "<unknown>", "ctr should have a summary value");
+
+    // "cmd" should NOT be expandable (scalar BOOL)
+    let cmd_resp = find_response(&messages, 7).unwrap();
+    let cmd_ref = cmd_resp["body"]["variablesReference"].as_i64().unwrap_or(0);
+    assert_eq!(cmd_ref, 0, "Scalar 'cmd' should have variablesReference=0");
+}
+
+#[test]
+fn test_monitor_watch_fb_prefix_includes_all_descendants() {
+    // End-to-end test for the PLC Monitor panel's tree view data flow.
+    // When watching a FB instance prefix like "Main.fb", the telemetry
+    // payload must include ALL descendant scalar fields so the panel
+    // can build a recursive tree.
+    let source = "\
+FUNCTION_BLOCK Inner\n\
+VAR_INPUT x : INT; END_VAR\n\
+VAR_OUTPUT y : INT; END_VAR\n\
+    y := x * 2;\n\
+END_FUNCTION_BLOCK\n\
+\n\
+FUNCTION_BLOCK Outer\n\
+VAR_INPUT cmd : BOOL; END_VAR\n\
+VAR\n\
+    sub : Inner;\n\
+    state : INT := 0;\n\
+END_VAR\n\
+    state := state + 1;\n\
+    sub(x := state);\n\
+END_FUNCTION_BLOCK\n\
+\n\
+PROGRAM Main\n\
+VAR\n\
+    fb : Outer;\n\
+END_VAR\n\
+    fb(cmd := TRUE);\n\
+END_PROGRAM\n";
+
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            // Watch the Outer FB instance — should include nested Inner fields
+            dap_request(
+                4,
+                "evaluate",
+                Some(json!({ "expression": "watchVariables Main.fb" })),
+            ),
+            // Run one cycle so the FB state gets populated
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "disconnect", None),
+        ],
+    );
+
+    // Find the telemetry payload
+    let payloads = find_cycle_stats_payloads(&messages);
+    assert!(!payloads.is_empty(), "Expected at least one telemetry event");
+    let last = payloads.last().unwrap();
+    let vars = last["variables"].as_array().unwrap();
+
+    // Collect all variable names from the telemetry
+    let var_names: Vec<&str> = vars
+        .iter()
+        .filter_map(|v| v["name"].as_str())
+        .collect();
+    eprintln!("Telemetry variables: {var_names:?}");
+
+    // Should include nested Inner FB fields (2 levels deep)
+    assert!(
+        var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.state")),
+        "Should include Outer.state, got: {var_names:?}"
+    );
+    assert!(
+        var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.sub.x")),
+        "Should include nested Inner.x (2 levels), got: {var_names:?}"
+    );
+    assert!(
+        var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.sub.y")),
+        "Should include nested Inner.y (2 levels), got: {var_names:?}"
+    );
+
+    // Should NOT include the FB instance slots themselves (they're not scalar)
+    assert!(
+        !var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb")),
+        "Should NOT include the FB slot 'Main.fb' itself: {var_names:?}"
+    );
+    assert!(
+        !var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.sub")),
+        "Should NOT include the nested FB slot 'Main.fb.sub' itself: {var_names:?}"
+    );
+}
