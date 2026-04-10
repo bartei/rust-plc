@@ -62,14 +62,14 @@ fn ref_deref_round_trip_real() {
 FUNCTION Test : REAL
 VAR_INPUT dummy : INT; END_VAR
 VAR
-    x : REAL := 3.14;
+    x : REAL := 3.125;
     p : REF_TO REAL;
 END_VAR
     p := REF(x);
     Test := p^;
 END_FUNCTION
 "#, "Test");
-    assert_eq!(val, Value::Real(3.14));
+    assert_eq!(val, Value::Real(3.125));
 }
 
 #[test]
@@ -519,12 +519,12 @@ VAR
     p : REF_TO REAL;
 END_VAR
     p := REF(x);
-    p^ := 2.718;
+    p^ := 2.875;
     Test := x;
 END_FUNCTION
 "#;
     let val = run_function(source, "Test");
-    assert_eq!(val, Value::Real(2.718));
+    assert_eq!(val, Value::Real(2.875));
 }
 
 // =============================================================================

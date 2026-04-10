@@ -827,7 +827,10 @@ impl Analyzer {
             // Type-check initial value if present
             if let Some(init_expr) = &decl.initial_value {
                 let init_ty = self.check_expression(init_expr);
-                if !is_type_compatible(&init_ty, &ty) && !matches!(init_ty, Ty::Unknown) {
+                if !is_type_compatible(&init_ty, &ty)
+                    && !matches!(init_ty, Ty::Unknown)
+                    && !literal_fits_in_target(init_expr, &ty)
+                {
                     self.error(
                         DiagnosticCode::TypeMismatchAssignment,
                         format!(
@@ -902,18 +905,21 @@ impl Analyzer {
         let target_ty = self.check_variable_access_for_write(&a.target);
         let value_ty = self.check_expression(&a.value);
 
-        if !matches!(target_ty, Ty::Unknown) && !matches!(value_ty, Ty::Unknown)
-            && !is_type_compatible(&value_ty, &target_ty) {
-                self.error(
-                    DiagnosticCode::TypeMismatchAssignment,
-                    format!(
-                        "cannot assign '{}' to '{}'",
-                        value_ty.display_name(),
-                        target_ty.display_name()
-                    ),
-                    a.range,
-                );
-            }
+        if !matches!(target_ty, Ty::Unknown)
+            && !matches!(value_ty, Ty::Unknown)
+            && !is_type_compatible(&value_ty, &target_ty)
+            && !literal_fits_in_target(&a.value, &target_ty)
+        {
+            self.error(
+                DiagnosticCode::TypeMismatchAssignment,
+                format!(
+                    "cannot assign '{}' to '{}'",
+                    value_ty.display_name(),
+                    target_ty.display_name()
+                ),
+                a.range,
+            );
+        }
     }
 
     fn check_variable_access_for_write(&mut self, va: &VariableAccess) -> Ty {
@@ -1735,6 +1741,17 @@ impl Analyzer {
                     );
                     return Ty::Unknown;
                 }
+                // Literal context typing: if one operand is a typed integer
+                // variable and the other is a bare integer literal that fits
+                // in that type, the result is the typed variable's type.
+                // This makes `cycle : SINT := cycle + 1` work without an
+                // explicit `SINT#1` annotation, matching Codesys/TwinCAT.
+                if left_ty.is_integer() && literal_fits_in_target(&b.right, &left_ty) {
+                    return left_ty;
+                }
+                if right_ty.is_integer() && literal_fits_in_target(&b.left, &right_ty) {
+                    return right_ty;
+                }
                 common_type(&left_ty, &right_ty).unwrap_or(Ty::Unknown)
             }
             BinaryOp::Power => {
@@ -1987,6 +2004,43 @@ fn is_type_compatible(from: &Ty, to: &Ty) -> bool {
         return true;
     }
     can_coerce(from, to)
+}
+
+/// If `expr` is an integer literal (possibly negated), return its value as `i128`.
+/// Used to allow narrowing of literal values into smaller integer types when
+/// the value fits — matches Codesys/TwinCAT behavior where `cycle : SINT := 0`
+/// just works without an explicit `SINT#0` prefix.
+fn integer_literal_value(expr: &Expression) -> Option<i128> {
+    match expr {
+        Expression::Literal(lit) => match &lit.kind {
+            LiteralKind::Integer(n) => Some(*n as i128),
+            LiteralKind::Typed { raw_value, .. } => raw_value.parse::<i128>().ok(),
+            _ => None,
+        },
+        Expression::Parenthesized(inner) => integer_literal_value(inner),
+        Expression::Unary(u) if matches!(u.op, UnaryOp::Neg) => {
+            integer_literal_value(&u.operand).map(|v| -v)
+        }
+        _ => None,
+    }
+}
+
+/// True if `expr` is an integer literal whose value fits in the target
+/// integer type's range. Allows the semantic checker to accept narrowing
+/// assignments like `cycle : SINT := 0` and `delay : USINT := 200` without
+/// requiring the user to write `SINT#0` / `USINT#200` everywhere.
+fn literal_fits_in_target(expr: &Expression, target: &Ty) -> bool {
+    let target = target.resolved();
+    let Ty::Elementary(elem) = target else {
+        return false;
+    };
+    let Some((min, max)) = crate::types::integer_type_range(*elem) else {
+        return false;
+    };
+    let Some(v) = integer_literal_value(expr) else {
+        return false;
+    };
+    v >= min && v <= max
 }
 
 fn binary_op_name(op: BinaryOp) -> &'static str {

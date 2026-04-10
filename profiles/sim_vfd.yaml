@@ -1,0 +1,74 @@
+# yaml-language-server: $schema=../schemas/device-profile.schema.json
+name: SimVfd
+vendor: Simulated
+protocol: simulated
+description: "Simulated Variable Frequency Drive (VFD)"
+
+fields:
+  # Control outputs (PLC → VFD)
+  - name: RUN
+    type: BOOL
+    direction: output
+    register: { address: 0, kind: virtual }
+    description: "Start/stop command"
+
+  - name: STOP
+    type: BOOL
+    direction: output
+    register: { address: 1, kind: virtual }
+    description: "Stop command"
+
+  - name: FAULT_RST
+    type: BOOL
+    direction: output
+    register: { address: 2, kind: virtual }
+    description: "Fault reset command"
+
+  - name: SPEED_REF
+    type: REAL
+    direction: output
+    register: { address: 10, kind: virtual, unit: Hz }
+    description: "Speed reference"
+
+  # Status inputs (VFD → PLC)
+  - name: READY
+    type: BOOL
+    direction: input
+    register: { address: 100, kind: virtual }
+    description: "Drive ready"
+
+  - name: RUNNING
+    type: BOOL
+    direction: input
+    register: { address: 101, kind: virtual }
+    description: "Motor running"
+
+  - name: FAULT
+    type: BOOL
+    direction: input
+    register: { address: 102, kind: virtual }
+    description: "Drive fault active"
+
+  - name: SPEED_ACT
+    type: REAL
+    direction: input
+    register: { address: 110, kind: virtual, unit: Hz }
+    description: "Actual speed feedback"
+
+  - name: CURRENT
+    type: REAL
+    direction: input
+    register: { address: 111, kind: virtual, unit: A }
+    description: "Motor current"
+
+  - name: TORQUE
+    type: REAL
+    direction: input
+    register: { address: 112, kind: virtual, unit: Nm }
+    description: "Motor torque"
+
+  - name: POWER
+    type: REAL
+    direction: input
+    register: { address: 113, kind: virtual, unit: kW }
+    description: "Motor power"

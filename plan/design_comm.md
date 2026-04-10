@@ -1,90 +1,17 @@
-# IEC 61131-3 Compiler + LSP + Online Debugger — Implementation Plan
+# Communication Layer — Design Document
 
-## Project Overview
+> **Parent plan:** [implementation.md](implementation.md) — core platform progress tracker (Phases 0-12).
+> **Todo list:** [implementation_comm.md](implementation_comm.md) — progress tracking and actionable items.
+> **See also:** [implementation_native.md](implementation_native.md) — LLVM native compilation + hardware targets (Phase 14).
 
-A Rust-based IEC 61131-3 Structured Text compiler with LSP support, online debugging via DAP, a bytecode VM runtime, and a VSCode extension (TypeScript). Architecture follows the same model as `rust-analyzer`: Rust core process + thin TypeScript VSCode extension.
-
----
-
-## Phases 0–11: Core Platform (COMPLETED)
-
-All foundational phases are complete. 714+ tests, zero clippy warnings.
-
-| Phase | Scope | Status |
-|-------|-------|--------|
-| **0** | Project scaffolding, workspace, CI, VSCode extension scaffold | Done |
-| **1** | Tree-sitter ST grammar (case-insensitive, incremental, 11 tests) | Done |
-| **2** | AST types + CST→AST lowering (21 tests) | Done |
-| **3** | Semantic analysis: scopes, types, 30+ diagnostics (127 tests) | Done |
-| **4** | LSP server skeleton + VSCode extension (hover, diagnostics, go-to-def, semantic tokens) | Done |
-| **5** | Advanced LSP (completion, signature help, rename, formatting, code actions, multi-file workspace) | Done |
-| **6** | Register-based IR + AST→IR compiler (50+ instructions, 35 tests) | Done |
-| **7** | Bytecode VM + scan cycle engine + stdlib + pointers (31 tests + stdlib tests) | Done |
-| **8** | DAP debugger (breakpoints, stepping, variables, force/unforce, 30 tests) | Done |
-| **9** | Online change manager (hot-reload with variable migration, 30 tests) | Done |
-| **10** | WebSocket monitor server + VSCode panel (26 tests) | Done |
-| **11** | CLI tool (check, run, serve, debug, compile, fmt, --json) | Done |
-
-### Multi-file IDE support (completed during Phase 12 work):
-- [x] LSP: project-aware analysis (discovers plc-project.yaml, includes all project files)
-- [x] LSP: cross-file go-to-definition (opens the correct file at the symbol)
-- [x] LSP: cross-file type resolution (hover shows correct type info)
-- [x] DAP: multi-file project loading and compilation
-- [x] DAP: per-file source mapping for stack traces (correct file + line per frame)
-- [x] DAP: breakpoints work in any project file (accumulated per-file, correct source resolution)
-- [x] DAP: step-into crosses file boundaries correctly
-- [x] DAP: Initialized event after Launch (per DAP spec, so breakpoints arrive after VM exists)
-- [x] JSON Schema for plc-project.yaml and device profiles (VS Code autocompletion)
-
-### Remaining LSP features (low priority):
-- [ ] `textDocument/selectionRange` — smart expand/shrink selection
-- [ ] `textDocument/inlayHint` — show inferred types, parameter names at call sites
-- [ ] `textDocument/onTypeFormatting` — auto-indent after `;` or `THEN`
-- [ ] `textDocument/callHierarchy` — show callers/callees of a function
-- [ ] `textDocument/linkedEditingRange` — edit matching IF/END_IF pairs simultaneously
-
-### Remaining minor items:
-- [ ] Online change: DAP custom request + VSCode toolbar
-- [ ] Monitor: trend recording / time-series chart
-- [ ] Monitor: cross-reference view
-
----
-
-## Phase 12: IEC 61131-3 Object-Oriented Extensions — Classes (COMPLETED)
-
-Full implementation of CLASS, METHOD, INTERFACE, PROPERTY across the entire pipeline.
-Grammar → AST → Semantics → Compiler → IR → VM, with multi-file support.
-
-**199 new tests** covering: grammar parsing, semantic analysis (inheritance, interfaces,
-abstract/final, access specifiers, THIS/SUPER), compiler (method compilation, vtable,
-inherited vars), runtime (method return values, state persistence, instance isolation,
-cross-file calls, pointer integration), and DAP integration.
-
-**5 single-file playground examples** (10–14) + **1 multi-file OOP project** (oop_project/).
-
-**Runtime bugs found and fixed during playground testing:**
-- Methods couldn't access class instance variables
-- Method return values lost (return_reg protocol mismatch)
-- Inherited fields invisible to subclass methods
-- Pointer cross-function dereference read wrong frame
-- Pointer vs NULL comparison always returned equal
-- StoreField unimplemented in compiler + VM
-- Nested class instances inside different FB instances shared state
-
-### Remaining Phase 12 items:
-- [ ] Constructor/destructor support (FB_INIT / FB_EXIT pattern)
-- [ ] Refactor existing stdlib FBs as classes where appropriate
-- [ ] Migration guide: FUNCTION_BLOCK to CLASS
-- [ ] Online change compatibility with classes
-
----
-
-## Phase 13: Communication Extension System & Modbus Implementation
+## Communication Extension System & Modbus Implementation
 
 A PLC is only useful if it can talk to the physical world. This phase establishes the
 **communication extension architecture** — a modular, plugin-based system where each
 protocol (Modbus, Profinet, EtherCAT, etc.) is an independent, versioned extension —
 and delivers the first two implementations: Modbus TCP and Modbus RTU/ASCII.
+
+---
 
 ### Competitive Analysis — What We Take From the Best
 
@@ -113,6 +40,8 @@ Studio 5000, and Phoenix Contact PLCnext:
   transport. The same ABB ACS580 profile works whether you're talking Modbus TCP, Modbus RTU,
   or (future) PROFINET — only the link and register mapping change.
 
+---
+
 ### Design Principles
 
 1. **OSI-layered architecture** — physical links, protocol devices, and application-level
@@ -126,6 +55,8 @@ Studio 5000, and Phoenix Contact PLCnext:
 7. **Multi-rate I/O** — each device can have its own cycle_time; faster devices update more often
 8. **Diagnostics built in** — every link and device exposes health, error counters, and connection
    state as additional struct fields (like Studio 5000's module fault bits)
+
+---
 
 ### Architecture
 
@@ -170,6 +101,8 @@ multiple devices (e.g., multiple Modbus slaves on one RS-485 bus).
     │  I/O rack │     │  pump    │ │  fan     │
     └───────────┘     └──────────┘ └──────────┘
 ```
+
+---
 
 ### Trait Architecture (Layered)
 
@@ -228,6 +161,8 @@ pub trait CommDevice: Send + Sync {
 The Communication Manager creates links from the `links:` section and devices from the
 `devices:` section, binding each device to its declared link. Multiple devices sharing
 a link use coordinated access (mutex/queue) to avoid bus collisions.
+
+---
 
 ### Configuration in plc-project.yaml
 
@@ -340,7 +275,11 @@ devices:
     mode: acyclic
 ```
 
-This auto-generates struct types from device profiles and named global instances.
+---
+
+### Auto-Generated ST Types and Globals
+
+The configuration auto-generates struct types from device profiles and named global instances.
 Every device struct automatically includes a `_diag` sub-struct with connection
 health fields (inspired by Studio 5000's auto-generated module fault bits and
 TIA Portal's diagnostic integration):
@@ -440,7 +379,9 @@ END_PROGRAM
 - **Type safety** — the compiler knows which fields exist on each device
 - **YAML as single source of truth** — hardware config and symbol mapping in one place
 
-### Simulated Device (First Implementation)
+---
+
+### Simulated Device
 
 The simulated device is the first `CommDevice` implementation — no hardware needed.
 It uses in-memory register storage and exposes a web UI for manual I/O testing.
@@ -497,6 +438,8 @@ The web UI (served at `localhost:8080`) provides:
 - **Diagnostics**: cycle count, last update timestamp, I/O direction arrows
 - **Real-time updates**: WebSocket pushes every scan cycle
 
+---
+
 ### Multi-Rate I/O
 
 Inspired by TIA Portal's process image partitions, each device can declare its own
@@ -519,7 +462,9 @@ devices:
 The comm manager tracks a per-device timer. Input fields of slow devices hold their
 last-known value between updates; `_diag.last_update` lets user code detect staleness.
 
-### Device Description Import (Future)
+---
+
+### Device Description Import
 
 Inspired by CODESYS's universal import capability. A CLI tool converts standard device
 description files into our YAML profile format:
@@ -533,6 +478,8 @@ st-cli profile import --format eds      device.eds     # CANopen / EtherNet/IP
 This generates a `.yaml` profile with the struct fields and register mappings extracted
 from the standard file. Users can then edit the generated YAML to customize field names,
 add scaling, or remove unused channels.
+
+---
 
 ### Device Profile System
 
@@ -643,6 +590,8 @@ fields:
   - { name: AO_1, type: INT,  direction: output, register: { address: 1, kind: holding_register } }
 ```
 
+---
+
 ### Extension Crate Structure
 
 The crate layout mirrors the layer separation. Link implementations and device/protocol
@@ -694,6 +643,8 @@ crate detects the link type and selects the appropriate framing (MBAP for TCP, R
 for serial). Adding a new transport (e.g., UDP, Bluetooth serial) only requires a new
 link crate — all existing device crates work unchanged.
 
+---
+
 ### Scan Cycle Integration
 
 ```
@@ -724,365 +675,99 @@ link crate — all existing device crates work unchanged.
 └────────────────────────────────────────────────────┘
 ```
 
-### Implementation Plan
-
-Implementation order: API crate → simulated device (for testing) → communication
-manager → engine integration → then real protocol implementations (Modbus, etc.).
-
-#### Phase 13a: Core API + Simulated Device (build and test the framework)
-
-- [ ] **`st-comm-api` crate** (shared traits + types):
-  - [ ] `CommLink` trait (open, close, send, receive, diagnostics)
-  - [ ] `CommDevice` trait (configure, bind_link, read_inputs, write_outputs, acyclic)
-  - [ ] `DeviceProfile` struct (name, vendor, fields with register mappings)
-  - [ ] `ProfileField` struct (name, ST type, direction, register address/kind/bit/scale)
-  - [ ] `CommError`, `LinkDiagnostics`, `DeviceDiagnostics` types
-  - [ ] `AcyclicRequest`/`AcyclicResponse` types
-  - [ ] Device profile YAML parser (profile → struct schema + register map)
-  - [ ] Profile-to-ST code generator (profile → TYPE struct + VAR_GLOBAL instances)
-  - [ ] Project YAML parser (links + devices sections)
-- [ ] **`st-comm-sim` crate** (simulated device — first CommDevice implementation):
-  - [ ] Implements `CommDevice` trait with in-memory register storage
-  - [ ] Simulated link (no network — direct in-memory reads/writes)
-  - [ ] Web UI server (HTTP + WebSocket, e.g., localhost:8080):
-    - [ ] Toggle digital inputs (DI_0..DI_n) with switches
-    - [ ] Set analog inputs (AI_0..AI_n) with sliders/numeric fields
-    - [ ] Display digital output states (DO_0..DO_n) as indicators
-    - [ ] Display analog output values (AO_0..AO_n)
-    - [ ] Show device diagnostics (connected, cycle count, last update)
-    - [ ] Real-time updates via WebSocket (value changes push immediately)
-  - [ ] Loads standard device profile YAML (same format as real hardware)
-  - [ ] Multiple simulated devices per project (each gets its own web panel/tab)
-  - [ ] Unit tests: register read/write, profile loading, I/O direction enforcement
-  - [ ] Integration test: full scan cycle with simulated device + ST program
-- [ ] **Communication Manager** (in `st-runtime`):
-  - [ ] Parse `links:` and `devices:` sections from plc-project.yaml
-  - [ ] Create link instances, bind devices to their declared links
-  - [ ] Coordinate bus access for shared links (mutex/queue for serial buses)
-  - [ ] Integrate into scan cycle: read_inputs → execute → write_outputs → acyclic
-  - [ ] Map device profile struct fields ↔ VM global struct instance slots
-  - [ ] Direction-aware I/O: only read `input` fields, only write `output` fields
-  - [ ] Register value scaling (raw register ↔ engineering units via `scale` factor)
-  - [ ] Multi-rate scheduling: per-device `cycle_time` with independent update timers
-  - [ ] Auto-generate `CommDiag` fields for every device (connected, error, error_count, etc.)
-  - [ ] Connection monitoring and automatic reconnection with backoff
-  - [ ] Diagnostics exposed via monitor server + WebSocket
-- [ ] **Engine integration**:
-  - [ ] `st-cli run` loads link/device config and starts communication
-  - [ ] `st-cli comm-status` shows link health and device connection state
-  - [ ] `st-cli profile validate` checks a device profile YAML for errors
-- [ ] **Bundled device profiles**:
-  - [ ] `sim_8di_4ai_4do_2ao` — 8 digital in, 4 analog in, 4 digital out, 2 analog out
-  - [ ] `sim_16di_16do` — 16-channel digital I/O
-  - [ ] `sim_vfd` — simulated VFD (run, stop, speed_ref, speed_act, current, fault)
-- [ ] **Playground example**: simulated I/O project with web UI
-- [ ] **Documentation**: simulated device quickstart + "How to create a device profile"
-
-#### Phase 13b: Real Protocol Implementations
-
-- [ ] **`st-comm-link-tcp` crate** (TCP link):
-  - [ ] TCP socket management (connect, reconnect, timeout)
-  - [ ] Implements `CommLink` trait
-  - [ ] Unit tests with mock TCP listener
-- [ ] **`st-comm-link-serial` crate** (serial link):
-  - [ ] Serial port management (RS-485/RS-232, baud, parity, data bits, stop bits)
-  - [ ] Implements `CommLink` trait
-  - [ ] Unit tests with mock serial port / PTY pair
-- [ ] **`st-comm-modbus` crate** (Modbus protocol — works over any link):
-  - [ ] Implements `CommDevice` trait for Modbus
-  - [ ] TCP framing: MBAP header (auto-selected when link is TCP)
-  - [ ] RTU framing: CRC-16, silence detection (auto-selected when link is serial)
-  - [ ] ASCII framing: LRC (optional, for serial links)
-  - [ ] Read coils, discrete inputs, holding registers, input registers
-  - [ ] Write single/multiple coils, single/multiple registers
-  - [ ] Cyclic polling with configurable interval
-  - [ ] Device profile field ↔ register mapping with scaling
-  - [ ] Unit tests with mock link
-  - [ ] Integration tests with Modbus simulator
-- [ ] **Additional CLI commands**:
-  - [ ] `st-cli comm-test` sends a test read to verify connectivity
-  - [ ] `st-cli profile import` converts GSD/GSDML/ESI/EDS → YAML profile
-- [ ] **Bundled hardware device profiles**:
-  - [ ] Generic Modbus I/O (coils + registers, 8/16/32 channel variants)
-  - [ ] ABB ACS580 VFD
-  - [ ] Siemens G120 VFD
-  - [ ] WAGO 750-352 I/O coupler
-  - [ ] Generic temperature sensor (RTD/thermocouple via analog input)
-- [ ] **Documentation**:
-  - [ ] Communication architecture guide (link/device layering, multi-rate, diagnostics)
-  - [ ] "Creating a Link Extension" tutorial
-  - [ ] "Creating a Device Extension" tutorial
-  - [ ] Modbus quickstart (TCP + RTU examples)
-
-#### Phase 13c: Future Protocol Extensions (separate crates)
-
-  - [ ] `st-comm-link-udp` — UDP link
-  - [ ] `st-comm-profinet` — PROFINET I/O device extension
-  - [ ] `st-comm-ethercat` — EtherCAT device extension
-  - [ ] `st-comm-canopen` — CANopen / CAN bus device extension
-  - [ ] `st-comm-opcua` — OPC UA client device extension
-  - [ ] `st-comm-mqtt` — MQTT publish/subscribe device extension
-  - [ ] `st-comm-s7` — Siemens S7 protocol device extension
-  - [ ] `st-comm-ethernet-ip` — EtherNet/IP (Allen-Bradley) device extension
-
 ---
 
-## Phase 14 (Future): Native Compilation & Hardware Target Platform System
+### Diagnostics Exposure (HMI / SCADA Integration)
 
-Two major capabilities: (1) LLVM native compilation backend, and (2) a plugin-based platform system
-that lets each hardware target define its peripherals, I/O mapping, and compilation settings as a
-self-contained extension — no framework recompilation required.
+Two-layer design — one ground truth (ST globals), one convenience layer (HTTP JSON).
 
-### 13a: LLVM Native Compilation Backend
+**Layer 1 — diagnostics as auto-generated ST globals (ground truth)**
 
-- [ ] Integrate `inkwell` (Rust LLVM bindings)
-- [ ] IR → LLVM IR lowering for all 50+ bytecode instructions
-- [ ] JIT compilation for development mode (fast iteration on host)
-- [ ] AOT cross-compilation for embedded targets (ARM Cortex-M, RISC-V, Xtensa)
-- [ ] Adapt online change for native code (requires careful relocation strategy)
-- [ ] Benchmark: VM interpreter vs LLVM-compiled cycle times
+At `CommManager::register_device()`, reserve six diag globals per device using the
+existing `{device}_{field}` flat-naming convention:
 
-### 13b: Hardware Target Platform System
+| Global | Type | Description |
+|--------|------|-------------|
+| `{device}_diag_connected` | BOOL | Responding this cycle |
+| `{device}_diag_error` | BOOL | Last transaction failed |
+| `{device}_diag_error_count` | UDINT | Cumulative errors |
+| `{device}_diag_cycles_ok` | UDINT | Successful scan cycles |
+| `{device}_diag_last_resp_ms` | UINT | Last round-trip time |
+| `{device}_diag_last_update` | UDINT | Engine cycle of last good I/O |
 
-The platform system allows each hardware target (ESP32, STM32, Raspberry Pi, etc.) to be defined
-as a **platform extension** — a self-contained package that provides:
-1. **Compilation target**: LLVM triple, linker scripts, startup code
-2. **Peripheral definitions**: typed ST variables/FBs that map to hardware registers
-3. **Configuration schema**: user-configurable pin assignments, clock settings, peripheral modes
-4. **Runtime HAL**: hardware abstraction layer bridging ST I/O to physical pins
+After `write_outputs()` in the scan cycle, call `device.diagnostics()` and write the
+six fields onto their reserved global slots. `_io_map.st` emits a trailing
+`--- DIAGNOSTICS ---` block per device so LSP / semantic checker / user ST code all
+see the diag globals.
 
-A platform extension is loaded at compile time — the user selects a target in `plc-project.yaml`
-and the platform's peripheral definitions become available as typed variables in their ST code.
-No recompilation of the rust-plc framework is needed to add new platforms.
+Same treatment for links: `{link}_link_is_open`, `{link}_link_bytes_sent`,
+`{link}_link_bytes_received`, `{link}_link_errors` (deferred until real `CommLink`
+implementations exist in Phase 13b).
 
-#### Architecture
+Engine-level globals: `engine_cycle_count`, `engine_last_cycle_us`,
+`engine_min_cycle_us`, `engine_max_cycle_us`, `engine_avg_cycle_us`.
 
-```
-plc-project.yaml
-  target: esp32-wroom-32
-  peripherals:
-    gpio:
-      pin_2: { mode: output, alias: LED }
-      pin_4: { mode: input, pull: up, alias: BUTTON }
-    uart:
-      uart0: { baud: 115200, tx: 1, rx: 3 }
-    adc:
-      adc1_ch0: { pin: 36, attenuation: 11db, alias: TEMP_SENSOR }
+**Layer 2 — HTTP `/api/diagnostics` JSON endpoint (convenience layer)**
 
-↓ Platform extension generates:
-
-VAR_GLOBAL
-    LED           : BOOL;        (* GPIO2 output — mapped by platform *)
-    BUTTON        : BOOL;        (* GPIO4 input — mapped by platform *)
-    TEMP_SENSOR   : INT;         (* ADC1_CH0 — mapped by platform *)
-    UART0_TX_DATA : STRING[256]; (* UART0 transmit buffer *)
-END_VAR
-```
-
-The user's ST program reads/writes these variables like any other global.
-The platform runtime maps them to hardware registers in the scan cycle.
-
-#### Platform Extension Structure
-
-```
-platforms/
-├── esp32/
-│   ├── platform.yaml          # Platform metadata + LLVM triple
-│   ├── peripherals/
-│   │   ├── gpio.yaml          # GPIO pin definitions, modes, pull-up/down
-│   │   ├── uart.yaml          # UART channels, baud rates, pin mappings
-│   │   ├── spi.yaml           # SPI bus definitions
-│   │   ├── i2c.yaml           # I2C bus definitions
-│   │   ├── adc.yaml           # ADC channels, resolution, attenuation
-│   │   ├── dac.yaml           # DAC channels
-│   │   ├── pwm.yaml           # PWM/LEDC channels
-│   │   └── timer.yaml         # Hardware timer definitions
-│   ├── stdlib/                # Platform-specific ST function blocks
-│   │   ├── esp_wifi.st        # WiFi connection FB
-│   │   ├── esp_ble.st         # BLE communication FB
-│   │   └── esp_sleep.st       # Deep sleep control
-│   ├── hal/                   # Rust HAL implementation
-│   │   └── lib.rs             # Maps ST globals ↔ hardware registers
-│   ├── linker.ld              # Linker script for the target
-│   └── startup.s              # Startup / vector table
-├── stm32f103/
-│   ├── platform.yaml
-│   ├── peripherals/
-│   │   ├── gpio.yaml          # PA0-PA15, PB0-PB15, PC13, etc.
-│   │   ├── uart.yaml          # USART1, USART2, USART3
-│   │   ├── spi.yaml           # SPI1, SPI2
-│   │   ├── i2c.yaml           # I2C1, I2C2
-│   │   ├── adc.yaml           # ADC1 (10 channels)
-│   │   ├── pwm.yaml           # TIM1-TIM4 PWM channels
-│   │   └── can.yaml           # CAN bus
-│   ├── stdlib/
-│   │   └── stm32_flash.st     # Flash read/write FB
-│   ├── hal/
-│   │   └── lib.rs
-│   └── linker.ld
-├── raspberry-pi/
-│   ├── platform.yaml
-│   ├── peripherals/
-│   │   ├── gpio.yaml          # BCM GPIO 0-27
-│   │   ├── uart.yaml          # /dev/ttyAMA0, /dev/ttyS0
-│   │   ├── spi.yaml           # SPI0, SPI1
-│   │   ├── i2c.yaml           # I2C1
-│   │   └── pwm.yaml           # Hardware PWM channels
-│   ├── stdlib/
-│   │   └── rpi_camera.st      # Camera interface FB
-│   └── hal/
-│       └── lib.rs             # Uses rppal or embedded-hal
-├── raspberry-pico/
-│   ├── platform.yaml          # RP2040 / RP2350
-│   ├── peripherals/
-│   │   ├── gpio.yaml          # GP0-GP29
-│   │   ├── uart.yaml          # UART0, UART1
-│   │   ├── spi.yaml           # SPI0, SPI1
-│   │   ├── i2c.yaml           # I2C0, I2C1
-│   │   ├── adc.yaml           # ADC0-ADC3 + temp sensor
-│   │   ├── pwm.yaml           # 16 PWM channels
-│   │   └── pio.yaml           # Programmable I/O state machines
-│   └── hal/
-│       └── lib.rs             # Uses embassy-rp or rp-hal
-└── risc-v/                    # Generic RISC-V target
-    ├── platform.yaml
-    └── hal/
-        └── lib.rs
-```
-
-#### platform.yaml Schema
+Separate port from the monitor WebSocket (HMIs and the monitor UI have different
+auth/CORS profiles). Declared in `plc-project.yaml`:
 
 ```yaml
-name: ESP32-WROOM-32
-vendor: Espressif
-arch: xtensa
-llvm_target: xtensa-esp32-none-elf
-flash_size: 4MB
-ram_size: 520KB
-clock_speed: 240MHz
-
-# Rust HAL crate to use for the runtime
-hal_crate: esp-hal
-hal_version: "0.22"
-
-# Supported peripherals (references files in peripherals/)
-peripherals:
-  - gpio
-  - uart
-  - spi
-  - i2c
-  - adc
-  - dac
-  - pwm
-  - timer
-
-# Build settings
-build:
-  toolchain: esp       # rustup toolchain
-  runner: espflash      # flash tool
-  flash_command: "espflash flash --monitor"
+diagnostics:
+  port: 9090
+  bind: 127.0.0.1
 ```
 
-#### User Configuration in plc-project.yaml
+Endpoints:
+- `GET /api/diagnostics` — full snapshot with `"schema": "1"` for forward compatibility
+- `GET /api/diagnostics/devices/{name}` — single device
+- `GET /api/diagnostics/summary` — `{ healthy, device_count, connected_count, error_count }`
 
-```yaml
-name: MyIoTProject
-target: esp32
-
-peripherals:
-  gpio:
-    pin_2:  { mode: output, alias: STATUS_LED }
-    pin_4:  { mode: input, pull: up, alias: START_BUTTON }
-    pin_5:  { mode: output, alias: MOTOR_EN }
-    pin_18: { mode: alternate, function: spi_clk }
-    pin_19: { mode: alternate, function: spi_miso }
-    pin_23: { mode: alternate, function: spi_mosi }
-  uart:
-    uart0: { baud: 115200, tx: 1, rx: 3, alias: DEBUG }
-    uart2: { baud: 9600, tx: 17, rx: 16, alias: MODBUS }
-  adc:
-    adc1_ch0: { pin: 36, attenuation: 11db, alias: TEMP_SENSOR }
-    adc1_ch3: { pin: 39, attenuation: 11db, alias: PRESSURE }
-  spi:
-    spi2: { clk: 18, miso: 19, mosi: 23, cs: 15, speed: 1000000, alias: DISPLAY }
+Response schema:
+```json
+{
+  "schema": "1",
+  "ts_ms": 1775692800123,
+  "engine":  { "cycle_count": 0, "last_us": 0, "min_us": 0,
+               "max_us": 0, "avg_us": 0 },
+  "links":   { "<link>": { "is_open": true, "bytes_sent": 0 } },
+  "devices": { "<device>": { "protocol": "...", "profile": "...",
+                              "connected": true, "error": false,
+                              "error_count": 0, "successful_cycles": 0,
+                              "last_response_ms": 0, "last_error": null,
+                              "last_update_cycle": 0 } }
+}
 ```
 
-This generates auto-included ST globals:
-```st
-(* Auto-generated from platform config — DO NOT EDIT *)
-VAR_GLOBAL
-    STATUS_LED    : BOOL;    (* GPIO2 output *)
-    START_BUTTON  : BOOL;    (* GPIO4 input, pull-up *)
-    MOTOR_EN      : BOOL;    (* GPIO5 output *)
-    TEMP_SENSOR   : INT;     (* ADC1_CH0, 12-bit, 0-3.3V *)
-    PRESSURE      : INT;     (* ADC1_CH3, 12-bit, 0-3.3V *)
-END_VAR
-```
+**Layer 3 — documentation (`docs/comm/diagnostics.md`)**
 
-#### Implementation Plan
-
-- [ ] **Platform registry**: discover and load platform extensions from `platforms/` directory
-- [ ] **Peripheral YAML schema**: define the configuration grammar for GPIO, UART, SPI, I2C, ADC, DAC, PWM
-- [ ] **Config-to-ST generator**: read user's `plc-project.yaml` peripheral config, generate `VAR_GLOBAL` declarations with hardware-mapped names
-- [ ] **LLVM cross-compilation**:
-  - [ ] Target triple selection from platform.yaml
-  - [ ] Linker script and startup code integration
-  - [ ] `st-cli build --target esp32` compiles to flashable binary
-- [ ] **Platform HAL runtime**:
-  - [ ] Scan cycle integration: read physical inputs → execute program → write physical outputs
-  - [ ] Map ST global variable slots to hardware register addresses
-  - [ ] Interrupt-safe I/O access
-- [ ] **Platform-specific stdlib**: each platform can ship additional `.st` files (e.g., WiFi FBs, BLE FBs)
-- [ ] **CLI integration**:
-  - [ ] `st-cli build --target esp32` — cross-compile for target
-  - [ ] `st-cli flash --target esp32` — compile and flash to device
-  - [ ] `st-cli targets` — list available platform extensions
-  - [ ] `st-cli target-info esp32` — show peripherals, pins, capabilities
-- [ ] **Initial platform implementations**:
-  - [ ] ESP32 (Xtensa, via esp-hal)
-  - [ ] STM32F103 (ARM Cortex-M3, via stm32f1xx-hal)
-  - [ ] Raspberry Pi (Linux/ARM64, via rppal)
-  - [ ] Raspberry Pi Pico / RP2040 (ARM Cortex-M0+, via embassy-rp)
-  - [ ] Generic RISC-V (via riscv-hal)
-- [ ] **Tests**:
-  - [ ] Platform discovery and loading
-  - [ ] Peripheral config parsing and validation
-  - [ ] Config-to-ST generation (verify correct VAR_GLOBAL output)
-  - [ ] Cross-compilation smoke test (compile to ELF, verify target arch)
-  - [ ] Platform-specific stdlib compilation
-- [ ] **Documentation**:
-  - [ ] "Creating a Platform Extension" guide
-  - [ ] Per-platform quickstart (ESP32, STM32, RPi, Pico)
-  - [ ] Peripheral configuration reference
-  - [ ] Hardware I/O mapping tutorial
+Field-by-field reference, ST code examples, `/api/diagnostics` schema reference,
+Node-RED quickstart (inject → http request → json → switch → notification),
+FUXA quickstart (Web API device + tag bindings + connection panel).
 
 ---
 
-## Cross-Cutting Concerns
+### Real Protocol Implementations
 
-- [x] **Testing:** 502 tests across 10 crates — unit, integration, LSP protocol, DAP protocol, WebSocket, end-to-end
-- [x] **CI/CD:** GitHub Actions (check, test, clippy, audit, cargo-deny, docs deploy), release-plz for semver
-- [x] **Documentation:** mdBook site (20+ pages) with architecture, tutorials, language reference, stdlib docs
-- [x] **Tracing / logging:** DAP server logs to stderr + Debug Console, `tracing` crate available throughout
-- [x] **Devcontainer:** Full VSCode dev environment with auto-build, extension install, playground
-- [x] **Error quality:** Line:column source locations, severity levels, diagnostic codes
-- [ ] **IEC 61131-3 compliance tracking:** Maintain a checklist of spec sections implemented vs. pending
+**TCP link** (`st-comm-link-tcp`): TCP socket management with connect/reconnect/timeout.
+
+**Serial link** (`st-comm-link-serial`): RS-485/RS-232 with baud/parity/data bits/stop bits.
+
+**Modbus protocol** (`st-comm-modbus`): Works over any link. TCP framing (MBAP, auto-selected
+for TCP links), RTU framing (CRC-16, for serial links), ASCII framing (LRC, optional).
+Read/write coils, discrete inputs, holding registers, input registers. Cyclic polling
+with configurable interval. Device profile field ↔ register mapping with scaling.
 
 ---
 
-## Dependency Graph
+### Future Protocol Extensions
 
-```
-Phase 0 (scaffolding)
-  └─► Phase 1 (tree-sitter grammar)
-        └─► Phase 2 (AST)
-              ├─► Phase 3 (semantics)
-              │     └─► Phase 4 (LSP skeleton) ──► Phase 5 (advanced LSP)
-              └─► Phase 6 (IR + compiler)
-                    └─► Phase 7 (runtime)
-                          ├─► Phase 8 (DAP debugger)
-                          ├─► Phase 9 (online change)
-                          └─► Phase 10 (monitor UI)
-Phase 11 (CLI) — can start after Phase 7, grows with each phase
-Phase 12 (LLVM) — independent, after Phase 6
-```
+Each protocol is a separate crate:
+- `st-comm-link-udp` — UDP link
+- `st-comm-profinet` — PROFINET I/O
+- `st-comm-ethercat` — EtherCAT
+- `st-comm-canopen` — CANopen / CAN bus
+- `st-comm-opcua` — OPC UA client
+- `st-comm-mqtt` — MQTT publish/subscribe
+- `st-comm-s7` — Siemens S7 protocol
+- `st-comm-ethernet-ip` — EtherNet/IP (Allen-Bradley)

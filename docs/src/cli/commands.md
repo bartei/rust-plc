@@ -114,6 +114,11 @@ Executed 100 cycle(s) in 1.8ms (avg 18µs/cycle, 112 instructions)
 - **Global variables persist** across scan cycles
 - **FB instance state persists** across calls
 - **Timers use wall-clock time** via `SYSTEM_TIME()`
+- **Configurable scan cycle period** via `engine.cycle_time` in
+  `plc-project.yaml` — see [Project Configuration](./project-configuration.md).
+  When set, the engine sleeps after each cycle so the loop runs at the
+  configured rate (10ms, 1ms, etc.) just like a real PLC. When omitted, runs
+  as fast as the CPU allows.
 
 ## `st-cli compile`
 
@@ -183,7 +188,7 @@ st-cli serve
 
 The server communicates over **stdin/stdout** using the JSON-RPC protocol. This is typically invoked by the VSCode extension, not directly by users.
 
-**Supported LSP capabilities (16 features):**
+**Supported LSP capabilities (23 features):**
 
 | Feature | Protocol Method |
 |---------|----------------|
@@ -199,10 +204,56 @@ The server communicates over **stdin/stdout** using the JSON-RPC protocol. This 
 | Workspace symbols | `workspace/symbol` |
 | Document highlight | `textDocument/documentHighlight` |
 | Folding ranges | `textDocument/foldingRange` |
+| Selection ranges | `textDocument/selectionRange` |
+| Inlay hints | `textDocument/inlayHint` |
+| Call hierarchy | `textDocument/prepareCallHierarchy` + incoming/outgoing |
 | Document links | `textDocument/documentLink` |
 | Semantic tokens | `textDocument/semanticTokens/full` |
 | Formatting | `textDocument/formatting` |
+| On-type formatting | `textDocument/onTypeFormatting` (triggers: `\n`, `;`) |
+| Linked editing | `textDocument/linkedEditingRange` |
 | Code actions | `textDocument/codeAction` |
+
+**Selection ranges** (`Shift+Alt+Right/Left`): Smart expand / shrink selection.
+Steps outward through AST nesting levels — word → expression → statement → IF/FOR
+body → VAR block → PROGRAM/FUNCTION → entire file. Based on the parsed AST, not
+regex heuristics.
+
+**Inlay hints**: Parameter-name hints shown inline at function/FB call sites for
+positional arguments (e.g., `Add(`**`a:`**` 10,` **`b:`**` 20)`). Hints are
+suppressed when arguments already use named syntax (`a := 10`) or when the
+argument text matches the parameter name (`Add(a, b)` where the params are also
+`a` and `b`). Hover the hint to see the full `paramName: Type` signature.
+
+**Call hierarchy** (`Shift+Alt+H` or right-click → "Show Call Hierarchy"):
+Navigate the call graph of your program. For any FUNCTION, FUNCTION_BLOCK,
+PROGRAM, or CLASS METHOD:
+- **Incoming calls** — show every POU that calls this function, with the exact
+  call-site ranges highlighted. Navigate up the call chain to trace who triggers
+  a given routine.
+- **Outgoing calls** — show every function this POU calls. Navigate down the
+  call chain to understand dependencies.
+The call hierarchy resolves across all open documents and supports the full
+POU type spectrum (functions, FBs, programs, class methods). Particularly
+useful for understanding data flow in multi-file PLC projects and for impact
+analysis when modifying a shared helper function.
+
+**Linked editing**: When the cursor is on a block keyword like `IF`, `FOR`,
+`PROGRAM`, `VAR`, etc., VS Code highlights the matching closing keyword
+(`END_IF`, `END_FOR`, `END_PROGRAM`, `END_VAR`). Editing either keyword
+updates both simultaneously. Covers all 19 IEC 61131-3 keyword pairs. Uses
+AST-based nesting resolution so nested `IF`/`END_IF` blocks pair correctly
+instead of matching the wrong level.
+
+**On-type formatting** (automatic): Triggers on **Enter** and **`;`**. After
+pressing Enter, the new line is automatically indented to the correct level
+based on the previous line's context — one level deeper after `THEN`, `DO`,
+`VAR`, `PROGRAM`, `FUNCTION`, `ELSE`, `CASE ... OF`, etc.; same level after
+normal statements; and no extra indent after `END_*` blocks. After typing
+`;` on a line that starts with `END_IF`, `END_FOR`, etc., the line is
+reindented to match its opening keyword's level (useful when you've been
+typing at the wrong indent depth). Tab size is respected from VS Code's
+editor settings.
 
 ## `st-cli debug`
 
@@ -222,7 +273,7 @@ This is typically invoked by the VSCode extension when you press F5, not called 
 | Step In | Step into function/FB calls (`F11`) |
 | Step Over | Step over one statement (`F10`) |
 | Step Out | Run until current function returns (`Shift+F11`) |
-| Continue | Run across scan cycles until a breakpoint is hit (`F5`) |
+| Continue | Run scan cycles until a breakpoint is hit or user pauses (`F5`). The toolbar switches to a Pause button while running. |
 | Stack Trace | View the full call stack including nested POU calls |
 | Scopes | Inspect Locals and Globals scopes |
 | Variables | View all variables with types and current values |
@@ -238,9 +289,15 @@ This is typically invoked by the VSCode extension when you press F5, not called 
 | `scanCycleInfo` | Show cycle statistics |
 
 **Key behaviors:**
-- Continue runs across scan cycles (up to 100,000) until a breakpoint hits
+- Continue runs across scan cycles indefinitely until the user pauses, sets a
+  breakpoint, or disconnects — same as a real PLC. A 10-million-cycle safety
+  cap guards against runaway loops in tests and CI.
 - Step at end of cycle wraps to the next cycle
 - PROGRAM locals and FB state persist across cycles
+- The DAP run loop is interruptible: Pause, Disconnect, and SetBreakpoints
+  take effect mid-run; new breakpoints become active on the next cycle.
+- If `engine.cycle_time` is set in `plc-project.yaml`, the DAP loop honors it
+  (sleeps in interruptible 10ms chunks between cycles)
 - 4 VSCode debug toolbar buttons: Force, Unforce, List Forced, Cycle Info
 
 ## `st-cli help`

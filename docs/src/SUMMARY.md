@@ -26,6 +26,7 @@
 # CLI Reference
 
 - [Commands](./cli/commands.md)
+- [Project Configuration](./cli/project-configuration.md)
 
 # Architecture
 

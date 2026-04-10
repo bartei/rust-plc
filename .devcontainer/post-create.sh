@@ -5,7 +5,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "==> Building st-cli (LSP server)..."
-cargo build -p st-cli 2>&1
+# Retry cargo build — container networking may not be ready on first attempt.
+for attempt in 1 2 3; do
+    if cargo build -p st-cli 2>&1; then
+        break
+    fi
+    echo "    Build attempt $attempt failed, retrying in 5s..."
+    sleep 5
+done
 
 echo "==> Installing VSCode extension dependencies..."
 cd editors/vscode

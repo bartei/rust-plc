@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=../schemas/device-profile.schema.json
+name: Sim8DI4AI4DO2AO
+vendor: Simulated
+protocol: simulated
+description: "Simulated I/O module: 8 digital inputs, 4 analog inputs, 4 digital outputs, 2 analog outputs"
+
+fields:
+  # Digital inputs (8x BOOL)
+  - { name: DI_0, type: BOOL, direction: input, register: { address: 0, kind: virtual } }
+  - { name: DI_1, type: BOOL, direction: input, register: { address: 1, kind: virtual } }
+  - { name: DI_2, type: BOOL, direction: input, register: { address: 2, kind: virtual } }
+  - { name: DI_3, type: BOOL, direction: input, register: { address: 3, kind: virtual } }
+  - { name: DI_4, type: BOOL, direction: input, register: { address: 4, kind: virtual } }
+  - { name: DI_5, type: BOOL, direction: input, register: { address: 5, kind: virtual } }
+  - { name: DI_6, type: BOOL, direction: input, register: { address: 6, kind: virtual } }
+  - { name: DI_7, type: BOOL, direction: input, register: { address: 7, kind: virtual } }
+
+  # Analog inputs (4x INT, 0-10000 range)
+  - { name: AI_0, type: INT, direction: input, register: { address: 10, kind: virtual, unit: raw } }
+  - { name: AI_1, type: INT, direction: input, register: { address: 11, kind: virtual, unit: raw } }
+  - { name: AI_2, type: INT, direction: input, register: { address: 12, kind: virtual, unit: raw } }
+  - { name: AI_3, type: INT, direction: input, register: { address: 13, kind: virtual, unit: raw } }
+
+  # Digital outputs (4x BOOL)
+  - { name: DO_0, type: BOOL, direction: output, register: { address: 20, kind: virtual } }
+  - { name: DO_1, type: BOOL, direction: output, register: { address: 21, kind: virtual } }
+  - { name: DO_2, type: BOOL, direction: output, register: { address: 22, kind: virtual } }
+  - { name: DO_3, type: BOOL, direction: output, register: { address: 23, kind: virtual } }
+
+  # Analog outputs (2x INT, 0-10000 range)
+  - { name: AO_0, type: INT, direction: output, register: { address: 30, kind: virtual, unit: raw } }
+  - { name: AO_1, type: INT, direction: output, register: { address: 31, kind: virtual, unit: raw } }

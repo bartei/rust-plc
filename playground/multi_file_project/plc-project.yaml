@@ -6,3 +6,6 @@ entryPoint: Main
 # Optional: exclude test files from compilation
 exclude:
   - test_*.st
+
+engine:
+  cycle_time: 100ms

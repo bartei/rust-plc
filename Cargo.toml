@@ -10,6 +10,8 @@ members = [
     "crates/st-dap",
     "crates/st-monitor",
     "crates/st-cli",
+    "crates/st-comm-api",
+    "crates/st-comm-sim",
 ]
 resolver = "3"
 

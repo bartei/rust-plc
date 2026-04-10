@@ -9,11 +9,13 @@ rust-version.workspace = true
 [dev-dependencies]
 st-syntax.workspace = true
 st-compiler.workspace = true
+serde_yaml.workspace = true
 
 [dependencies]
 st-ir.workspace = true
 st-syntax.workspace = true
 st-compiler.workspace = true
+st-comm-api = { path = "../st-comm-api" }
 tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true

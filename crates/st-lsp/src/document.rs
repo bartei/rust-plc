@@ -20,22 +20,26 @@ pub struct Document {
     pub project_files: Vec<(String, String)>,
     /// This document's file path (for filtering itself from project_files).
     pub file_path: Option<String>,
+    /// Byte offset of this file's content within the virtual concatenated
+    /// text produced by `parse_multi()`. Used to map diagnostics (which
+    /// carry ranges in the virtual space) back to file-local positions.
+    pub virtual_offset: usize,
 }
 
 impl Document {
     /// Create a new document from source text.
     pub fn new(source: String, version: Option<i32>) -> Self {
-        let (tree, ast, lower_errors, analysis, project_files) =
+        let (tree, ast, lower_errors, analysis, project_files, virtual_offset) =
             Self::analyze_source_with_uri(&source, None);
-        Self { source, tree, ast, lower_errors, analysis, version, project_files, file_path: None }
+        Self { source, tree, ast, lower_errors, analysis, version, project_files, file_path: None, virtual_offset }
     }
 
     /// Create a new document with project-aware analysis using the file URI.
     pub fn new_with_uri(source: String, version: Option<i32>, uri: &str) -> Self {
         let file_path = uri.strip_prefix("file://").map(|s| s.to_string());
-        let (tree, ast, lower_errors, analysis, project_files) =
+        let (tree, ast, lower_errors, analysis, project_files, virtual_offset) =
             Self::analyze_source_with_uri(&source, Some(uri));
-        Self { source, tree, ast, lower_errors, analysis, version, project_files, file_path }
+        Self { source, tree, ast, lower_errors, analysis, version, project_files, file_path, virtual_offset }
     }
 
     /// Update the document with new source text.
@@ -47,7 +51,7 @@ impl Document {
     /// results. This prevents squiggles from appearing while the user is typing
     /// mid-expression (e.g., `controller.` before completing the method name).
     pub fn update(&mut self, source: String, version: Option<i32>, _uri: Option<&str>) {
-        let (tree, ast, lower_errors, analysis) =
+        let (tree, ast, lower_errors, analysis, virtual_offset) =
             Self::analyze_with_cached_project(&source, &self.project_files, self.file_path.as_deref());
 
         let has_parse_errors = !lower_errors.is_empty() || tree.root_node().has_error();
@@ -57,12 +61,16 @@ impl Document {
         self.version = version;
 
         if has_parse_errors {
-            // Keep the last good AST and analysis — prevents false error squiggles
-            // while typing. The tree and source are still updated for cursor tracking.
+            // Keep the last good AST and analysis — prevents false semantic
+            // squiggles while typing. But always update parse errors and
+            // virtual_offset so the user sees WHERE the syntax problems are.
+            self.lower_errors = lower_errors;
+            self.virtual_offset = virtual_offset;
         } else {
             self.ast = ast;
             self.lower_errors = lower_errors;
             self.analysis = analysis;
+            self.virtual_offset = virtual_offset;
         }
         // project_files unchanged — cached from didOpen
     }
@@ -78,6 +86,7 @@ impl Document {
         SourceFile,
         Vec<st_syntax::lower::LowerError>,
         AnalysisResult,
+        usize, // virtual_offset of this file in the concatenated text
     ) {
         let mut parser = tree_sitter::Parser::new();
         parser
@@ -95,17 +104,22 @@ impl Document {
                 all_sources.push(content.as_str());
             }
         }
+
+        // The current file is always LAST. Its virtual offset is the sum of
+        // all preceding source lengths.
+        let virtual_offset: usize = all_sources.iter().map(|s| s.len()).sum();
         all_sources.push(source);
 
         let multi_result = st_syntax::multi_file::parse_multi(&all_sources);
         let analysis = st_semantics::analyze::analyze(&multi_result.source_file);
         let lower_result: LowerResult = st_syntax::lower::lower(&tree, source);
 
-        (tree, lower_result.source_file, multi_result.errors, analysis)
+        (tree, lower_result.source_file, multi_result.errors, analysis, virtual_offset)
     }
 
     /// Analyze with optional file URI for project-aware multi-file resolution.
     /// Does full project discovery from disk — called once on didOpen.
+    #[allow(clippy::type_complexity)]
     pub fn analyze_source_with_uri(
         source: &str,
         file_uri: Option<&str>,
@@ -115,6 +129,7 @@ impl Document {
         Vec<st_syntax::lower::LowerError>,
         AnalysisResult,
         Vec<(String, String)>,
+        usize, // virtual_offset
     ) {
         let mut parser = tree_sitter::Parser::new();
         parser
@@ -173,6 +188,8 @@ impl Document {
         for s in &project_sources {
             all_sources.push(s.as_str());
         }
+        // Current file is last — its virtual offset is the sum of all preceding sources.
+        let virtual_offset: usize = all_sources.iter().map(|s| s.len()).sum();
         all_sources.push(source);
 
         let multi_result = st_syntax::multi_file::parse_multi(&all_sources);
@@ -185,10 +202,23 @@ impl Document {
             multi_result.errors,
             analysis,
             project_files,
+            virtual_offset,
         )
     }
 
     /// Convert a byte offset to an LSP Position (line, character).
+    /// Convert a file-local byte offset to a virtual-space offset.
+    /// Virtual-space offsets match the byte ranges in the semantic analysis
+    /// (symbols, scopes, diagnostics) produced by `parse_multi()`.
+    pub fn to_virtual(&self, local_offset: usize) -> usize {
+        local_offset + self.virtual_offset
+    }
+
+    /// Convert a virtual-space byte offset back to file-local.
+    pub fn from_virtual(&self, virtual_offset: usize) -> usize {
+        virtual_offset.saturating_sub(self.virtual_offset)
+    }
+
     pub fn offset_to_position(&self, offset: usize) -> tower_lsp::lsp_types::Position {
         let src = self.source.as_bytes();
         let offset = offset.min(src.len());

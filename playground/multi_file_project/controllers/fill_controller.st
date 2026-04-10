@@ -17,6 +17,7 @@ VAR
     counter : CTU;
     filling : BOOL := FALSE;
     edge : R_TRIG;
+    pulse_toggle : BOOL := FALSE;
 END_VAR
     edge(CLK := start);
 
@@ -25,16 +26,19 @@ END_VAR
         fill_count := 0;
     END_IF;
 
+    pulse_toggle := NOT pulse_toggle;
+    counter(CU := pulse_toggle AND filling, RESET := NOT filling, PV := target_fill);
+
+    IF counter.Q THEN
+        filling := FALSE;
+        valve_open := FALSE;
+        fill_done := TRUE;
+    END_IF;
+
+    fill_count := counter.CV;
+
     IF filling THEN
         valve_open := TRUE;
-        counter(CU := TRUE, RESET := NOT filling, PV := target_fill);
-        fill_count := counter.CV;
-
-        IF counter.Q THEN
-            filling := FALSE;
-            valve_open := FALSE;
-            fill_done := TRUE;
-        END_IF;
     ELSE
         valve_open := FALSE;
     END_IF;

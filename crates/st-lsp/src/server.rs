@@ -28,10 +28,21 @@ impl Backend {
     async fn publish_diagnostics(&self, uri: &Url, doc: &Document) {
         let mut diags = Vec::new();
 
-        // Parse / lower errors
+        // Parse / lower errors — these ranges are in virtual concatenated
+        // space (from parse_multi), so we filter to this file's slice and
+        // convert to file-local offsets, same as semantic diagnostics below.
+        let file_start = doc.virtual_offset;
+        let file_end = file_start + doc.source.len();
         for err in &doc.lower_errors {
+            if err.range.start < file_start || err.range.start > file_end {
+                continue; // belongs to a different file
+            }
+            let local_range = st_syntax::ast::TextRange::new(
+                err.range.start.saturating_sub(file_start),
+                err.range.end.saturating_sub(file_start).min(doc.source.len()),
+            );
             diags.push(Diagnostic {
-                range: doc.text_range_to_lsp(err.range),
+                range: doc.text_range_to_lsp(local_range),
                 severity: Some(DiagnosticSeverity::ERROR),
                 source: Some("st".to_string()),
                 message: err.message.clone(),
@@ -40,37 +51,24 @@ impl Backend {
         }
 
         // Semantic diagnostics — only include diagnostics that originate from
-        // THIS file. In multi-file projects, the merged analysis produces
-        // diagnostics for ALL files; we filter by checking if the diagnostic
-        // byte range falls within a top-level item defined in this file's AST.
-        let file_item_ranges: Vec<(usize, usize)> = doc.ast.items.iter().map(|item| {
-            let r = match item {
-                st_syntax::ast::TopLevelItem::Program(p) => p.range,
-                st_syntax::ast::TopLevelItem::Function(f) => f.range,
-                st_syntax::ast::TopLevelItem::FunctionBlock(fb) => fb.range,
-                st_syntax::ast::TopLevelItem::Class(cls) => cls.range,
-                st_syntax::ast::TopLevelItem::Interface(iface) => iface.range,
-                st_syntax::ast::TopLevelItem::TypeDeclaration(td) => td.range,
-                st_syntax::ast::TopLevelItem::GlobalVarDeclaration(vb) => vb.range,
-            };
-            (r.start, r.end)
-        }).collect();
-
+        // THIS file's virtual slice [file_start, file_end).
         for d in &doc.analysis.diagnostics {
-            // Only include if the diagnostic falls within one of this file's items
-            let belongs_to_this_file = file_item_ranges.iter().any(|&(start, end)| {
-                d.range.start >= start && d.range.end <= end
-            });
-            if !belongs_to_this_file {
+            if d.range.start < file_start || d.range.end > file_end {
                 continue;
             }
+            // Convert from virtual-concatenated offset to file-local offset
+            // so the LSP range points at the right line:col in this file.
+            let local_range = st_syntax::ast::TextRange::new(
+                d.range.start - file_start,
+                d.range.end - file_start,
+            );
             let severity = match d.severity {
                 st_semantics::diagnostic::Severity::Error => DiagnosticSeverity::ERROR,
                 st_semantics::diagnostic::Severity::Warning => DiagnosticSeverity::WARNING,
                 st_semantics::diagnostic::Severity::Info => DiagnosticSeverity::INFORMATION,
             };
             diags.push(Diagnostic {
-                range: doc.text_range_to_lsp(d.range),
+                range: doc.text_range_to_lsp(local_range),
                 severity: Some(severity),
                 source: Some("st".to_string()),
                 code: Some(NumberOrString::String(format!("{:?}", d.code))),
@@ -145,42 +143,39 @@ impl Backend {
         }
     }
 
-    /// Resolve a symbol's byte range to a Location in a cross-file project.
-    /// Searches project_files to find which file the byte range belongs to.
-    /// Uses the same approach as the DAP: parse each project file individually
-    /// and check which one defines the symbol at the given byte range.
+    /// Resolve a symbol's byte range (in VIRTUAL space, from the semantic
+    /// analysis) to a Location in a cross-file project. Computes each
+    /// project file's virtual offset on the fly and checks if sym_range
+    /// falls within that file's slice of the virtual space.
     fn resolve_cross_file_location(
         &self,
         doc: &Document,
         sym_range: st_syntax::ast::TextRange,
     ) -> Option<Location> {
+        // Compute per-file virtual offsets using the same algorithm as
+        // parse_multi / analyze_with_cached_project.
+        let stdlib = st_syntax::multi_file::builtin_stdlib();
+        let stdlib_len: usize = stdlib.iter().map(|s| s.len()).sum();
+        let mut cumulative = stdlib_len;
+
         for (path, content) in &doc.project_files {
-            if sym_range.end > content.len() || sym_range.start >= content.len() {
-                continue;
-            }
-            // Verify: parse this file and check if any top-level item starts at sym_range.start
-            let parse = st_syntax::parse(content);
-            let has_item_at_range = parse.source_file.items.iter().any(|item| {
-                let item_range = match item {
-                    st_syntax::ast::TopLevelItem::Program(p) => p.range,
-                    st_syntax::ast::TopLevelItem::Function(f) => f.range,
-                    st_syntax::ast::TopLevelItem::FunctionBlock(fb) => fb.range,
-                    st_syntax::ast::TopLevelItem::Class(cls) => cls.range,
-                    st_syntax::ast::TopLevelItem::Interface(iface) => iface.range,
-                    st_syntax::ast::TopLevelItem::TypeDeclaration(td) => td.range,
-                    st_syntax::ast::TopLevelItem::GlobalVarDeclaration(vb) => vb.range,
-                };
-                // Check if the symbol range overlaps with this item
-                sym_range.start >= item_range.start && sym_range.end <= item_range.end
-            });
-            if !has_item_at_range {
+            let file_start = cumulative;
+            let file_end = file_start + content.len();
+            cumulative = file_end;
+
+            // Does the symbol fall within this file's virtual slice?
+            if sym_range.start < file_start || sym_range.end > file_end {
                 continue;
             }
 
+            // Convert to file-local offsets
+            let local_start = sym_range.start - file_start;
+            let local_end = sym_range.end - file_start;
+
             let file_uri = tower_lsp::lsp_types::Url::from_file_path(path).ok()?;
             let src = content.as_bytes();
-            let start_offset = sym_range.start.min(src.len());
-            let end_offset = sym_range.end.min(src.len());
+            let start_offset = local_start.min(src.len());
+            let end_offset = local_end.min(src.len());
             let mut start_line = 0u32;
             let mut start_col = 0u32;
             for &b in &src[..start_offset] {
@@ -314,17 +309,18 @@ impl Backend {
     }
 
     /// Find the innermost scope containing the given offset.
+    /// Find the scope that contains a FILE-LOCAL byte offset.
+    /// Converts to virtual space internally to match the analysis's scope
+    /// ranges, then uses the AST (file-local) to map back to a scope name.
     fn find_scope_for_offset(
         &self,
         doc: &Document,
         offset: usize,
     ) -> st_semantics::scope::ScopeId {
         let scopes = doc.analysis.symbols.scopes();
-        // Walk scopes in reverse (deepest first) to find the innermost one
-        // that contains the offset. We check POU names to find the right scope.
         let global = doc.analysis.symbols.global_scope_id();
 
-        // Find the POU that contains this offset
+        // doc.ast uses file-local ranges. Check which POU the cursor is in.
         for item in &doc.ast.items {
             let (range, name) = match item {
                 st_syntax::ast::TopLevelItem::Program(p) => (p.range, &p.name.name),
@@ -333,7 +329,6 @@ impl Backend {
                 _ => continue,
             };
             if range.start <= offset && offset <= range.end {
-                // Find the scope for this POU
                 for scope in scopes {
                     if scope.name.eq_ignore_ascii_case(name) && scope.id != global {
                         return scope.id;
@@ -369,6 +364,10 @@ impl LanguageServer for Backend {
                     work_done_progress_options: Default::default(),
                 }),
                 document_formatting_provider: Some(OneOf::Left(true)),
+                document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
+                    first_trigger_character: "\n".to_string(),
+                    more_trigger_character: Some(vec![";".to_string()]),
+                }),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
@@ -382,6 +381,12 @@ impl LanguageServer for Backend {
                 ),
                 document_highlight_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+                selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
+                inlay_hint_provider: Some(OneOf::Left(true)),
+                call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
+                linked_editing_range_provider: Some(
+                    LinkedEditingRangeServerCapabilities::Simple(true),
+                ),
                 type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 document_link_provider: Some(DocumentLinkOptions {
@@ -551,14 +556,20 @@ impl LanguageServer for Backend {
             {
                 let sym_range = sym.range;
 
+                // sym_range is in virtual space. Try cross-file first.
                 if !doc.project_files.is_empty() {
                     if let Some(location) = self.resolve_cross_file_location(doc, sym_range) {
                         return Ok(Some(GotoDefinitionResponse::Scalar(location)));
                     }
                 }
 
-                if sym_range.end <= doc.source.len() {
-                    let range = doc.text_range_to_lsp(sym_range);
+                // Fall back to current file: convert virtual → file-local.
+                let local_range = st_syntax::ast::TextRange::new(
+                    doc.from_virtual(sym_range.start),
+                    doc.from_virtual(sym_range.end),
+                );
+                if local_range.end <= doc.source.len() {
+                    let range = doc.text_range_to_lsp(local_range);
                     return Ok(Some(GotoDefinitionResponse::Scalar(Location {
                         uri: uri.clone(),
                         range,
@@ -959,6 +970,166 @@ impl LanguageServer for Backend {
         }]))
     }
 
+    // ── On-Type Formatting (auto-indent after Enter / ;) ────────────
+    async fn on_type_formatting(
+        &self,
+        params: DocumentOnTypeFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let docs = self.documents.read().await;
+        let Some(doc) = docs.get(uri) else {
+            return Ok(None);
+        };
+        let tab = " ".repeat(params.options.tab_size as usize);
+        let lines: Vec<&str> = doc.source.lines().collect();
+
+        match params.ch.as_str() {
+            // After Enter: auto-indent the new (empty) line based on what's
+            // on the previous line. This is the highest-value on-type
+            // formatting behavior — saves the user from manually pressing
+            // Tab or aligning by hand after every THEN, DO, VAR, etc.
+            "\n" => {
+                let cur_line = pos.line as usize;
+                if cur_line == 0 || cur_line >= lines.len() {
+                    return Ok(None);
+                }
+
+                let prev = lines[cur_line - 1];
+                let prev_indent = leading_whitespace(prev);
+                let prev_trimmed = prev.trim().to_uppercase();
+
+                // Determine indent adjustment based on the previous line's
+                // content. Opening keywords add one level; closing keywords
+                // don't change (END_* is already indented correctly).
+                let delta = if starts_with_opener(&prev_trimmed) {
+                    1i32
+                } else {
+                    0
+                };
+
+                let base_indent_chars = prev_indent.len() as i32;
+                let new_indent_chars =
+                    (base_indent_chars + delta * tab.len() as i32).max(0) as usize;
+                let new_indent = " ".repeat(new_indent_chars);
+
+                // Only emit a TextEdit if the current line's indent is wrong.
+                let cur_text = lines.get(cur_line).copied().unwrap_or("");
+                let cur_indent = leading_whitespace(cur_text);
+                if cur_indent == new_indent {
+                    return Ok(None);
+                }
+
+                // Replace the current line's leading whitespace.
+                let edit_range = Range::new(
+                    Position::new(pos.line, 0),
+                    Position::new(pos.line, cur_indent.len() as u32),
+                );
+                Ok(Some(vec![TextEdit {
+                    range: edit_range,
+                    new_text: new_indent,
+                }]))
+            }
+
+            // After `;`: reindent the current line. Useful when the user
+            // typed a closing keyword + `;` (like `END_IF;`) at the wrong
+            // indent level. We compute the correct indent and fix it.
+            ";" => {
+                let cur_line = pos.line as usize;
+                if cur_line >= lines.len() {
+                    return Ok(None);
+                }
+
+                let cur_text = lines[cur_line];
+                let cur_indent = leading_whitespace(cur_text);
+                let cur_trimmed = cur_text.trim().to_uppercase();
+
+                // For closing keywords, use the indent of the PREVIOUS non-
+                // empty line minus one level (to match the opening keyword).
+                if cur_trimmed.starts_with("END_") || cur_trimmed.starts_with("UNTIL ") {
+                    // Find the previous non-empty line's indent.
+                    let prev_indent = (0..cur_line)
+                        .rev()
+                        .find_map(|i| {
+                            let l = lines[i].trim();
+                            if l.is_empty() {
+                                None
+                            } else {
+                                Some(leading_whitespace(lines[i]))
+                            }
+                        })
+                        .unwrap_or("");
+                    let expected_chars = prev_indent
+                        .len()
+                        .saturating_sub(tab.len());
+                    let expected = " ".repeat(expected_chars);
+
+                    if cur_indent == expected {
+                        return Ok(None);
+                    }
+
+                    let edit_range = Range::new(
+                        Position::new(pos.line, 0),
+                        Position::new(pos.line, cur_indent.len() as u32),
+                    );
+                    return Ok(Some(vec![TextEdit {
+                        range: edit_range,
+                        new_text: expected,
+                    }]));
+                }
+
+                Ok(None)
+            }
+
+            _ => Ok(None),
+        }
+    }
+
+    // ── Linked Editing Range (matching keyword pairs) ────────────────
+    async fn linked_editing_range(
+        &self,
+        params: LinkedEditingRangeParams,
+    ) -> Result<Option<LinkedEditingRanges>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let docs = self.documents.read().await;
+        let Some(doc) = docs.get(uri) else {
+            return Ok(None);
+        };
+
+        let offset = doc.position_to_offset(pos);
+        let source = &doc.source;
+
+        // Find the word at the cursor. If it's a block keyword (IF, FOR,
+        // END_IF, VAR, PROGRAM, etc.), find its matching counterpart in the
+        // same AST block and return both ranges for simultaneous editing.
+        let Some(word_range) = find_word_range(source, offset) else {
+            return Ok(None);
+        };
+        let word = source[word_range.start..word_range.end].to_uppercase();
+
+        // Try to find a keyword pair in the source using the AST to scope
+        // the search to the correct nesting level.
+        if let Some((open_range, close_range)) =
+            find_keyword_pair(&doc.ast, source, offset, &word)
+        {
+            // Only respond if the cursor is actually ON one of the keywords.
+            let on_open = offset >= open_range.start && offset <= open_range.end;
+            let on_close = offset >= close_range.start && offset <= close_range.end;
+            if on_open || on_close {
+                return Ok(Some(LinkedEditingRanges {
+                    ranges: vec![
+                        doc.text_range_to_lsp(open_range),
+                        doc.text_range_to_lsp(close_range),
+                    ],
+                    word_pattern: None,
+                }));
+            }
+        }
+
+        Ok(None)
+    }
+
     // ── Code Actions ────────────────────────────────────────────────
     async fn code_action(
         &self,
@@ -1124,6 +1295,348 @@ impl LanguageServer for Backend {
         }
 
         if ranges.is_empty() { Ok(None) } else { Ok(Some(ranges)) }
+    }
+
+    // ── Selection Range (smart expand/shrink selection) ──────────────
+    async fn selection_range(
+        &self,
+        params: SelectionRangeParams,
+    ) -> Result<Option<Vec<SelectionRange>>> {
+        let uri = &params.text_document.uri;
+        let docs = self.documents.read().await;
+        let Some(doc) = docs.get(uri) else {
+            return Ok(None);
+        };
+
+        let mut result = Vec::new();
+        for pos in &params.positions {
+            let offset = doc.position_to_offset(*pos);
+            let ranges = collect_containing_ranges(&doc.ast, offset);
+            // Also add the "word at cursor" range as the innermost level
+            // by finding the identifier/number token boundaries.
+            let word_range = find_word_range(&doc.source, offset);
+            let mut all = Vec::new();
+            if let Some(wr) = word_range {
+                if wr.start < wr.end {
+                    all.push(wr);
+                }
+            }
+            for r in &ranges {
+                // De-duplicate: don't add if we already have an identical range.
+                if !all.iter().any(|existing| existing.start == r.start && existing.end == r.end) {
+                    all.push(*r);
+                }
+            }
+            // Sort smallest→largest (innermost first).
+            all.sort_by_key(|r| r.end - r.start);
+
+            // Build the chain from innermost to outermost. Each level's
+            // `parent` points to the next larger enclosing range.
+            let mut chain: Option<SelectionRange> = None;
+            for r in all.into_iter().rev() {
+                chain = Some(SelectionRange {
+                    range: doc.text_range_to_lsp(r),
+                    parent: chain.map(Box::new),
+                });
+            }
+            result.push(chain.unwrap_or(SelectionRange {
+                range: doc.text_range_to_lsp(st_syntax::ast::TextRange::new(offset, offset)),
+                parent: None,
+            }));
+        }
+
+        Ok(Some(result))
+    }
+
+    // ── Inlay Hints (parameter names at call sites) ─────────────────
+    async fn inlay_hint(
+        &self,
+        params: InlayHintParams,
+    ) -> Result<Option<Vec<InlayHint>>> {
+        let uri = &params.text_document.uri;
+        let docs = self.documents.read().await;
+        let Some(doc) = docs.get(uri) else {
+            return Ok(None);
+        };
+
+        // Convert the visible range to byte offsets for filtering.
+        let range_start = doc.position_to_offset(params.range.start);
+        let range_end = doc.position_to_offset(params.range.end);
+
+        let mut hints = Vec::new();
+
+        // Walk the AST to find all function/FB calls in the visible range
+        // and emit parameter-name hints for positional arguments.
+        for item in &doc.ast.items {
+            let (body, _var_blocks, item_range) = match item {
+                ast::TopLevelItem::Program(p) => {
+                    (p.body.as_slice(), p.var_blocks.as_slice(), p.range)
+                }
+                ast::TopLevelItem::Function(f) => {
+                    (f.body.as_slice(), f.var_blocks.as_slice(), f.range)
+                }
+                ast::TopLevelItem::FunctionBlock(fb) => {
+                    (fb.body.as_slice(), fb.var_blocks.as_slice(), fb.range)
+                }
+                ast::TopLevelItem::Class(cls) => {
+                    // Class methods
+                    for method in &cls.methods {
+                        if method.range.end < range_start || method.range.start > range_end {
+                            continue;
+                        }
+                        collect_call_hints(
+                            &method.body,
+                            doc,
+                            range_start,
+                            range_end,
+                            &mut hints,
+                        );
+                    }
+                    continue;
+                }
+                _ => continue,
+            };
+            if item_range.end < range_start || item_range.start > range_end {
+                continue;
+            }
+            collect_call_hints(body, doc, range_start, range_end, &mut hints);
+        }
+
+        if hints.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(hints))
+        }
+    }
+
+    // ── Call Hierarchy (cross-reference: who calls what) ─────────────
+    async fn prepare_call_hierarchy(
+        &self,
+        params: CallHierarchyPrepareParams,
+    ) -> Result<Option<Vec<CallHierarchyItem>>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let docs = self.documents.read().await;
+        let Some(doc) = docs.get(uri) else {
+            return Ok(None);
+        };
+
+        let offset = doc.position_to_offset(pos);
+
+        // Find the POU (PROGRAM/FUNCTION/FB/METHOD) at the cursor position.
+        for item in &doc.ast.items {
+            let (name, kind, item_range, name_range) = match item {
+                ast::TopLevelItem::Function(f) => {
+                    ("Function", SymbolKind::FUNCTION, f.range, f.name.range)
+                }
+                ast::TopLevelItem::FunctionBlock(fb) => {
+                    ("FunctionBlock", SymbolKind::CLASS, fb.range, fb.name.range)
+                }
+                ast::TopLevelItem::Program(p) => {
+                    ("Program", SymbolKind::MODULE, p.range, p.name.range)
+                }
+                ast::TopLevelItem::Class(cls) => {
+                    // Check if cursor is on a method inside the class
+                    for method in &cls.methods {
+                        if contains(method.range, offset) {
+                            let full_name = format!("{}.{}", cls.name.name, method.name.name);
+                            return Ok(Some(vec![CallHierarchyItem {
+                                name: full_name,
+                                kind: SymbolKind::METHOD,
+                                tags: None,
+                                detail: None,
+                                uri: uri.clone(),
+                                range: doc.text_range_to_lsp(method.range),
+                                selection_range: doc.text_range_to_lsp(method.name.range),
+                                data: None,
+                            }]));
+                        }
+                    }
+                    ("Class", SymbolKind::CLASS, cls.range, cls.name.range)
+                }
+                _ => continue,
+            };
+            if !contains(item_range, offset) {
+                continue;
+            }
+            let item_name = match item {
+                ast::TopLevelItem::Function(f) => f.name.name.clone(),
+                ast::TopLevelItem::FunctionBlock(fb) => fb.name.name.clone(),
+                ast::TopLevelItem::Program(p) => p.name.name.clone(),
+                ast::TopLevelItem::Class(c) => c.name.name.clone(),
+                _ => continue,
+            };
+            return Ok(Some(vec![CallHierarchyItem {
+                name: item_name,
+                kind,
+                tags: None,
+                detail: Some(name.to_string()),
+                uri: uri.clone(),
+                range: doc.text_range_to_lsp(item_range),
+                selection_range: doc.text_range_to_lsp(name_range),
+                data: None,
+            }]));
+        }
+        Ok(None)
+    }
+
+    async fn incoming_calls(
+        &self,
+        params: CallHierarchyIncomingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
+        let target_name = &params.item.name;
+        let docs = self.documents.read().await;
+        let mut results: Vec<CallHierarchyIncomingCall> = Vec::new();
+
+        // Search ALL open documents for calls to the target function.
+        for (uri, doc) in docs.iter() {
+            for item in &doc.ast.items {
+                let (caller_name, caller_kind, caller_range, caller_name_range, body) =
+                    match item {
+                        ast::TopLevelItem::Function(f) => (
+                            f.name.name.clone(),
+                            SymbolKind::FUNCTION,
+                            f.range,
+                            f.name.range,
+                            f.body.as_slice(),
+                        ),
+                        ast::TopLevelItem::FunctionBlock(fb) => (
+                            fb.name.name.clone(),
+                            SymbolKind::CLASS,
+                            fb.range,
+                            fb.name.range,
+                            fb.body.as_slice(),
+                        ),
+                        ast::TopLevelItem::Program(p) => (
+                            p.name.name.clone(),
+                            SymbolKind::MODULE,
+                            p.range,
+                            p.name.range,
+                            p.body.as_slice(),
+                        ),
+                        ast::TopLevelItem::Class(cls) => {
+                            // Check each method
+                            for method in &cls.methods {
+                                let mut ranges = Vec::new();
+                                collect_call_ranges_in_stmts(
+                                    &method.body,
+                                    target_name,
+                                    doc,
+                                    &mut ranges,
+                                );
+                                if !ranges.is_empty() {
+                                    results.push(CallHierarchyIncomingCall {
+                                        from: CallHierarchyItem {
+                                            name: format!(
+                                                "{}.{}",
+                                                cls.name.name, method.name.name
+                                            ),
+                                            kind: SymbolKind::METHOD,
+                                            tags: None,
+                                            detail: None,
+                                            uri: uri.clone(),
+                                            range: doc.text_range_to_lsp(method.range),
+                                            selection_range: doc
+                                                .text_range_to_lsp(method.name.range),
+                                            data: None,
+                                        },
+                                        from_ranges: ranges,
+                                    });
+                                }
+                            }
+                            continue;
+                        }
+                        _ => continue,
+                    };
+
+                let mut ranges = Vec::new();
+                collect_call_ranges_in_stmts(body, target_name, doc, &mut ranges);
+                if !ranges.is_empty() {
+                    results.push(CallHierarchyIncomingCall {
+                        from: CallHierarchyItem {
+                            name: caller_name,
+                            kind: caller_kind,
+                            tags: None,
+                            detail: None,
+                            uri: uri.clone(),
+                            range: doc.text_range_to_lsp(caller_range),
+                            selection_range: doc.text_range_to_lsp(caller_name_range),
+                            data: None,
+                        },
+                        from_ranges: ranges,
+                    });
+                }
+            }
+        }
+
+        if results.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(results))
+        }
+    }
+
+    async fn outgoing_calls(
+        &self,
+        params: CallHierarchyOutgoingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
+        let source_name = &params.item.name;
+        let docs = self.documents.read().await;
+        let Some(doc) = docs.get(&params.item.uri) else {
+            return Ok(None);
+        };
+
+        // Find the POU body for the source function and collect all calls it makes.
+        let body = find_pou_body(&doc.ast, source_name);
+        if body.is_empty() {
+            return Ok(None);
+        }
+
+        // Collect all unique function calls and their ranges.
+        let mut call_map: std::collections::HashMap<String, Vec<Range>> =
+            std::collections::HashMap::new();
+        collect_all_call_names_in_stmts(body, doc, &mut call_map);
+
+        let mut results: Vec<CallHierarchyOutgoingCall> = Vec::new();
+        for (callee_name, from_ranges) in call_map {
+            // Resolve the callee to find its definition range.
+            let global_scope = doc.analysis.symbols.global_scope_id();
+            let (callee_kind, callee_range, callee_sel_range) =
+                if let Some((_, sym)) = doc.analysis.symbols.resolve(global_scope, &callee_name) {
+                    let kind = match &sym.kind {
+                        st_semantics::scope::SymbolKind::Function { .. } => SymbolKind::FUNCTION,
+                        st_semantics::scope::SymbolKind::FunctionBlock { .. } => SymbolKind::CLASS,
+                        st_semantics::scope::SymbolKind::Program { .. } => SymbolKind::MODULE,
+                        _ => SymbolKind::FUNCTION,
+                    };
+                    let lsp_range = doc.text_range_to_lsp(sym.range);
+                    (kind, lsp_range, lsp_range)
+                } else {
+                    // Symbol not found — use a zero range
+                    let zero = Range::default();
+                    (SymbolKind::FUNCTION, zero, zero)
+                };
+
+            results.push(CallHierarchyOutgoingCall {
+                to: CallHierarchyItem {
+                    name: callee_name,
+                    kind: callee_kind,
+                    tags: None,
+                    detail: None,
+                    uri: params.item.uri.clone(),
+                    range: callee_range,
+                    selection_range: callee_sel_range,
+                    data: None,
+                },
+                from_ranges,
+            });
+        }
+
+        if results.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(results))
+        }
     }
 
     // ── Go to Type Definition ───────────────────────────────────────
@@ -1407,4 +1920,865 @@ fn type_display(dt: &st_syntax::ast::DataType) -> String {
         }
         st_syntax::ast::DataType::UserDefined(qn) => qn.as_str(),
     }
+}
+
+// =============================================================================
+// Selection Range helpers
+// =============================================================================
+
+use st_syntax::ast::{
+    self as ast, Argument, ElsifClause, ForStmt, IfStmt, RepeatStmt, SourceFile,
+    WhileStmt,
+};
+
+// =============================================================================
+// Call Hierarchy helpers
+// =============================================================================
+
+/// Find all call sites to `target_name` within a statement list.
+/// Returns the LSP ranges of each call expression.
+fn collect_call_ranges_in_stmts(
+    stmts: &[ast::Statement],
+    target_name: &str,
+    doc: &crate::document::Document,
+    ranges: &mut Vec<Range>,
+) {
+    for stmt in stmts {
+        match stmt {
+            ast::Statement::FunctionCall(fc) => {
+                if fc.name.as_str().eq_ignore_ascii_case(target_name) {
+                    ranges.push(doc.text_range_to_lsp(fc.range));
+                }
+            }
+            ast::Statement::Assignment(a) => {
+                collect_call_ranges_in_expr(&a.value, target_name, doc, ranges);
+            }
+            ast::Statement::If(IfStmt {
+                condition,
+                then_body,
+                elsif_clauses,
+                else_body,
+                ..
+            }) => {
+                collect_call_ranges_in_expr(condition, target_name, doc, ranges);
+                collect_call_ranges_in_stmts(then_body, target_name, doc, ranges);
+                for clause in elsif_clauses {
+                    collect_call_ranges_in_expr(&clause.condition, target_name, doc, ranges);
+                    collect_call_ranges_in_stmts(&clause.body, target_name, doc, ranges);
+                }
+                if let Some(els) = else_body {
+                    collect_call_ranges_in_stmts(els, target_name, doc, ranges);
+                }
+            }
+            ast::Statement::For(ForStmt { body, .. }) => {
+                collect_call_ranges_in_stmts(body, target_name, doc, ranges);
+            }
+            ast::Statement::While(WhileStmt {
+                condition, body, ..
+            }) => {
+                collect_call_ranges_in_expr(condition, target_name, doc, ranges);
+                collect_call_ranges_in_stmts(body, target_name, doc, ranges);
+            }
+            ast::Statement::Repeat(RepeatStmt {
+                body, condition, ..
+            }) => {
+                collect_call_ranges_in_stmts(body, target_name, doc, ranges);
+                collect_call_ranges_in_expr(condition, target_name, doc, ranges);
+            }
+            ast::Statement::Case(ast::CaseStmt {
+                branches,
+                else_body,
+                ..
+            }) => {
+                for branch in branches {
+                    collect_call_ranges_in_stmts(&branch.body, target_name, doc, ranges);
+                }
+                if let Some(els) = else_body {
+                    collect_call_ranges_in_stmts(els, target_name, doc, ranges);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_call_ranges_in_expr(
+    expr: &ast::Expression,
+    target_name: &str,
+    doc: &crate::document::Document,
+    ranges: &mut Vec<Range>,
+) {
+    match expr {
+        ast::Expression::FunctionCall(fc) => {
+            if fc.name.as_str().eq_ignore_ascii_case(target_name) {
+                ranges.push(doc.text_range_to_lsp(fc.range));
+            }
+            // Also check arguments for nested calls
+            for arg in &fc.arguments {
+                match arg {
+                    Argument::Positional(e) => {
+                        collect_call_ranges_in_expr(e, target_name, doc, ranges);
+                    }
+                    Argument::Named { value, .. } => {
+                        collect_call_ranges_in_expr(value, target_name, doc, ranges);
+                    }
+                }
+            }
+        }
+        ast::Expression::Binary(b) => {
+            collect_call_ranges_in_expr(&b.left, target_name, doc, ranges);
+            collect_call_ranges_in_expr(&b.right, target_name, doc, ranges);
+        }
+        ast::Expression::Unary(u) => {
+            collect_call_ranges_in_expr(&u.operand, target_name, doc, ranges);
+        }
+        ast::Expression::Parenthesized(inner) => {
+            collect_call_ranges_in_expr(inner, target_name, doc, ranges);
+        }
+        _ => {}
+    }
+}
+
+/// Collect ALL unique function calls made within a statement list.
+/// Builds a map from callee name → list of call-site ranges.
+fn collect_all_call_names_in_stmts(
+    stmts: &[ast::Statement],
+    doc: &crate::document::Document,
+    call_map: &mut std::collections::HashMap<String, Vec<Range>>,
+) {
+    for stmt in stmts {
+        match stmt {
+            ast::Statement::FunctionCall(fc) => {
+                let name = fc.name.as_str();
+                call_map
+                    .entry(name.to_uppercase())
+                    .or_default()
+                    .push(doc.text_range_to_lsp(fc.range));
+            }
+            ast::Statement::Assignment(a) => {
+                collect_all_call_names_in_expr(&a.value, doc, call_map);
+            }
+            ast::Statement::If(IfStmt {
+                condition,
+                then_body,
+                elsif_clauses,
+                else_body,
+                ..
+            }) => {
+                collect_all_call_names_in_expr(condition, doc, call_map);
+                collect_all_call_names_in_stmts(then_body, doc, call_map);
+                for clause in elsif_clauses {
+                    collect_all_call_names_in_expr(&clause.condition, doc, call_map);
+                    collect_all_call_names_in_stmts(&clause.body, doc, call_map);
+                }
+                if let Some(els) = else_body {
+                    collect_all_call_names_in_stmts(els, doc, call_map);
+                }
+            }
+            ast::Statement::For(ForStmt { body, .. }) => {
+                collect_all_call_names_in_stmts(body, doc, call_map);
+            }
+            ast::Statement::While(WhileStmt {
+                condition, body, ..
+            }) => {
+                collect_all_call_names_in_expr(condition, doc, call_map);
+                collect_all_call_names_in_stmts(body, doc, call_map);
+            }
+            ast::Statement::Repeat(RepeatStmt {
+                body, condition, ..
+            }) => {
+                collect_all_call_names_in_stmts(body, doc, call_map);
+                collect_all_call_names_in_expr(condition, doc, call_map);
+            }
+            ast::Statement::Case(ast::CaseStmt {
+                branches,
+                else_body,
+                ..
+            }) => {
+                for branch in branches {
+                    collect_all_call_names_in_stmts(&branch.body, doc, call_map);
+                }
+                if let Some(els) = else_body {
+                    collect_all_call_names_in_stmts(els, doc, call_map);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_all_call_names_in_expr(
+    expr: &ast::Expression,
+    doc: &crate::document::Document,
+    call_map: &mut std::collections::HashMap<String, Vec<Range>>,
+) {
+    match expr {
+        ast::Expression::FunctionCall(fc) => {
+            let name = fc.name.as_str();
+            call_map
+                .entry(name.to_uppercase())
+                .or_default()
+                .push(doc.text_range_to_lsp(fc.range));
+            for arg in &fc.arguments {
+                match arg {
+                    Argument::Positional(e) => {
+                        collect_all_call_names_in_expr(e, doc, call_map);
+                    }
+                    Argument::Named { value, .. } => {
+                        collect_all_call_names_in_expr(value, doc, call_map);
+                    }
+                }
+            }
+        }
+        ast::Expression::Binary(b) => {
+            collect_all_call_names_in_expr(&b.left, doc, call_map);
+            collect_all_call_names_in_expr(&b.right, doc, call_map);
+        }
+        ast::Expression::Unary(u) => {
+            collect_all_call_names_in_expr(&u.operand, doc, call_map);
+        }
+        ast::Expression::Parenthesized(inner) => {
+            collect_all_call_names_in_expr(inner, doc, call_map);
+        }
+        _ => {}
+    }
+}
+
+/// Find the body statements for a POU by name (case-insensitive).
+/// For class methods, the name is "ClassName.MethodName".
+fn find_pou_body<'a>(ast: &'a SourceFile, name: &str) -> &'a [ast::Statement] {
+    for item in &ast.items {
+        match item {
+            ast::TopLevelItem::Function(f)
+                if f.name.name.eq_ignore_ascii_case(name) =>
+            {
+                return &f.body;
+            }
+            ast::TopLevelItem::FunctionBlock(fb)
+                if fb.name.name.eq_ignore_ascii_case(name) =>
+            {
+                return &fb.body;
+            }
+            ast::TopLevelItem::Program(p)
+                if p.name.name.eq_ignore_ascii_case(name) =>
+            {
+                return &p.body;
+            }
+            ast::TopLevelItem::Class(cls) => {
+                for method in &cls.methods {
+                    let full = format!("{}.{}", cls.name.name, method.name.name);
+                    if full.eq_ignore_ascii_case(name) {
+                        return &method.body;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    &[]
+}
+
+// =============================================================================
+// Inlay Hint helpers
+// =============================================================================
+
+/// Walk a statement list looking for FunctionCallExpr nodes and emit
+/// parameter-name hints for positional arguments.
+fn collect_call_hints(
+    stmts: &[ast::Statement],
+    doc: &crate::document::Document,
+    range_start: usize,
+    range_end: usize,
+    hints: &mut Vec<InlayHint>,
+) {
+    for stmt in stmts {
+        let sr = stmt.range();
+        if sr.end < range_start || sr.start > range_end {
+            continue;
+        }
+        match stmt {
+            ast::Statement::FunctionCall(fc) => {
+                emit_call_hints(fc, doc, hints);
+            }
+            ast::Statement::Assignment(a) => {
+                // The RHS might be a function call: `result := Helper(10, 20);`
+                collect_expr_call_hints(&a.value, doc, hints);
+            }
+            ast::Statement::If(IfStmt {
+                condition,
+                then_body,
+                elsif_clauses,
+                else_body,
+                ..
+            }) => {
+                collect_expr_call_hints(condition, doc, hints);
+                collect_call_hints(then_body, doc, range_start, range_end, hints);
+                for clause in elsif_clauses {
+                    collect_expr_call_hints(&clause.condition, doc, hints);
+                    collect_call_hints(&clause.body, doc, range_start, range_end, hints);
+                }
+                if let Some(els) = else_body {
+                    collect_call_hints(els, doc, range_start, range_end, hints);
+                }
+            }
+            ast::Statement::For(ForStmt { body, .. }) => {
+                collect_call_hints(body, doc, range_start, range_end, hints);
+            }
+            ast::Statement::While(WhileStmt {
+                condition, body, ..
+            }) => {
+                collect_expr_call_hints(condition, doc, hints);
+                collect_call_hints(body, doc, range_start, range_end, hints);
+            }
+            ast::Statement::Repeat(RepeatStmt {
+                body, condition, ..
+            }) => {
+                collect_call_hints(body, doc, range_start, range_end, hints);
+                collect_expr_call_hints(condition, doc, hints);
+            }
+            ast::Statement::Case(ast::CaseStmt {
+                branches,
+                else_body,
+                ..
+            }) => {
+                for branch in branches {
+                    collect_call_hints(&branch.body, doc, range_start, range_end, hints);
+                }
+                if let Some(els) = else_body {
+                    collect_call_hints(els, doc, range_start, range_end, hints);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Check if an expression contains a function call and emit hints for it.
+fn collect_expr_call_hints(
+    expr: &ast::Expression,
+    doc: &crate::document::Document,
+    hints: &mut Vec<InlayHint>,
+) {
+    match expr {
+        ast::Expression::FunctionCall(fc) => {
+            emit_call_hints(fc, doc, hints);
+        }
+        ast::Expression::Binary(b) => {
+            collect_expr_call_hints(&b.left, doc, hints);
+            collect_expr_call_hints(&b.right, doc, hints);
+        }
+        ast::Expression::Unary(u) => {
+            collect_expr_call_hints(&u.operand, doc, hints);
+        }
+        ast::Expression::Parenthesized(inner) => {
+            collect_expr_call_hints(inner, doc, hints);
+        }
+        _ => {}
+    }
+}
+
+/// For a single function/FB call, resolve the callee's parameter list and
+/// emit `paramName:` hints before each positional argument.
+fn emit_call_hints(
+    fc: &ast::FunctionCallExpr,
+    doc: &crate::document::Document,
+    hints: &mut Vec<InlayHint>,
+) {
+    // Only generate hints if there are positional arguments — named
+    // arguments already show the parameter name explicitly.
+    let has_positional = fc
+        .arguments
+        .iter()
+        .any(|a| matches!(a, Argument::Positional(_)));
+    if !has_positional {
+        return;
+    }
+
+    // Resolve the function name in the symbol table.
+    let func_name = fc.name.as_str();
+    let global_scope = doc.analysis.symbols.global_scope_id();
+    let params = match doc.analysis.symbols.resolve(global_scope, &func_name) {
+        Some((_, sym)) => match &sym.kind {
+            st_semantics::scope::SymbolKind::Function { params, .. } => params.clone(),
+            st_semantics::scope::SymbolKind::FunctionBlock { params, .. } => params.clone(),
+            st_semantics::scope::SymbolKind::Program { params, .. } => params.clone(),
+            _ => return,
+        },
+        None => return,
+    };
+
+    // Match positional arguments to parameters by index.
+    let mut param_idx = 0;
+    for arg in &fc.arguments {
+        let Argument::Positional(expr) = arg else {
+            // Named arguments use the given name; skip incrementing the
+            // positional index.
+            continue;
+        };
+        if param_idx >= params.len() {
+            break;
+        }
+        let param = &params[param_idx];
+        param_idx += 1;
+
+        // Don't show a hint if the argument text matches the parameter
+        // name (e.g., `Helper(x)` where the parameter is also `x`).
+        let arg_text = &doc.source[expr.range().start..expr.range().end];
+        if arg_text.trim().eq_ignore_ascii_case(&param.name) {
+            continue;
+        }
+
+        hints.push(InlayHint {
+            position: doc.offset_to_position(expr.range().start),
+            label: InlayHintLabel::String(format!("{}:", param.name)),
+            kind: Some(InlayHintKind::PARAMETER),
+            text_edits: None,
+            tooltip: Some(InlayHintTooltip::String(format!(
+                "{}: {}",
+                param.name,
+                param.ty.display_name()
+            ))),
+            padding_left: None,
+            padding_right: Some(true),
+            data: None,
+        });
+    }
+}
+
+/// Collect every AST node range that contains `offset`, sorted from
+/// outermost (SourceFile) to innermost (deepest nested statement/expression).
+fn collect_containing_ranges(source_file: &SourceFile, offset: usize) -> Vec<ast::TextRange> {
+    let mut ranges = Vec::new();
+
+    // Level 0: whole file
+    if contains(source_file.range, offset) {
+        ranges.push(source_file.range);
+    }
+
+    for item in &source_file.items {
+        let item_range = top_level_range(item);
+        if !contains(item_range, offset) {
+            continue;
+        }
+        ranges.push(item_range);
+
+        // Recurse into the item's children (var blocks, body statements, methods)
+        match item {
+            ast::TopLevelItem::Program(p) => {
+                collect_var_blocks(&p.var_blocks, offset, &mut ranges);
+                collect_statements(&p.body, offset, &mut ranges);
+            }
+            ast::TopLevelItem::Function(f) => {
+                collect_var_blocks(&f.var_blocks, offset, &mut ranges);
+                collect_statements(&f.body, offset, &mut ranges);
+            }
+            ast::TopLevelItem::FunctionBlock(fb) => {
+                collect_var_blocks(&fb.var_blocks, offset, &mut ranges);
+                collect_statements(&fb.body, offset, &mut ranges);
+            }
+            ast::TopLevelItem::Class(cls) => {
+                collect_var_blocks(&cls.var_blocks, offset, &mut ranges);
+                for method in &cls.methods {
+                    if contains(method.range, offset) {
+                        ranges.push(method.range);
+                        collect_var_blocks(&method.var_blocks, offset, &mut ranges);
+                        collect_statements(&method.body, offset, &mut ranges);
+                    }
+                }
+            }
+            ast::TopLevelItem::Interface(iface) => {
+                if contains(iface.range, offset) {
+                    ranges.push(iface.range);
+                }
+            }
+            ast::TopLevelItem::TypeDeclaration(td) => {
+                if contains(td.range, offset) {
+                    ranges.push(td.range);
+                }
+            }
+            ast::TopLevelItem::GlobalVarDeclaration(vb) => {
+                // The item_range already covers the whole VarBlock.
+                collect_var_decls(&vb.declarations, offset, &mut ranges);
+            }
+        }
+    }
+
+    ranges
+}
+
+fn collect_var_blocks(
+    blocks: &[ast::VarBlock],
+    offset: usize,
+    ranges: &mut Vec<ast::TextRange>,
+) {
+    for vb in blocks {
+        if contains(vb.range, offset) {
+            ranges.push(vb.range);
+            collect_var_decls(&vb.declarations, offset, ranges);
+        }
+    }
+}
+
+fn collect_var_decls(
+    decls: &[ast::VarDeclaration],
+    offset: usize,
+    ranges: &mut Vec<ast::TextRange>,
+) {
+    for decl in decls {
+        if contains(decl.range, offset) {
+            ranges.push(decl.range);
+        }
+    }
+}
+
+fn collect_statements(
+    stmts: &[ast::Statement],
+    offset: usize,
+    ranges: &mut Vec<ast::TextRange>,
+) {
+    for stmt in stmts {
+        let r = stmt.range();
+        if !contains(r, offset) {
+            continue;
+        }
+        ranges.push(r);
+
+        // Recurse into compound statements
+        match stmt {
+            ast::Statement::If(IfStmt {
+                then_body,
+                elsif_clauses,
+                else_body,
+                ..
+            }) => {
+                collect_statements(then_body, offset, ranges);
+                for ElsifClause { body, range, .. } in elsif_clauses {
+                    if contains(*range, offset) {
+                        ranges.push(*range);
+                        collect_statements(body, offset, ranges);
+                    }
+                }
+                if let Some(els) = else_body {
+                    collect_statements(els, offset, ranges);
+                }
+            }
+            ast::Statement::For(ForStmt { body, .. }) => {
+                collect_statements(body, offset, ranges);
+            }
+            ast::Statement::While(WhileStmt { body, .. }) => {
+                collect_statements(body, offset, ranges);
+            }
+            ast::Statement::Repeat(RepeatStmt { body, .. }) => {
+                collect_statements(body, offset, ranges);
+            }
+            ast::Statement::Case(ast::CaseStmt {
+                branches,
+                else_body,
+                ..
+            }) => {
+                for branch in branches {
+                    if contains(branch.range, offset) {
+                        ranges.push(branch.range);
+                        collect_statements(&branch.body, offset, ranges);
+                    }
+                }
+                if let Some(els) = else_body {
+                    collect_statements(els, offset, ranges);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn top_level_range(item: &ast::TopLevelItem) -> ast::TextRange {
+    match item {
+        ast::TopLevelItem::Program(p) => p.range,
+        ast::TopLevelItem::Function(f) => f.range,
+        ast::TopLevelItem::FunctionBlock(fb) => fb.range,
+        ast::TopLevelItem::Class(c) => c.range,
+        ast::TopLevelItem::Interface(i) => i.range,
+        ast::TopLevelItem::TypeDeclaration(t) => t.range,
+        ast::TopLevelItem::GlobalVarDeclaration(v) => v.range,
+    }
+}
+
+fn contains(range: ast::TextRange, offset: usize) -> bool {
+    offset >= range.start && offset <= range.end
+}
+
+/// Find the contiguous word (identifier or number) surrounding `offset`.
+/// Returns the byte range of the word, or None if the cursor is on whitespace
+/// or a punctuation character.
+fn find_word_range(source: &str, offset: usize) -> Option<ast::TextRange> {
+    let bytes = source.as_bytes();
+    if offset >= bytes.len() {
+        return None;
+    }
+    let at = bytes[offset];
+    if !at.is_ascii_alphanumeric() && at != b'_' {
+        return None;
+    }
+    let mut start = offset;
+    while start > 0
+        && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
+    {
+        start -= 1;
+    }
+    let mut end = offset;
+    while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+        end += 1;
+    }
+    Some(ast::TextRange::new(start, end))
+}
+
+// =============================================================================
+// On-type formatting helpers
+// =============================================================================
+
+/// Extract the leading whitespace of a line.
+fn leading_whitespace(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    &line[..line.len() - trimmed.len()]
+}
+
+// =============================================================================
+// Linked Editing Range helpers
+// =============================================================================
+
+/// The set of IEC 61131-3 keyword pairs we support for linked editing.
+/// Each entry: (opening keyword, closing keyword).
+const KEYWORD_PAIRS: &[(&str, &str)] = &[
+    ("IF", "END_IF"),
+    ("FOR", "END_FOR"),
+    ("WHILE", "END_WHILE"),
+    ("REPEAT", "END_REPEAT"),
+    ("CASE", "END_CASE"),
+    ("PROGRAM", "END_PROGRAM"),
+    ("FUNCTION", "END_FUNCTION"),
+    ("FUNCTION_BLOCK", "END_FUNCTION_BLOCK"),
+    ("VAR", "END_VAR"),
+    ("VAR_INPUT", "END_VAR"),
+    ("VAR_OUTPUT", "END_VAR"),
+    ("VAR_IN_OUT", "END_VAR"),
+    ("VAR_GLOBAL", "END_VAR"),
+    ("VAR_EXTERNAL", "END_VAR"),
+    ("CLASS", "END_CLASS"),
+    ("METHOD", "END_METHOD"),
+    ("INTERFACE", "END_INTERFACE"),
+    ("TYPE", "END_TYPE"),
+    ("STRUCT", "END_STRUCT"),
+];
+
+/// Find the opening and closing keyword ranges for a block, given the
+/// cursor is on `word` (uppercased) at `offset`. Uses the AST to scope the
+/// search to the correct nesting level, then extracts keyword byte ranges
+/// from the source text.
+fn find_keyword_pair(
+    ast: &SourceFile,
+    source: &str,
+    offset: usize,
+    word: &str,
+) -> Option<(ast::TextRange, ast::TextRange)> {
+    // Determine which keyword pair this word belongs to.
+    let (open_kw, close_kw) = KEYWORD_PAIRS
+        .iter()
+        .find(|(o, c)| *o == word || *c == word)
+        .copied()?;
+
+    // Walk the AST to find the innermost block of the right type that
+    // contains the cursor offset.
+    let block_range = find_innermost_block_range(ast, source, offset, open_kw, close_kw)?;
+
+    // Extract the opening keyword position: it's at the very start of the
+    // block's range (possibly after indentation whitespace within the
+    // block's byte range).
+    let block_src = &source[block_range.start..block_range.end];
+    let trimmed_start = block_src.len() - block_src.trim_start().len();
+    let open_start = block_range.start + trimmed_start;
+    let open_end = open_start + open_kw.len();
+
+    // Verify the source actually has the expected opening keyword.
+    let open_text = source
+        .get(open_start..open_end)
+        .unwrap_or("")
+        .to_uppercase();
+    if open_text != open_kw {
+        return None;
+    }
+
+    // Extract the closing keyword position: search backward from the
+    // block's end, skipping `;`, whitespace, and looking for the keyword.
+    let close_start = source[..block_range.end]
+        .to_uppercase()
+        .rfind(close_kw)?;
+    let close_end = close_start + close_kw.len();
+
+    // Sanity: closing must be inside the block range and after the opening.
+    if close_start < open_end || close_end > block_range.end {
+        return None;
+    }
+
+    Some((
+        ast::TextRange::new(open_start, open_end),
+        ast::TextRange::new(close_start, close_end),
+    ))
+}
+
+/// Walk the AST to find the innermost block whose open/close keywords
+/// match `open_kw`/`close_kw` and whose range contains `offset`.
+fn find_innermost_block_range(
+    ast: &SourceFile,
+    source: &str,
+    offset: usize,
+    open_kw: &str,
+    close_kw: &str,
+) -> Option<ast::TextRange> {
+    let mut best: Option<ast::TextRange> = None;
+
+    // Check top-level items
+    for item in &ast.items {
+        let item_range = top_level_range(item);
+        if !contains(item_range, offset) {
+            continue;
+        }
+
+        // Does this item's keyword match?
+        if keyword_at_range_start(source, item_range, open_kw) {
+            best = narrower(best, item_range);
+        }
+
+        // Check VAR blocks inside POUs
+        let var_blocks: &[ast::VarBlock] = match item {
+            ast::TopLevelItem::Program(p) => &p.var_blocks,
+            ast::TopLevelItem::Function(f) => &f.var_blocks,
+            ast::TopLevelItem::FunctionBlock(fb) => &fb.var_blocks,
+            ast::TopLevelItem::Class(cls) => &cls.var_blocks,
+            _ => &[],
+        };
+        for vb in var_blocks {
+            if contains(vb.range, offset) && keyword_at_range_start(source, vb.range, open_kw) {
+                best = narrower(best, vb.range);
+            }
+        }
+
+        // Check statements recursively
+        let bodies: Vec<&[ast::Statement]> = match item {
+            ast::TopLevelItem::Program(p) => vec![&p.body],
+            ast::TopLevelItem::Function(f) => vec![&f.body],
+            ast::TopLevelItem::FunctionBlock(fb) => vec![&fb.body],
+            ast::TopLevelItem::Class(cls) => {
+                cls.methods.iter().map(|m| m.body.as_slice()).collect()
+            }
+            _ => vec![],
+        };
+        for body in bodies {
+            if let Some(r) = find_stmt_block(body, source, offset, open_kw, close_kw) {
+                best = narrower(best, r);
+            }
+        }
+    }
+
+    best
+}
+
+fn find_stmt_block(
+    stmts: &[ast::Statement],
+    source: &str,
+    offset: usize,
+    open_kw: &str,
+    _close_kw: &str,
+) -> Option<ast::TextRange> {
+    let mut best: Option<ast::TextRange> = None;
+    for stmt in stmts {
+        let r = stmt.range();
+        if !contains(r, offset) {
+            continue;
+        }
+        if keyword_at_range_start(source, r, open_kw) {
+            best = narrower(best, r);
+        }
+        // Recurse into compound statements
+        let sub_bodies: Vec<&[ast::Statement]> = match stmt {
+            ast::Statement::If(s) => {
+                let mut v: Vec<&[ast::Statement]> = vec![&s.then_body];
+                for clause in &s.elsif_clauses {
+                    v.push(&clause.body);
+                }
+                if let Some(els) = &s.else_body {
+                    v.push(els);
+                }
+                v
+            }
+            ast::Statement::For(s) => vec![&s.body],
+            ast::Statement::While(s) => vec![&s.body],
+            ast::Statement::Repeat(s) => vec![&s.body],
+            ast::Statement::Case(s) => {
+                let mut v: Vec<&[ast::Statement]> = Vec::new();
+                for branch in &s.branches {
+                    v.push(&branch.body);
+                }
+                if let Some(els) = &s.else_body {
+                    v.push(els);
+                }
+                v
+            }
+            _ => vec![],
+        };
+        for body in sub_bodies {
+            if let Some(r) = find_stmt_block(body, source, offset, open_kw, _close_kw) {
+                best = narrower(best, r);
+            }
+        }
+    }
+    best
+}
+
+/// Check if the source text at the start of `range` (after trimming
+/// leading whitespace) begins with `keyword` (case-insensitive).
+fn keyword_at_range_start(source: &str, range: ast::TextRange, keyword: &str) -> bool {
+    let slice = &source[range.start..range.end.min(source.len())];
+    let trimmed = slice.trim_start();
+    trimmed
+        .get(..keyword.len())
+        .is_some_and(|s| s.eq_ignore_ascii_case(keyword))
+}
+
+/// Return the narrower of two optional ranges (smaller span wins —
+/// represents the innermost nesting level).
+fn narrower(a: Option<ast::TextRange>, b: ast::TextRange) -> Option<ast::TextRange> {
+    match a {
+        Some(existing) if (existing.end - existing.start) <= (b.end - b.start) => Some(existing),
+        _ => Some(b),
+    }
+}
+
+/// True if the (uppercased, trimmed) line starts with a keyword that should
+/// increase the indent of the NEXT line. Covers IEC 61131-3 block openers.
+fn starts_with_opener(upper: &str) -> bool {
+    // POU declarations
+    upper.starts_with("PROGRAM ")
+        || upper.starts_with("FUNCTION ")
+        || upper.starts_with("FUNCTION_BLOCK ")
+        || upper.starts_with("CLASS ")
+        || upper.starts_with("METHOD ")
+        || upper.starts_with("INTERFACE ")
+        // Variable blocks
+        || upper.starts_with("VAR")
+            && (upper.len() == 3
+                || upper.as_bytes().get(3).is_some_and(|b| !b.is_ascii_alphanumeric()))
+        // Control flow
+        || upper.ends_with("THEN")
+        || upper.ends_with("DO")
+            && (upper.starts_with("FOR ") || upper.starts_with("WHILE "))
+        || upper.starts_with("REPEAT")
+        || upper.starts_with("ELSE")
+            && (upper.len() == 4
+                || upper.as_bytes().get(4).is_some_and(|b| !b.is_ascii_alphanumeric()))
+        || upper.ends_with("OF") && upper.starts_with("CASE ")
+        // Type declarations
+        || upper.starts_with("STRUCT")
+        || upper.starts_with("TYPE")
+            && (upper.len() == 4
+                || upper.as_bytes().get(4).is_some_and(|b| !b.is_ascii_alphanumeric()))
 }

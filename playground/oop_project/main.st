@@ -51,6 +51,7 @@ VAR
     heater     : INT := 0;
     alarmFlag  : INT := 0;
     alarmTrips : INT := 0;
+    temp : BOOL := FALSE;
 END_VAR
     cycle := cycle + 1;
     g_cycle := cycle;
@@ -60,13 +61,16 @@ END_VAR
         controller.Configure(sp := 500, gain := 15, oMin := 0, oMax := 100);
         controller.Enable();
         highAlarm.Configure(limit := 800, hyst := 50);
+        highAlarm.Configure(limit := 100, hyst := 200);
     END_IF;
 
-    controller.Configure();
+    temp := cycle.%X0;
+    temp := cycle.%X1;
+    temp := cycle.%X2;
+    temp := cycle.%X3;
+    temp := cycle.%X4;
 
-    IF cycle = 2 THEN
-        controller.Configure();
-    END_IF;
+    controller.Compute(pv := 12);
 
     // ── Simulate temperature sensor ──
     // Base trend: ramp up then stabilize

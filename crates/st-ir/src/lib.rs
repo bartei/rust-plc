@@ -66,6 +66,58 @@ pub struct VarSlot {
     pub offset: usize,
     pub size: usize,
     pub retain: bool,
+    /// Original integer width / signedness from the source declaration.
+    /// Used by the VM at store time to wrap values according to two's
+    /// complement semantics — so a SINT cycle counter wraps at 127→-128
+    /// instead of growing into the i64 range. `IntWidth::None` for
+    /// non-integer slots, including LINT/ULINT (which already match the
+    /// VM's native width).
+    #[serde(default)]
+    pub int_width: IntWidth,
+}
+
+/// Original integer width + signedness for a variable slot. The VM uses
+/// this to narrow stored values to the declared bit width via two's
+/// complement wrapping, matching the behavior of every IEC 61131-3 PLC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum IntWidth {
+    /// Not an integer (or no narrowing needed — LINT/ULINT match the
+    /// VM's native i64/u64 width).
+    #[default]
+    None,
+    /// 8-bit signed (SINT, range -128..127).
+    I8,
+    /// 8-bit unsigned (USINT, BYTE, range 0..255).
+    U8,
+    /// 16-bit signed (INT, range -32768..32767).
+    I16,
+    /// 16-bit unsigned (UINT, WORD, range 0..65535).
+    U16,
+    /// 32-bit signed (DINT).
+    I32,
+    /// 32-bit unsigned (UDINT, DWORD).
+    U32,
+    /// 64-bit signed (LINT) — passthrough, no narrowing needed.
+    I64,
+    /// 64-bit unsigned (ULINT, LWORD) — passthrough.
+    U64,
+}
+
+impl IntWidth {
+    /// Display name for this width as a PLC type, e.g. "SINT" / "UDINT".
+    pub fn display_name(self) -> Option<&'static str> {
+        match self {
+            IntWidth::None => None,
+            IntWidth::I8 => Some("SINT"),
+            IntWidth::U8 => Some("USINT"),
+            IntWidth::I16 => Some("INT"),
+            IntWidth::U16 => Some("UINT"),
+            IntWidth::I32 => Some("DINT"),
+            IntWidth::U32 => Some("UDINT"),
+            IntWidth::I64 => Some("LINT"),
+            IntWidth::U64 => Some("ULINT"),
+        }
+    }
 }
 
 /// Runtime type tag for variables.

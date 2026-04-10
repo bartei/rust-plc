@@ -70,14 +70,27 @@ fn find_double_crlf(data: &[u8]) -> Option<usize> {
 }
 
 /// Helper: build a DAP request message.
+///
+/// Note about `arguments`: the dap crate's `Command` enum is deserialized
+/// with `#[serde(tag = "command", content = "arguments")]`. Unit variants
+/// like `configurationDone` MUST omit the `arguments` field; tuple variants
+/// like `disconnect(DisconnectArguments)` MUST include it (use `Some(json!({}))`
+/// for "no meaningful args"). The set of unit variants is small and stable;
+/// see `UNIT_COMMANDS` below.
 fn dap_request(seq: i64, command: &str, arguments: Option<Value>) -> Value {
+    const UNIT_COMMANDS: &[&str] = &["configurationDone", "loadedSources", "threads"];
     let mut msg = json!({
         "seq": seq,
         "type": "request",
         "command": command,
     });
+    let is_unit = UNIT_COMMANDS.contains(&command);
     if let Some(args) = arguments {
         msg["arguments"] = args;
+    } else if !is_unit {
+        // Tuple variant with no caller-supplied args: send an empty object
+        // so the dap crate's tag/content deserializer accepts the message.
+        msg["arguments"] = json!({});
     }
     msg
 }
@@ -213,7 +226,50 @@ fn test_threads() {
 }
 
 #[test]
-fn test_continue_runs_to_completion() {
+fn test_continue_interrupted_by_pause() {
+    // Continue runs forever (PLC scan loop). A queued Pause should be picked
+    // up by process_inflight_requests between cycles, set the VM's pause
+    // flag, and the next iteration's step should Halt with reason "pause".
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(4, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(5, "pause", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "disconnect", None),
+        ],
+    );
+
+    let cont_resp = find_response(&messages, 4).expect("Expected continue response");
+    assert!(cont_resp["success"].as_bool().unwrap_or(false));
+
+    // The Pause should have triggered a Stopped event with reason "pause".
+    let stopped = find_events(&messages, "stopped");
+    let pause_stops: Vec<_> = stopped
+        .iter()
+        .filter(|e| e["body"]["reason"].as_str() == Some("pause"))
+        .collect();
+    assert!(
+        !pause_stops.is_empty(),
+        "Expected a Stopped(pause) event, got: {:?}",
+        stopped
+            .iter()
+            .map(|e| e["body"]["reason"].as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let pause_resp = find_response(&messages, 5).expect("Expected pause response");
+    assert!(pause_resp["success"].as_bool().unwrap_or(false));
+}
+
+#[test]
+fn test_continue_then_disconnect() {
+    // PLC programs run forever (cyclic scan) — `continue` should run until
+    // the user disconnects, sets a breakpoint, or pauses. The disconnect
+    // request queued behind the continue should interrupt the run loop and
+    // cleanly tear down the session.
     let messages = run_dap_session(
         SIMPLE_PROGRAM,
         &[
@@ -227,10 +283,9 @@ fn test_continue_runs_to_completion() {
 
     let resp = find_response(&messages, 4).expect("Expected continue response");
     assert!(resp["success"].as_bool().unwrap_or(false));
-
-    // Program should terminate
-    let terminated = find_events(&messages, "terminated");
-    assert!(!terminated.is_empty(), "Expected terminated event after continue");
+    let disc_resp = find_response(&messages, 5).expect("Expected disconnect response");
+    assert!(disc_resp["success"].as_bool().unwrap_or(false));
+    // No spontaneous Terminated event — Continue is interruptible-only now.
 }
 
 #[test]
@@ -746,6 +801,374 @@ fn test_cycle_info() {
     assert!(result.contains("Instructions"), "Expected cycle info: {result}");
 }
 
+// =============================================================================
+// Cycle stats + telemetry tests (Tier 1 + Tier 2 cycle-time feedback)
+// =============================================================================
+
+/// Find every `output` event whose category is `telemetry` and whose `output`
+/// sentinel is `plc/cycleStats`. Returns the structured `data` payloads.
+fn find_cycle_stats_payloads(messages: &[Value]) -> Vec<&Value> {
+    messages
+        .iter()
+        .filter_map(|m| {
+            if m["type"].as_str() != Some("event")
+                || m["event"].as_str() != Some("output")
+            {
+                return None;
+            }
+            let body = &m["body"];
+            if body["category"].as_str() != Some("telemetry") {
+                return None;
+            }
+            if body["output"].as_str() != Some("plc/cycleStats") {
+                return None;
+            }
+            Some(&body["data"])
+        })
+        .collect()
+}
+
+/// Parse the `Scan cycles: N` field out of `scanCycleInfo`'s formatted result.
+fn parse_cycle_count(result: &str) -> Option<u64> {
+    // "Scan cycles: 1234 | Instructions/cycle: ..."
+    let after = result.strip_prefix("Scan cycles: ")?;
+    let end = after.find(' ').unwrap_or(after.len());
+    after[..end].parse().ok()
+}
+
+#[test]
+fn test_cycle_stats_increments_after_continue() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(4, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(5, "evaluate", Some(json!({ "expression": "scanCycleInfo" }))),
+            dap_request(6, "disconnect", None),
+        ],
+    );
+
+    let resp = find_response(&messages, 5).expect("Expected scanCycleInfo response");
+    let result = resp["body"]["result"].as_str().unwrap_or("");
+    let count = parse_cycle_count(result)
+        .unwrap_or_else(|| panic!("Could not parse cycle count from: {result}"));
+    assert!(
+        count > 0,
+        "Cycle count should be > 0 after Continue, got {count}: {result}"
+    );
+    // SIMPLE_PROGRAM has no infinite loop, so the DAP loop runs many cycles
+    // until it hits the 100k safety cap. We just need *some* timing.
+    assert!(
+        result.contains("last:") && result.contains("min/max/avg:"),
+        "Expected timing fields in result: {result}"
+    );
+}
+
+#[test]
+fn test_cycle_stats_telemetry_event_schema() {
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(4, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(5, "disconnect", None),
+        ],
+    );
+
+    let payloads = find_cycle_stats_payloads(&messages);
+    assert!(
+        !payloads.is_empty(),
+        "Expected at least one plc/cycleStats telemetry event after Continue"
+    );
+
+    // Validate the schema of the most recent payload — every required field
+    // must be present and the right JSON type. Future schema bumps should
+    // update this assertion deliberately.
+    let last = payloads.last().unwrap();
+    assert_eq!(last["schema"].as_u64(), Some(3), "schema field");
+    assert!(last["cycle_count"].is_u64(), "cycle_count must be u64");
+    assert!(last["last_us"].is_u64(), "last_us must be u64");
+    assert!(last["min_us"].is_u64(), "min_us must be u64");
+    assert!(last["max_us"].is_u64(), "max_us must be u64");
+    assert!(last["avg_us"].is_u64(), "avg_us must be u64");
+    assert!(
+        last["instructions_per_cycle"].is_u64(),
+        "instructions_per_cycle must be u64"
+    );
+    // watchdog_us is Option<u64> — null when unset
+    assert!(
+        last["watchdog_us"].is_null() || last["watchdog_us"].is_u64(),
+        "watchdog_us must be null or u64"
+    );
+    assert!(last["devices_ok"].is_u64(), "devices_ok must be u64");
+    assert!(last["devices_err"].is_u64(), "devices_err must be u64");
+
+    // Schema v2: period + jitter fields
+    assert!(
+        last["target_us"].is_null() || last["target_us"].is_u64(),
+        "target_us must be null or u64"
+    );
+    assert!(last["last_period_us"].is_u64(), "last_period_us must be u64");
+    assert!(last["min_period_us"].is_u64(), "min_period_us must be u64");
+    assert!(last["max_period_us"].is_u64(), "max_period_us must be u64");
+    assert!(last["jitter_max_us"].is_u64(), "jitter_max_us must be u64");
+
+    // Schema v3: variables array. With the watch-list model the array is
+    // empty by default — the panel must opt-in via `addWatch` / `watchVariables`.
+    assert!(last["variables"].is_array(), "variables must be an array");
+    assert!(
+        last["variables"].as_array().unwrap().is_empty(),
+        "variables should be empty by default — opt-in via addWatch"
+    );
+
+    // Sanity: with no comm devices wired up, both counts should be zero.
+    assert_eq!(last["devices_ok"].as_u64(), Some(0));
+    assert_eq!(last["devices_err"].as_u64(), Some(0));
+    // After Continue we definitely ran at least one cycle.
+    assert!(last["cycle_count"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn test_watch_list_flow() {
+    // Verify the addWatch / removeWatch / clearWatch evaluate commands
+    // round-trip and that the variables array reflects the watch list.
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            // Add Main.x to the watch list — handle_watch_add will push a
+            // fresh telemetry event reflecting the new list.
+            dap_request(4, "evaluate", Some(json!({ "expression": "addWatch Main.x" }))),
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "disconnect", None),
+        ],
+    );
+
+    let payloads = find_cycle_stats_payloads(&messages);
+    assert!(!payloads.is_empty(), "Expected telemetry events");
+    let last = payloads.last().unwrap();
+    let vars = last["variables"].as_array().unwrap();
+    let var_names: Vec<&str> = vars
+        .iter()
+        .filter_map(|v| v["name"].as_str())
+        .collect();
+    assert!(
+        var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.x")),
+        "Expected watched 'Main.x' in variables, got: {var_names:?}"
+    );
+    // We did NOT add Main.y, so it should NOT appear.
+    assert!(
+        !var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.y")),
+        "Did not expect un-watched 'Main.y' in variables"
+    );
+}
+
+#[test]
+fn test_force_does_not_freeze_other_watched_vars() {
+    // Regression for the user-reported "force one variable, all the
+    // others stop updating" scenario. We watch three variables, force
+    // ONE, run a cycle, and verify the others got updated by the
+    // program despite the force being active.
+    //
+    // Note: with the in-memory test harness all requests are buffered
+    // up front, so a long Continue is interrupted after exactly one
+    // cycle by the queued Disconnect. We assert "values reflect at
+    // least one program write" rather than "advanced past N".
+    let source = "\
+VAR_GLOBAL
+    di_0 : BOOL := FALSE;
+    counter : INT := 0;
+    state : INT := 0;
+END_VAR
+PROGRAM Main
+    counter := counter + 1;
+    state := 42;
+END_PROGRAM
+";
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(
+                4,
+                "evaluate",
+                Some(json!({ "expression": "watchVariables di_0,counter,state" })),
+            ),
+            dap_request(5, "evaluate", Some(json!({ "expression": "force di_0 = true" }))),
+            dap_request(6, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(7, "disconnect", None),
+        ],
+    );
+
+    let payloads = find_cycle_stats_payloads(&messages);
+    assert!(!payloads.is_empty(), "Expected telemetry events");
+    let last = payloads.last().unwrap();
+    let vars = last["variables"].as_array().unwrap();
+    let by_name: std::collections::HashMap<String, &serde_json::Value> = vars
+        .iter()
+        .filter_map(|v| v["name"].as_str().map(|n| (n.to_uppercase(), v)))
+        .collect();
+
+    // The forced variable shows TRUE
+    assert_eq!(
+        by_name.get("DI_0").map(|v| v["value"].as_str().unwrap_or("")),
+        Some("TRUE"),
+        "di_0 should be the forced TRUE, got: {:?}",
+        by_name.get("DI_0")
+    );
+    // Counter must have at least 1 (the program's `counter := counter + 1`
+    // ran at least once after the force)
+    let counter_val: i64 = by_name
+        .get("COUNTER")
+        .and_then(|v| v["value"].as_str())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    assert!(
+        counter_val >= 1,
+        "counter should have advanced after the cycle, got {counter_val} — \
+         force broke other variable updates"
+    );
+    // state must have been written to 42 (the program assigns it unconditionally)
+    let state_val: i64 = by_name
+        .get("STATE")
+        .and_then(|v| v["value"].as_str())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    assert_eq!(
+        state_val, 42,
+        "state should be 42 (unconditional program write) — \
+         force broke unrelated variable updates"
+    );
+}
+
+#[test]
+fn test_var_catalog_emitted_on_launch() {
+    // The DAP pushes a `plc/varCatalog` telemetry event right after launch
+    // so the Monitor panel can populate its autocomplete dropdown.
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "disconnect", None),
+        ],
+    );
+
+    let catalog_events: Vec<&serde_json::Value> = messages
+        .iter()
+        .filter_map(|m| {
+            if m["type"].as_str() != Some("event")
+                || m["event"].as_str() != Some("output")
+            {
+                return None;
+            }
+            let body = &m["body"];
+            if body["category"].as_str() != Some("telemetry")
+                || body["output"].as_str() != Some("plc/varCatalog")
+            {
+                return None;
+            }
+            Some(&body["data"])
+        })
+        .collect();
+
+    assert!(
+        !catalog_events.is_empty(),
+        "Expected at least one plc/varCatalog telemetry event after launch"
+    );
+    let catalog = catalog_events[0];
+    assert_eq!(catalog["schema"].as_u64(), Some(1));
+    let vars = catalog["variables"].as_array().unwrap();
+    let names: Vec<&str> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("Main.x")),
+        "Expected 'Main.x' in catalog, got: {names:?}"
+    );
+}
+
+#[test]
+fn test_cycle_stats_force_flush_on_step() {
+    // SIMPLE_PROGRAM has 3 statements. Three step-overs are enough to step
+    // through the whole cycle and trigger the wrap-around path, which marks
+    // a cycle as completed and triggers the post-loop force-flush — even
+    // though 1 cycle is far below the periodic interval (default 20).
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(4, "next", Some(json!({ "threadId": 1 }))),
+            dap_request(5, "next", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "next", Some(json!({ "threadId": 1 }))),
+            dap_request(7, "disconnect", None),
+        ],
+    );
+
+    let payloads = find_cycle_stats_payloads(&messages);
+    assert!(
+        !payloads.is_empty(),
+        "Expected force-flushed plc/cycleStats event after stepping through a full cycle"
+    );
+    // The flush should reflect exactly one completed cycle (not 20+).
+    let last = payloads.last().unwrap();
+    let count = last["cycle_count"].as_u64().unwrap_or(0);
+    assert!(
+        (1..20).contains(&count),
+        "Force-flushed event should fire below the periodic interval, got cycle_count={count}"
+    );
+}
+
+#[test]
+fn test_cycle_stats_invariants_after_continue() {
+    // Note: with the interruptible run loop, a queued Disconnect interrupts
+    // Continue after exactly one cycle, so we don't get multiple periodic
+    // emissions in this test setup. We test the post-loop force-flush
+    // payload's invariants instead, which is the same code path.
+    let messages = run_dap_session(
+        SIMPLE_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(4, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(5, "disconnect", None),
+        ],
+    );
+
+    let payloads = find_cycle_stats_payloads(&messages);
+    assert!(!payloads.is_empty(), "Expected at least one telemetry event");
+
+    let last = payloads.last().unwrap();
+    let cycle_count = last["cycle_count"].as_u64().unwrap();
+    let min_us = last["min_us"].as_u64().unwrap();
+    let max_us = last["max_us"].as_u64().unwrap();
+    let avg_us = last["avg_us"].as_u64().unwrap();
+    let last_us = last["last_us"].as_u64().unwrap();
+
+    assert!(cycle_count >= 1, "Expected ≥1 cycle, got {cycle_count}");
+    assert!(
+        min_us <= avg_us,
+        "Invariant: min ({min_us}) ≤ avg ({avg_us})"
+    );
+    assert!(
+        avg_us <= max_us,
+        "Invariant: avg ({avg_us}) ≤ max ({max_us})"
+    );
+    assert!(
+        last_us <= max_us,
+        "Invariant: last ({last_us}) ≤ max ({max_us})"
+    );
+}
+
 #[test]
 fn test_force_bool_variable() {
     let messages = run_dap_session(
@@ -1008,4 +1431,611 @@ END_PROGRAM
     let result_str = eval_resp["body"]["result"].as_str().unwrap_or("<missing>");
     eprintln!("g_result = {result_str}");
     assert_eq!(result_str, "42", "g_result should be 42 (10+32)");
+}
+
+// =============================================================================
+// FB instance field resolution in debugger
+// =============================================================================
+
+#[test]
+fn test_evaluate_fb_field_while_paused_inside_fb() {
+    // When paused inside a FillController-like FB, the user hovers over
+    // `counter.Q` or types it in the Watch panel. The DAP must resolve
+    // this dotted path by looking up the CTU instance's state from the
+    // current frame context.
+    let source = "\
+FUNCTION_BLOCK MyFB\n\
+VAR_INPUT cmd : BOOL; END_VAR\n\
+VAR\n\
+    ctr : CTU;\n\
+END_VAR\n\
+    ctr(CU := cmd, RESET := FALSE, PV := 5);\n\
+END_FUNCTION_BLOCK\n\
+\n\
+PROGRAM Main\n\
+VAR\n\
+    fb : MyFB;\n\
+END_VAR\n\
+    fb(cmd := TRUE);\n\
+END_PROGRAM\n";
+
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            // Set breakpoint on the ctr() call line inside MyFB (line 6)
+            dap_request(3, "setBreakpoints", Some(json!({
+                "source": { "path": "test.st" },
+                "breakpoints": [{ "line": 6 }]
+            }))),
+            dap_request(4, "configurationDone", None),
+            // Continue — should hit breakpoint inside MyFB
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            // Now evaluate `ctr.Q` while paused inside MyFB
+            dap_request(6, "evaluate", Some(json!({
+                "expression": "ctr.Q",
+                "frameId": 0
+            }))),
+            // Also evaluate a flat local
+            dap_request(7, "evaluate", Some(json!({
+                "expression": "cmd",
+                "frameId": 0
+            }))),
+            // Check the Variables/Locals scope
+            dap_request(8, "scopes", Some(json!({ "frameId": 0 }))),
+            dap_request(9, "variables", Some(json!({ "variablesReference": 1000 }))),
+            dap_request(10, "disconnect", None),
+        ],
+    );
+
+    // ctr.Q should resolve (not <unknown>)
+    let eval_resp = find_response(&messages, 6).unwrap();
+    let ctr_q = eval_resp["body"]["result"].as_str().unwrap_or("<missing>");
+    eprintln!("ctr.Q = {ctr_q}");
+    assert_ne!(
+        ctr_q, "<unknown>",
+        "ctr.Q should resolve to a value when paused inside MyFB, got <unknown>"
+    );
+
+    // cmd should also resolve
+    let cmd_resp = find_response(&messages, 7).unwrap();
+    let cmd_val = cmd_resp["body"]["result"].as_str().unwrap_or("<missing>");
+    eprintln!("cmd = {cmd_val}");
+    assert_ne!(cmd_val, "<unknown>", "cmd should resolve");
+
+    // The locals scope should include "ctr" as an expandable FB instance
+    // (variablesReference > 0), NOT flat "ctr.Q" / "ctr.CV" entries.
+    let vars_resp = find_response(&messages, 9).unwrap();
+    let vars = vars_resp["body"]["variables"].as_array().unwrap();
+    let var_names: Vec<&str> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+    eprintln!("Locals: {var_names:?}");
+    assert!(
+        var_names.iter().any(|n| n.eq_ignore_ascii_case("ctr")),
+        "Locals should include 'ctr' as a FB instance node, got: {var_names:?}"
+    );
+    // ctr should have variablesReference > 0 (expandable)
+    let ctr_var = vars.iter().find(|v| {
+        v["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("ctr"))
+    }).unwrap();
+    let ctr_ref = ctr_var["variablesReference"].as_i64().unwrap_or(0);
+    assert!(
+        ctr_ref > 0,
+        "ctr should have variablesReference > 0 (expandable FB), got {ctr_ref}"
+    );
+    eprintln!("ctr variablesReference = {ctr_ref}");
+}
+
+#[test]
+fn test_fb_instance_tree_expansion() {
+    // End-to-end: expand a FB instance to see its fields as children.
+    // 1. Pause inside MyFB at a breakpoint
+    // 2. Request Locals scope → get 'ctr' with variablesReference > 0
+    // 3. Request Variables(ctr_ref) → get CTU's fields (CU, RESET, PV, Q, CV, prev_cu)
+    let source = "\
+FUNCTION_BLOCK MyFB\n\
+VAR_INPUT cmd : BOOL; END_VAR\n\
+VAR\n\
+    ctr : CTU;\n\
+END_VAR\n\
+    ctr(CU := cmd, RESET := FALSE, PV := 5);\n\
+END_FUNCTION_BLOCK\n\
+\n\
+PROGRAM Main\n\
+VAR fb : MyFB; END_VAR\n\
+    fb(cmd := TRUE);\n\
+END_PROGRAM\n";
+
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "setBreakpoints", Some(json!({
+                "source": { "path": "test.st" },
+                "breakpoints": [{ "line": 6 }]
+            }))),
+            dap_request(4, "configurationDone", None),
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            // Get locals scope
+            dap_request(6, "scopes", Some(json!({ "frameId": 0 }))),
+            dap_request(7, "variables", Some(json!({ "variablesReference": 1000 }))),
+            dap_request(8, "disconnect", None),
+        ],
+    );
+
+    // Find ctr in locals and get its variablesReference
+    let locals_resp = find_response(&messages, 7).unwrap();
+    let locals = locals_resp["body"]["variables"].as_array().unwrap();
+    let ctr = locals.iter().find(|v| {
+        v["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("ctr"))
+    });
+    assert!(ctr.is_some(), "Expected 'ctr' in locals, got: {:?}",
+        locals.iter().map(|v| v["name"].as_str()).collect::<Vec<_>>());
+    let ctr = ctr.unwrap();
+    let ctr_ref = ctr["variablesReference"].as_i64().unwrap_or(0);
+    assert!(ctr_ref > 0, "ctr should be expandable (variablesReference > 0)");
+
+    // ctr should show a type name
+    let type_str = ctr["type"].as_str().unwrap_or("");
+    eprintln!("ctr type = {type_str}");
+    assert!(
+        type_str.to_uppercase().contains("CTU"),
+        "ctr type should mention CTU, got '{type_str}'"
+    );
+
+    // Now expand ctr by requesting its children. We need to do this in a
+    // SECOND session because the first one has already disconnected. But
+    // since we can't easily extend the test, let's verify the structure
+    // from what we have. The key assertion: ctr IS expandable.
+    eprintln!("ctr summary value = {:?}", ctr["value"].as_str());
+}
+
+#[test]
+fn test_fb_children_request() {
+    // Full round-trip: get the ctr variablesReference, then request its children.
+    let source = "\
+FUNCTION_BLOCK MyFB\n\
+VAR_INPUT cmd : BOOL; END_VAR\n\
+VAR\n\
+    ctr : CTU;\n\
+END_VAR\n\
+    ctr(CU := cmd, RESET := FALSE, PV := 5);\n\
+END_FUNCTION_BLOCK\n\
+\n\
+PROGRAM Main\n\
+VAR fb : MyFB; END_VAR\n\
+    fb(cmd := TRUE);\n\
+END_PROGRAM\n";
+
+    // We need two Variables requests: first for locals (ref 1000), then
+    // for the ctr FB children (the ref ID allocated for ctr).
+    // The ref for ctr will be allocated after the locals_ref (1000) and
+    // globals_ref (1001), so it should be 1002.
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "setBreakpoints", Some(json!({
+                "source": { "path": "test.st" },
+                "breakpoints": [{ "line": 6 }]
+            }))),
+            dap_request(4, "configurationDone", None),
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "scopes", Some(json!({ "frameId": 0 }))),
+            // Request locals (allocates ctr's FB ref)
+            dap_request(7, "variables", Some(json!({ "variablesReference": 1000 }))),
+            // Request ctr's children (ref should be 1002 — after locals=1000, globals=1001)
+            dap_request(8, "variables", Some(json!({ "variablesReference": 1002 }))),
+            dap_request(9, "disconnect", None),
+        ],
+    );
+
+    // Check the children response
+    let children_resp = find_response(&messages, 8).unwrap();
+    let children = children_resp["body"]["variables"].as_array().unwrap();
+    let child_names: Vec<&str> = children.iter().filter_map(|v| v["name"].as_str()).collect();
+    eprintln!("CTU children: {child_names:?}");
+
+    // CTU should have: CU, RESET, PV, Q, CV, prev_cu
+    assert!(
+        child_names.iter().any(|n| n.eq_ignore_ascii_case("Q")),
+        "CTU children should include Q, got: {child_names:?}"
+    );
+    assert!(
+        child_names.iter().any(|n| n.eq_ignore_ascii_case("CV")),
+        "CTU children should include CV, got: {child_names:?}"
+    );
+    assert!(
+        child_names.iter().any(|n| n.eq_ignore_ascii_case("PV")),
+        "CTU children should include PV, got: {child_names:?}"
+    );
+    assert!(
+        child_names.len() >= 5,
+        "Expected at least 5 CTU fields (CU, RESET, PV, Q, CV, prev_cu), got {}",
+        child_names.len()
+    );
+}
+
+#[test]
+fn test_evaluate_fb_instance_is_expandable_in_watch() {
+    // When the user adds "ctr" to the Watch panel (or hovers over it),
+    // VS Code sends an Evaluate request. If ctr is a FB instance, the
+    // EvaluateResponse should have variablesReference > 0 so VS Code
+    // shows the expand arrow. Clicking it sends a Variables request
+    // with that ref to get the children.
+    let source = "\
+FUNCTION_BLOCK MyFB\n\
+VAR_INPUT cmd : BOOL; END_VAR\n\
+VAR\n\
+    ctr : CTU;\n\
+END_VAR\n\
+    ctr(CU := cmd, RESET := FALSE, PV := 5);\n\
+END_FUNCTION_BLOCK\n\
+\n\
+PROGRAM Main\n\
+VAR fb : MyFB; END_VAR\n\
+    fb(cmd := TRUE);\n\
+END_PROGRAM\n";
+
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "setBreakpoints", Some(json!({
+                "source": { "path": "test.st" },
+                "breakpoints": [{ "line": 6 }]
+            }))),
+            dap_request(4, "configurationDone", None),
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            // Evaluate "ctr" as a Watch expression
+            dap_request(6, "evaluate", Some(json!({
+                "expression": "ctr",
+                "context": "watch",
+                "frameId": 0
+            }))),
+            // Evaluate a scalar for comparison
+            dap_request(7, "evaluate", Some(json!({
+                "expression": "cmd",
+                "context": "watch",
+                "frameId": 0
+            }))),
+            dap_request(8, "disconnect", None),
+        ],
+    );
+
+    // "ctr" should be expandable (variablesReference > 0)
+    let ctr_resp = find_response(&messages, 6).unwrap();
+    let ctr_ref = ctr_resp["body"]["variablesReference"].as_i64().unwrap_or(0);
+    let ctr_result = ctr_resp["body"]["result"].as_str().unwrap_or("");
+    let ctr_type = ctr_resp["body"]["type"].as_str().unwrap_or("");
+    eprintln!("Watch ctr: result={ctr_result:?} type={ctr_type:?} ref={ctr_ref}");
+    assert!(
+        ctr_ref > 0,
+        "Evaluate('ctr') should return variablesReference > 0 for expandable FB, got {ctr_ref}"
+    );
+    assert!(
+        ctr_type.to_uppercase().contains("CTU"),
+        "Type should mention CTU, got '{ctr_type}'"
+    );
+    assert_ne!(ctr_result, "<unknown>", "ctr should have a summary value");
+
+    // "cmd" should NOT be expandable (scalar BOOL)
+    let cmd_resp = find_response(&messages, 7).unwrap();
+    let cmd_ref = cmd_resp["body"]["variablesReference"].as_i64().unwrap_or(0);
+    assert_eq!(cmd_ref, 0, "Scalar 'cmd' should have variablesReference=0");
+}
+
+#[test]
+fn test_watch_panel_evaluate_fb_then_expand_children() {
+    // Full Watch panel round-trip: Evaluate("ctr") → get variablesReference →
+    // Variables(ref) → verify children with values.
+    //
+    // The breakpoint is placed on a dummy statement AFTER the ctr() call so
+    // the FB instance has been populated with real values by the time we
+    // pause and inspect.
+    let source = "\
+FUNCTION_BLOCK MyFB\n\
+VAR_INPUT cmd : BOOL; END_VAR\n\
+VAR\n\
+    ctr : CTU;\n\
+    done : BOOL;\n\
+END_VAR\n\
+    ctr(CU := cmd, RESET := FALSE, PV := 5);\n\
+    done := TRUE;\n\
+END_FUNCTION_BLOCK\n\
+\n\
+PROGRAM Main\n\
+VAR fb : MyFB; END_VAR\n\
+    fb(cmd := TRUE);\n\
+END_PROGRAM\n";
+
+    // Break on line 8 (done := TRUE) — after ctr() has executed.
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "setBreakpoints", Some(json!({
+                "source": { "path": "test.st" },
+                "breakpoints": [{ "line": 8 }]
+            }))),
+            dap_request(4, "configurationDone", None),
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            // Step 1: Evaluate "ctr" in the Watch panel context
+            dap_request(6, "evaluate", Some(json!({
+                "expression": "ctr",
+                "context": "watch",
+                "frameId": 0
+            }))),
+            // Step 2: Will send Variables request using the ref from step 1.
+            // The evaluate response allocates a new ref starting from
+            // next_var_ref. We need to find the actual ref from the response.
+            // Since this is a serial protocol, we use a placeholder here
+            // and compute the real ref from the evaluate response below.
+            // But run_dap_session sends all requests up front, so we need
+            // to predict the ref ID.
+            //
+            // After initialize+launch, the scopes haven't been requested
+            // yet, so next_var_ref is still at its initial value (1000).
+            // The Evaluate handler allocates ref 1000 for ctr.
+            dap_request(7, "variables", Some(json!({ "variablesReference": 1000 }))),
+            dap_request(8, "disconnect", None),
+        ],
+    );
+
+    // Verify step 1: Evaluate returned an expandable ref
+    let eval_resp = find_response(&messages, 6).unwrap();
+    let eval_ref = eval_resp["body"]["variablesReference"].as_i64().unwrap_or(0);
+    let eval_result = eval_resp["body"]["result"].as_str().unwrap_or("");
+    let eval_type = eval_resp["body"]["type"].as_str().unwrap_or("");
+    eprintln!(
+        "Evaluate(ctr): result={eval_result:?} type={eval_type:?} ref={eval_ref}"
+    );
+    assert!(
+        eval_ref > 0,
+        "Evaluate('ctr') should return variablesReference > 0, got {eval_ref}"
+    );
+    assert_eq!(
+        eval_ref, 1000,
+        "Expected ref 1000 (first allocation), got {eval_ref}"
+    );
+
+    // Verify step 2: Variables(ref) returned CTU's children with values
+    let children_resp = find_response(&messages, 7).unwrap();
+    assert!(
+        children_resp["success"].as_bool().unwrap_or(false),
+        "Variables request should succeed"
+    );
+    let children = children_resp["body"]["variables"]
+        .as_array()
+        .expect("should have variables array");
+    let child_names: Vec<&str> = children
+        .iter()
+        .filter_map(|v| v["name"].as_str())
+        .collect();
+    eprintln!("CTU children via Watch expand: {child_names:?}");
+
+    // CTU should have: CU, RESET, PV, Q, CV, prev_cu
+    assert!(
+        child_names.iter().any(|n| n.eq_ignore_ascii_case("CU")),
+        "CTU children should include CU, got: {child_names:?}"
+    );
+    assert!(
+        child_names.iter().any(|n| n.eq_ignore_ascii_case("Q")),
+        "CTU children should include Q, got: {child_names:?}"
+    );
+    assert!(
+        child_names.iter().any(|n| n.eq_ignore_ascii_case("CV")),
+        "CTU children should include CV, got: {child_names:?}"
+    );
+    assert!(
+        child_names.iter().any(|n| n.eq_ignore_ascii_case("PV")),
+        "CTU children should include PV, got: {child_names:?}"
+    );
+    assert!(
+        child_names.iter().any(|n| n.eq_ignore_ascii_case("RESET")),
+        "CTU children should include RESET, got: {child_names:?}"
+    );
+    assert!(
+        child_names.len() >= 5,
+        "Expected at least 5 CTU fields, got {}: {child_names:?}",
+        child_names.len()
+    );
+
+    // Verify the children have actual values (not all Void/empty)
+    // After one cycle with CU=TRUE, PV=5: CV should be 1, Q should be FALSE
+    let cv = children
+        .iter()
+        .find(|v| v["name"].as_str().map(|n| n.eq_ignore_ascii_case("CV")).unwrap_or(false));
+    if let Some(cv_var) = cv {
+        let cv_val = cv_var["value"].as_str().unwrap_or("");
+        eprintln!("CV value: {cv_val:?}");
+        assert_ne!(cv_val, "", "CV should have a value after ctr() executed");
+    }
+
+    let pv = children
+        .iter()
+        .find(|v| v["name"].as_str().map(|n| n.eq_ignore_ascii_case("PV")).unwrap_or(false));
+    if let Some(pv_var) = pv {
+        let pv_val = pv_var["value"].as_str().unwrap_or("");
+        eprintln!("PV value: {pv_val:?}");
+        assert_eq!(pv_val, "5", "PV should be 5 (the preset value)");
+    }
+}
+
+#[test]
+fn test_monitor_watch_fb_prefix_includes_all_descendants() {
+    // End-to-end test for the PLC Monitor panel's tree view data flow.
+    // When watching a FB instance prefix like "Main.fb", the telemetry
+    // payload must include ALL descendant scalar fields so the panel
+    // can build a recursive tree.
+    let source = "\
+FUNCTION_BLOCK Inner\n\
+VAR_INPUT x : INT; END_VAR\n\
+VAR_OUTPUT y : INT; END_VAR\n\
+    y := x * 2;\n\
+END_FUNCTION_BLOCK\n\
+\n\
+FUNCTION_BLOCK Outer\n\
+VAR_INPUT cmd : BOOL; END_VAR\n\
+VAR\n\
+    sub : Inner;\n\
+    state : INT := 0;\n\
+END_VAR\n\
+    state := state + 1;\n\
+    sub(x := state);\n\
+END_FUNCTION_BLOCK\n\
+\n\
+PROGRAM Main\n\
+VAR\n\
+    fb : Outer;\n\
+END_VAR\n\
+    fb(cmd := TRUE);\n\
+END_PROGRAM\n";
+
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            // Watch the Outer FB instance — should include nested Inner fields
+            dap_request(
+                4,
+                "evaluate",
+                Some(json!({ "expression": "watchVariables Main.fb" })),
+            ),
+            // Run one cycle so the FB state gets populated
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "disconnect", None),
+        ],
+    );
+
+    // Find the telemetry payload
+    let payloads = find_cycle_stats_payloads(&messages);
+    assert!(!payloads.is_empty(), "Expected at least one telemetry event");
+    let last = payloads.last().unwrap();
+    let vars = last["variables"].as_array().unwrap();
+
+    // Collect all variable names from the telemetry
+    let var_names: Vec<&str> = vars
+        .iter()
+        .filter_map(|v| v["name"].as_str())
+        .collect();
+    eprintln!("Telemetry variables: {var_names:?}");
+
+    // Should include nested Inner FB fields (2 levels deep)
+    assert!(
+        var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.state")),
+        "Should include Outer.state, got: {var_names:?}"
+    );
+    assert!(
+        var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.sub.x")),
+        "Should include nested Inner.x (2 levels), got: {var_names:?}"
+    );
+    assert!(
+        var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.sub.y")),
+        "Should include nested Inner.y (2 levels), got: {var_names:?}"
+    );
+
+    // The tree parent 'Main.fb' is now present with a nested `children` array.
+    let fb_entry = vars
+        .iter()
+        .find(|v| v["name"].as_str().map(|n| n.eq_ignore_ascii_case("Main.fb")).unwrap_or(false));
+    assert!(
+        fb_entry.is_some(),
+        "Tree parent 'Main.fb' should be present with children: {var_names:?}"
+    );
+    let fb_children = fb_entry.unwrap()["children"].as_array();
+    assert!(
+        fb_children.is_some(),
+        "Main.fb should have a 'children' array"
+    );
+    let child_names: Vec<&str> = fb_children
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    eprintln!("Main.fb children: {child_names:?}");
+    assert!(
+        child_names.iter().any(|n| *n == "cmd" || n.eq_ignore_ascii_case("cmd")),
+        "children should include 'cmd', got: {child_names:?}"
+    );
+    assert!(
+        child_names.iter().any(|n| *n == "state" || n.eq_ignore_ascii_case("state")),
+        "children should include 'state', got: {child_names:?}"
+    );
+    // Nested FB 'sub' should appear as a child with its own children
+    let sub_entry = fb_children
+        .unwrap()
+        .iter()
+        .find(|c| c["name"].as_str().map(|n| n.eq_ignore_ascii_case("sub")).unwrap_or(false));
+    assert!(
+        sub_entry.is_some(),
+        "children should include nested FB 'sub', got: {child_names:?}"
+    );
+    let sub_children = sub_entry.unwrap()["children"].as_array();
+    assert!(
+        sub_children.is_some(),
+        "'sub' should have its own children array"
+    );
+    let sub_child_names: Vec<&str> = sub_children
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    eprintln!("Main.fb.sub children: {sub_child_names:?}");
+    assert!(
+        sub_child_names.iter().any(|n| n.eq_ignore_ascii_case("x")),
+        "sub children should include 'x', got: {sub_child_names:?}"
+    );
+    assert!(
+        sub_child_names.iter().any(|n| n.eq_ignore_ascii_case("y")),
+        "sub children should include 'y', got: {sub_child_names:?}"
+    );
+}
+
+#[test]
+fn test_parse_errors_reported_with_file_and_line() {
+    // When the source has parse errors, the launch should fail and the
+    // Debug Console should show each error with file:line detail — not
+    // just a generic "N parse error(s) found" message.
+    let source = "\
+PROGRAM Main\n\
+VAR x : INT; END_VAR\n\
+    x := ;\n\
+    IF TRUE\n\
+END_PROGRAM\n";
+
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "disconnect", None),
+        ],
+    );
+
+    // Launch should fail
+    let launch_resp = find_response(&messages, 2).unwrap();
+    assert_eq!(
+        launch_resp["success"].as_bool(),
+        Some(false),
+        "Launch should fail with parse errors"
+    );
+    let error_msg = launch_resp["message"].as_str().unwrap_or("");
+    eprintln!("Launch error: {error_msg}");
+    assert!(
+        error_msg.contains("parse error(s)"),
+        "Error message should mention parse errors, got: {error_msg}"
+    );
+    // Should direct the user to the Problems panel (where the LSP already
+    // shows the errors with file/line/column detail).
+    assert!(
+        error_msg.contains("Problems panel") || error_msg.contains("Problems"),
+        "Error message should direct user to the Problems panel, got: {error_msg}"
+    );
 }

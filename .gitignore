@@ -6,6 +6,10 @@
 editors/vscode/node_modules/
 editors/vscode/out/
 editors/vscode/*.vsix
+editors/vscode/.vscode-test/
+editors/vscode/test/ui/node_modules/
+editors/vscode/test/ui/test-results/
+editors/vscode/test/ui/playwright-report/
 
 # IDE
 .idea/
@@ -21,3 +25,6 @@ crates/st-grammar/build/
 
 # mdBook output
 docs/book/
+
+# Auto-generated communication I/O map (regenerated from plc-project.yaml)
+_io_map.st

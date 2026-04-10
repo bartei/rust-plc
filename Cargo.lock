@@ -923,6 +923,9 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "serde_json",
+ "serde_yaml",
+ "st-comm-api",
+ "st-comm-sim",
  "st-compiler",
  "st-dap",
  "st-grammar",
@@ -935,6 +938,36 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "st-comm-api"
+version = "0.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "st-syntax",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "st-comm-sim"
+version = "0.1.1"
+dependencies = [
+ "futures-util",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "st-comm-api",
+ "st-compiler",
+ "st-ir",
+ "st-runtime",
+ "st-syntax",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
 ]
 
 [[package]]
@@ -953,11 +986,15 @@ version = "0.1.1"
 dependencies = [
  "dap",
  "serde_json",
+ "serde_yaml",
+ "st-comm-api",
+ "st-comm-sim",
  "st-compiler",
  "st-ir",
  "st-runtime",
  "st-syntax",
  "tempfile",
+ "tokio",
  "tracing",
 ]
 
@@ -1011,6 +1048,8 @@ name = "st-runtime"
 version = "0.1.1"
 dependencies = [
  "serde",
+ "serde_yaml",
+ "st-comm-api",
  "st-compiler",
  "st-ir",
  "st-syntax",

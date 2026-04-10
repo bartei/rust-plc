@@ -188,7 +188,10 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "test": "node ./out/test/runTest.js"
+    "test": "node ./out/test/runTest.js",
+    "test:unit": "node ./test/monitor-tree.test.js",
+    "test:ui": "cd test/ui && npx playwright test",
+    "test:ui:headed": "cd test/ui && npx playwright test --headed"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"

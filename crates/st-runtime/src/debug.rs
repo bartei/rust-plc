@@ -96,11 +96,19 @@ impl DebugState {
     /// Parses the source to discover which top-level items it defines, then
     /// only searches functions whose names match those items. This reliably
     /// filters out functions from other files in multi-file projects.
+    /// Set breakpoints on the given 1-based line numbers within `source`.
+    ///
+    /// `source_offset` is the byte offset of `source` in the virtual
+    /// concatenated text produced by `parse_multi()`. Source-map entries
+    /// in the compiled module carry virtual-space offsets, so we must add
+    /// `source_offset` to each file-local line offset before comparing.
+    /// For single-file compilations (no multi-file), pass `0`.
     pub fn set_line_breakpoints(
         &mut self,
         module: &Module,
         source: &str,
         lines: &[u32],
+        source_offset: usize,
     ) -> Vec<Option<usize>> {
         let source_len = source.len();
         let line_offsets = compute_line_offsets(source);
@@ -118,6 +126,11 @@ impl DebugState {
                     .copied()
                     .unwrap_or(source_len);
 
+                // Shift to virtual space so we match the compiled module's
+                // source_map entries.
+                let virt_start = line_start + source_offset;
+                let virt_end = line_end + source_offset;
+
                 for func in &module.functions {
                     // Only search functions defined in this source file
                     let belongs = file_func_names.iter().any(|n| {
@@ -128,8 +141,8 @@ impl DebugState {
                     }
 
                     for sm in &func.source_map {
-                        if sm.byte_offset >= line_start
-                            && sm.byte_offset < line_end
+                        if sm.byte_offset >= virt_start
+                            && sm.byte_offset < virt_end
                             && sm.byte_offset > 0
                         {
                             self.source_breakpoints.insert(sm.byte_offset);
@@ -383,6 +396,16 @@ pub fn format_var_type(ty: VarType) -> &'static str {
     }
 }
 
+/// Format a variable's type with full width info from its declared
+/// `IntWidth` (e.g. "SINT" / "USINT" / "DINT" instead of just "INT").
+/// Falls back to the basic `format_var_type` for non-integer slots.
+pub fn format_var_type_with_width(ty: VarType, width: st_ir::IntWidth) -> &'static str {
+    if let Some(name) = width.display_name() {
+        return name;
+    }
+    format_var_type(ty)
+}
+
 /// Compute byte offsets for each line (0-indexed).
 fn compute_line_offsets(source: &str) -> Vec<usize> {
     let mut offsets = vec![0]; // line 0 starts at byte 0
@@ -538,7 +561,7 @@ mod tests {
 
         let mut ds = DebugState::new();
         // DAP uses 1-indexed lines: line 2 = "    x := 1;", line 3 = "    x := 2;"
-        let results = ds.set_line_breakpoints(&module, source, &[2, 3, 99]);
+        let results = ds.set_line_breakpoints(&module, source, &[2, 3, 99], 0);
         // Line 2 should map, line 3 should map, line 99 should not
         assert!(results[0].is_some(), "Line 2 should map to an instruction");
         assert!(results[1].is_some(), "Line 3 should map to an instruction");

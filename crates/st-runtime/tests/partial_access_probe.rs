@@ -99,8 +99,10 @@ END_FUNCTION
 
 #[test]
 fn write_byte_to_dword() {
+    // g_val is DINT so the 0xBBAA = 48042 result fits without wrapping.
+    // (16-bit INT cannot hold this value — it would wrap to -17750.)
     let source = r#"
-VAR_GLOBAL g_val : INT; END_VAR
+VAR_GLOBAL g_val : DINT; END_VAR
 PROGRAM Main
 VAR
     d : DWORD := 0;
@@ -120,8 +122,10 @@ END_PROGRAM
 
 #[test]
 fn read_word_from_dword() {
+    // Test return is DINT so the 0xCCDD = 52445 result fits naturally.
+    // (16-bit INT cannot hold this value — it would wrap to -13091.)
     let val = run_function(r#"
-FUNCTION Test : INT
+FUNCTION Test : DINT
 VAR_INPUT dummy : INT; END_VAR
 VAR
     d : DWORD := 16#AABB_CCDD;
@@ -135,7 +139,7 @@ END_FUNCTION
 #[test]
 fn read_word1_from_dword() {
     let val = run_function(r#"
-FUNCTION Test : INT
+FUNCTION Test : DINT
 VAR_INPUT dummy : INT; END_VAR
 VAR
     d : DWORD := 16#AABB_CCDD;

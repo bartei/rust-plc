@@ -193,6 +193,68 @@ END_PROGRAM
 }
 
 #[test]
+fn sint_initializer_and_increment_accept_int_literals() {
+    // Per IEC 61131-3 strict typing, integer literals are typed as INT (or
+    // DINT) by default, so `cycle : SINT := 0` and `cycle := cycle + 1`
+    // would technically need explicit `SINT#0` / `SINT#1` annotations.
+    // In practice, every modern PLC IDE (Codesys, TwinCAT, B&R Automation
+    // Studio) implements "literal context typing": a bare integer literal
+    // takes the type of its assignment target (or the typed operand of the
+    // surrounding binary op) when the value fits.
+    assert_no_errors(
+        r#"
+PROGRAM Main
+VAR
+    cycle : SINT := 0;
+END_VAR
+    cycle := cycle + 1;
+END_PROGRAM
+"#,
+    );
+}
+
+#[test]
+fn integer_literal_fits_in_smaller_target() {
+    // Every signed/unsigned integer type accepts a bare literal that fits
+    // in its range, both as an initializer and as an assignment value.
+    assert_no_errors(
+        r#"
+PROGRAM Main
+VAR
+    s  : SINT  := -10;
+    us : USINT := 200;
+    i  : INT   := 1000;
+    ui : UINT  := 50000;
+END_VAR
+    s  := 100;
+    us := 250;
+    i  := -32000;
+    ui := 65000;
+END_PROGRAM
+"#,
+    );
+}
+
+#[test]
+fn integer_literal_out_of_range_for_smaller_target() {
+    // 200 doesn't fit in SINT (-128..127). The literal-narrowing fast
+    // path must reject out-of-range values, so the regular type-mismatch
+    // error fires.
+    assert_has_errors(
+        r#"
+PROGRAM Main
+VAR
+    s : SINT := 200;
+    other : INT := 0;
+END_VAR
+    other := 1;
+END_PROGRAM
+"#,
+        &[DiagnosticCode::TypeMismatchAssignment],
+    );
+}
+
+#[test]
 fn assign_dint_to_sint_narrowing() {
     assert_has_errors(
         r#"

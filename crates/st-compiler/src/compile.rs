@@ -21,21 +21,44 @@ pub fn compile(source_file: &SourceFile) -> Result<Module, CompileError> {
         type_defs: Vec::new(),
         class_bases: std::collections::HashMap::new(),
         class_var_blocks: std::collections::HashMap::new(),
+        pending_global_inits: Vec::new(),
     };
     // Pass 1: register all POUs so cross-references work
     for item in &source_file.items {
         ctx.register_item(item);
     }
-    // Pass 2: compile bodies
+    // Pass 2: compile bodies. FUNCTIONs, FUNCTION_BLOCKs, and CLASSes
+    // must be compiled BEFORE PROGRAMs so that field-access resolution
+    // (e.g., `filler.fill_count`) can look up the callee's locals layout.
+    // Without this ordering, a PROGRAM compiled before its callee's FB
+    // would see empty locals and silently resolve all fields to index 0.
     for item in &source_file.items {
-        ctx.compile_item(item)?;
+        if !matches!(item, TopLevelItem::Program(_)) {
+            ctx.compile_item(item)?;
+        }
     }
+    for item in &source_file.items {
+        if matches!(item, TopLevelItem::Program(_)) {
+            ctx.compile_item(item)?;
+        }
+    }
+    // Pass 3: synthesize the global initializer function. Runs once at
+    // engine startup to apply `VAR_GLOBAL x : T := <expr>;` initial values
+    // (without it, globals would be left at `Value::default_for_type`,
+    // which is 0/false/empty for everything).
+    ctx.compile_global_init();
     Ok(Module {
         functions: ctx.functions,
         globals: ctx.globals,
         type_defs: ctx.type_defs,
     })
 }
+
+/// Synthetic function name for the global variable initializer. The VM's
+/// `run_global_init()` looks this up by name; if it doesn't exist (e.g.
+/// modules compiled before this feature, or modules with no global
+/// initializers) the call is a no-op.
+pub const GLOBAL_INIT_FUNCTION_NAME: &str = "__global_init";
 
 struct ModuleCompiler {
     functions: Vec<Function>,
@@ -45,6 +68,12 @@ struct ModuleCompiler {
     class_bases: std::collections::HashMap<String, String>,
     /// Maps class name → var_blocks (for inherited var access in methods).
     class_var_blocks: std::collections::HashMap<String, Vec<VarBlock>>,
+    /// Pending global variable initializers collected during pass 1.
+    /// Each entry is (slot index in `globals`, init expression). After pass
+    /// 2 finishes, we synthesize a `__global_init` function containing one
+    /// `StoreGlobal` per entry; the engine calls this once at startup so
+    /// `VAR_GLOBAL counter : USINT := 250;` actually applies its 250.
+    pending_global_inits: Vec<(u16, Expression)>,
 }
 
 impl ModuleCompiler {
@@ -89,16 +118,26 @@ impl ModuleCompiler {
             TopLevelItem::GlobalVarDeclaration(vb) => {
                 for decl in &vb.declarations {
                     let ty = Self::var_type_from_ast(&decl.ty);
+                    let int_width = Self::int_width_from_ast(&decl.ty);
                     for name in &decl.names {
                         let offset = self.globals.total_size();
                         let size = ty.size();
+                        let slot_idx = self.globals.slots.len() as u16;
                         self.globals.slots.push(VarSlot {
                             name: name.name.clone(),
                             ty,
                             offset,
                             size,
                             retain: vb.qualifiers.contains(&VarQualifier::Retain),
+                            int_width,
                         });
+                        // Defer initializer compilation until pass 3 — we
+                        // need all functions registered first so the init
+                        // expressions can call them (e.g. INT_TO_REAL).
+                        if let Some(init_expr) = &decl.initial_value {
+                            self.pending_global_inits
+                                .push((slot_idx, init_expr.clone()));
+                        }
                     }
                 }
             }
@@ -171,7 +210,8 @@ impl ModuleCompiler {
                 let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases);
                 fc.compile_var_blocks(&f.var_blocks);
                 let ret_ty = Self::var_type_from_ast(&f.return_type);
-                let ret_slot = fc.add_local(&f.name.name, ret_ty);
+                let ret_width = Self::int_width_from_ast(&f.return_type);
+                let ret_slot = fc.add_local(&f.name.name, ret_ty, ret_width);
                 let body_start_pc = fc.current_pc();
                 fc.compile_statements(&f.body)?;
                 let ret_reg = fc.alloc_reg();
@@ -235,7 +275,8 @@ impl ModuleCompiler {
                     // Define return variable if method has return type
                     let ret_slot = method.return_type.as_ref().map(|dt| {
                         let ret_ty = Self::var_type_from_ast(dt);
-                        fc.add_local(&method.name.name, ret_ty)
+                        let ret_width = Self::int_width_from_ast(dt);
+                        fc.add_local(&method.name.name, ret_ty, ret_width)
                     });
                     let body_start_pc = fc.current_pc();
                     fc.compile_statements(&method.body)?;
@@ -256,6 +297,34 @@ impl ModuleCompiler {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Synthesize the `__global_init` function from the deferred global
+    /// initializers collected during pass 1. Each entry compiles to a
+    /// `<expr>` → register → `StoreGlobal(slot, reg)` sequence. Skipped
+    /// entirely if no globals had initializers (no synthetic function
+    /// is added to the module — the VM's run_global_init becomes a no-op).
+    fn compile_global_init(&mut self) {
+        if self.pending_global_inits.is_empty() {
+            return;
+        }
+        let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases);
+        // Drain the pending list into a local so we can iterate without
+        // holding the borrow on self.
+        let pending: Vec<(u16, Expression)> =
+            std::mem::take(&mut self.pending_global_inits);
+        for (slot, expr) in &pending {
+            fc.set_source(expr.range());
+            let reg = fc.compile_expression(expr);
+            fc.emit(Instruction::StoreGlobal(*slot, reg));
+        }
+        fc.emit(Instruction::RetVoid);
+        let func = fc.finish(
+            GLOBAL_INIT_FUNCTION_NAME.to_string(),
+            PouKind::Function,
+            0,
+        );
+        self.functions.push(func);
     }
 
     /// Collect var_blocks from all ancestor classes, root-first.
@@ -299,6 +368,27 @@ impl ModuleCompiler {
             DataType::Ref(_) => VarType::Ref,
             DataType::Array(_) => VarType::Int, // simplified: arrays handled separately
             DataType::UserDefined(_) => VarType::Int, // simplified: resolved at link time
+        }
+    }
+
+    /// Original integer width / signedness for a source AST type. The VM
+    /// uses this at store time to wrap values to the declared bit width
+    /// (so a SINT cycle counter wraps at 127→-128 instead of growing to
+    /// the i64 range).
+    fn int_width_from_ast(dt: &DataType) -> IntWidth {
+        match dt {
+            DataType::Elementary(e) => match e {
+                ElementaryType::Sint => IntWidth::I8,
+                ElementaryType::Usint | ElementaryType::Byte => IntWidth::U8,
+                ElementaryType::Int => IntWidth::I16,
+                ElementaryType::Uint | ElementaryType::Word => IntWidth::U16,
+                ElementaryType::Dint => IntWidth::I32,
+                ElementaryType::Udint | ElementaryType::Dword => IntWidth::U32,
+                ElementaryType::Lint => IntWidth::I64,
+                ElementaryType::Ulint | ElementaryType::Lword => IntWidth::U64,
+                _ => IntWidth::None,
+            },
+            _ => IntWidth::None,
         }
     }
 }
@@ -406,7 +496,7 @@ impl<'a> FunctionCompiler<'a> {
         self.pending_source = Some(range);
     }
 
-    fn add_local(&mut self, name: &str, ty: VarType) -> u16 {
+    fn add_local(&mut self, name: &str, ty: VarType, int_width: IntWidth) -> u16 {
         let offset = self.locals.total_size();
         let size = ty.size();
         let idx = self.locals.slots.len() as u16;
@@ -416,6 +506,7 @@ impl<'a> FunctionCompiler<'a> {
             offset,
             size,
             retain: false,
+            int_width,
         });
         idx
     }
@@ -488,16 +579,33 @@ impl<'a> FunctionCompiler<'a> {
         for vb in var_blocks {
             for decl in &vb.declarations {
                 let ty = ModuleCompiler::var_type_from_ast(&decl.ty);
+                let int_width = ModuleCompiler::int_width_from_ast(&decl.ty);
                 // Track FB type names for user-defined types
                 let fb_type_name = match &decl.ty {
                     DataType::UserDefined(qn) => Some(qn.as_str()),
                     _ => None,
                 };
                 for name in &decl.names {
-                    let slot = self.add_local(&name.name, ty);
+                    let slot = self.add_local(&name.name, ty, int_width);
                     // Remember the FB type name so we can resolve calls later
                     if let Some(ref type_name) = fb_type_name {
                         self.fb_type_names.insert(slot, type_name.clone());
+                        // Fix the VarType from the generic Int placeholder to
+                        // the actual FB/class type. This is critical for the
+                        // debugger's variable display — without it, FB instance
+                        // fields like counter.Q can't be expanded.
+                        if let Some(func_idx) = self.module_functions.iter().position(|f| {
+                            f.name.eq_ignore_ascii_case(type_name)
+                        }) {
+                            let kind = self.module_functions[func_idx].kind;
+                            if kind == st_ir::PouKind::FunctionBlock {
+                                self.locals.slots[slot as usize].ty =
+                                    VarType::FbInstance(func_idx as u16);
+                            } else if kind == st_ir::PouKind::Class {
+                                self.locals.slots[slot as usize].ty =
+                                    VarType::ClassInstance(func_idx as u16);
+                            }
+                        }
                     }
                     // Emit initializer if present
                     if emit_init {
@@ -590,7 +698,13 @@ impl<'a> FunctionCompiler<'a> {
                             .find(|f| f.name.eq_ignore_ascii_case(&fb_type))
                             .and_then(|f| f.locals.find_slot(&field.name))
                             .map(|(i, _)| i)
-                            .unwrap_or(0);
+                            .unwrap_or_else(|| {
+                                eprintln!(
+                                    "[COMPILER] warning: field '{}' not found in FB '{}'",
+                                    field.name, fb_type
+                                );
+                                0
+                            });
                         self.emit_sourced(
                             Instruction::StoreField(slot, field_idx, val_reg),
                             range,
@@ -829,7 +943,14 @@ impl<'a> FunctionCompiler<'a> {
                                     .find(|f| f.name.eq_ignore_ascii_case(&fb_type))
                                     .and_then(|f| f.locals.find_slot(&field.name))
                                     .map(|(i, _)| i)
-                                    .unwrap_or(0);
+                                    .unwrap_or_else(|| {
+                                        eprintln!(
+                                            "[COMPILER] warning: field '{}' not found in FB '{}' — \
+                                             was the FB compiled before its caller?",
+                                            field.name, fb_type
+                                        );
+                                        0
+                                    });
                                 let dst = self.alloc_reg();
                                 self.emit(Instruction::LoadField(dst, slot, field_idx));
                                 return dst;

@@ -49,6 +49,21 @@
       },
       "examples": [["test_*.st", "deprecated/", "*.bak"]]
     },
+    "engine": {
+      "type": "object",
+      "description": "Scan cycle engine settings — apply to both `st-cli run` and DAP debug sessions.",
+      "properties": {
+        "cycle_time": {
+          "description": "Target scan cycle period. If set, the engine sleeps after each cycle so the total period (execution + sleep) matches the target. If a single cycle exceeds the target, the next cycle starts immediately (no catch-up). Omit to run as fast as the CPU allows. Accepts a duration string (e.g., '10ms', '500us', '1s') or a bare number interpreted as milliseconds.",
+          "oneOf": [
+            { "type": "string", "pattern": "^[0-9]+(ns|us|µs|ms|s)?$" },
+            { "type": "integer", "minimum": 0 }
+          ],
+          "examples": ["10ms", "1ms", "500us", 5]
+        }
+      },
+      "additionalProperties": false
+    },
     "links": {
       "type": "array",
       "description": "Communication links — physical transport channels (TCP sockets, serial ports). Each link can serve multiple devices.",
