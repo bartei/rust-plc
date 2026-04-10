@@ -1088,7 +1088,7 @@ fn global_init_lword() {
 
 #[test]
 fn global_init_real() {
-    let src = global_only_source("    r : REAL := 3.14;");
+    let src = global_only_source("    r : REAL := 3.125;");
     let parse_result = st_syntax::parse(&src);
     let module = st_compiler::compile(&parse_result.source_file).unwrap();
     let engine = Engine::new(
@@ -1098,7 +1098,7 @@ fn global_init_real() {
     );
     let r = engine.vm().get_global("r").unwrap();
     if let Value::Real(f) = r {
-        assert!((*f - 3.14).abs() < 1e-6, "expected ~3.14, got {f}");
+        assert!((*f - 3.125).abs() < 1e-6, "expected ~3.125, got {f}");
     } else {
         panic!("expected Value::Real, got {r:?}");
     }

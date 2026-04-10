@@ -227,6 +227,7 @@ pub fn start_web_uis(setup: &CommSetup, base_port: u16) {
         return;
     }
 
+    #[allow(clippy::type_complexity)]
     let states: Vec<(String, DeviceProfile, Arc<Mutex<HashMap<String, st_comm_api::IoValue>>>, u16)> =
         setup
             .device_states

@@ -119,6 +119,7 @@ impl Document {
 
     /// Analyze with optional file URI for project-aware multi-file resolution.
     /// Does full project discovery from disk — called once on didOpen.
+    #[allow(clippy::type_complexity)]
     pub fn analyze_source_with_uri(
         source: &str,
         file_uri: Option<&str>,

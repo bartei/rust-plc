@@ -88,7 +88,7 @@ impl<W: Write> DapWriter<W> {
             message: body,
         };
         let json = serde_json::to_string(&message).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("Serialize failed: {e}"))
+            std::io::Error::other(format!("Serialize failed: {e}"))
         })?;
         write!(self.out, "Content-Length: {}\r\n\r\n", json.len())?;
         write!(self.out, "{json}\r\n")?;
@@ -319,7 +319,7 @@ fn cycle_stats_event(
         "watchdog_us": watchdog_us,
         "devices_ok": devices_ok,
         "devices_err": devices_err,
-        "target_us": target_cycle_time.map(|d| to_us(d)),
+        "target_us": target_cycle_time.map(to_us),
         "last_period_us": to_us(stats.last_cycle_period),
         "min_period_us": min_period_us,
         "max_period_us": to_us(stats.max_cycle_period),
@@ -1628,11 +1628,7 @@ impl DapSession {
                 self.cycle_stats.max_cycle_period = period;
             }
             if let Some(target) = self.target_cycle_time {
-                let dev = if period > target {
-                    period - target
-                } else {
-                    target - period
-                };
+                let dev = period.abs_diff(target);
                 if dev > self.cycle_stats.jitter_max {
                     self.cycle_stats.jitter_max = dev;
                 }
@@ -1668,7 +1664,7 @@ impl DapSession {
                     let mut seen = std::collections::HashSet::new();
                     for name in &self.watched_variables {
                         let upper = name.to_uppercase();
-                        let prefix = format!("{}.", upper);
+                        let prefix = format!("{upper}.");
 
                         // Collect ALL descendants under this prefix.
                         let mut descendants = Vec::new();
@@ -1760,7 +1756,7 @@ impl DapSession {
             children: BTreeMap<String, Node>,
         }
 
-        let prefix_dot = format!("{}.", prefix);
+        let prefix_dot = format!("{prefix}.");
         let mut root = BTreeMap::<String, Node>::new();
 
         for entry in flat {
@@ -1967,15 +1963,11 @@ impl DapSession {
 
         // Drain everything currently buffered. We don't loop blocking — the
         // outer run loop calls this between cycles only.
-        loop {
-            let req = match self
-                .request_rx
-                .as_ref()
-                .and_then(|rx| rx.try_recv().ok())
-            {
-                Some(req) => req,
-                None => break,
-            };
+        while let Some(req) = self
+            .request_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
             eprintln!("[DAP] Inflight request: {:?}", req.command);
             match &req.command {
                 Command::Pause(_) => {

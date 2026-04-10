@@ -1004,8 +1004,6 @@ impl LanguageServer for Backend {
                 // don't change (END_* is already indented correctly).
                 let delta = if starts_with_opener(&prev_trimmed) {
                     1i32
-                } else if prev_trimmed.starts_with("END_") || prev_trimmed == "UNTIL" {
-                    0
                 } else {
                     0
                 };
@@ -1597,7 +1595,7 @@ impl LanguageServer for Backend {
         // Collect all unique function calls and their ranges.
         let mut call_map: std::collections::HashMap<String, Vec<Range>> =
             std::collections::HashMap::new();
-        collect_all_call_names_in_stmts(&body, doc, &mut call_map);
+        collect_all_call_names_in_stmts(body, doc, &mut call_map);
 
         let mut results: Vec<CallHierarchyOutgoingCall> = Vec::new();
         for (callee_name, from_ranges) in call_map {
@@ -1612,11 +1610,11 @@ impl LanguageServer for Backend {
                         _ => SymbolKind::FUNCTION,
                     };
                     let lsp_range = doc.text_range_to_lsp(sym.range);
-                    (kind, lsp_range.clone(), lsp_range)
+                    (kind, lsp_range, lsp_range)
                 } else {
                     // Symbol not found — use a zero range
                     let zero = Range::default();
-                    (SymbolKind::FUNCTION, zero.clone(), zero)
+                    (SymbolKind::FUNCTION, zero, zero)
                 };
 
             results.push(CallHierarchyOutgoingCall {
@@ -2743,7 +2741,7 @@ fn keyword_at_range_start(source: &str, range: ast::TextRange, keyword: &str) ->
     let trimmed = slice.trim_start();
     trimmed
         .get(..keyword.len())
-        .map_or(false, |s| s.eq_ignore_ascii_case(keyword))
+        .is_some_and(|s| s.eq_ignore_ascii_case(keyword))
 }
 
 /// Return the narrower of two optional ranges (smaller span wins —
@@ -2768,7 +2766,7 @@ fn starts_with_opener(upper: &str) -> bool {
         // Variable blocks
         || upper.starts_with("VAR")
             && (upper.len() == 3
-                || upper.as_bytes().get(3).map_or(false, |b| !b.is_ascii_alphanumeric()))
+                || upper.as_bytes().get(3).is_some_and(|b| !b.is_ascii_alphanumeric()))
         // Control flow
         || upper.ends_with("THEN")
         || upper.ends_with("DO")
@@ -2776,11 +2774,11 @@ fn starts_with_opener(upper: &str) -> bool {
         || upper.starts_with("REPEAT")
         || upper.starts_with("ELSE")
             && (upper.len() == 4
-                || upper.as_bytes().get(4).map_or(false, |b| !b.is_ascii_alphanumeric()))
+                || upper.as_bytes().get(4).is_some_and(|b| !b.is_ascii_alphanumeric()))
         || upper.ends_with("OF") && upper.starts_with("CASE ")
         // Type declarations
         || upper.starts_with("STRUCT")
         || upper.starts_with("TYPE")
             && (upper.len() == 4
-                || upper.as_bytes().get(4).map_or(false, |b| !b.is_ascii_alphanumeric()))
+                || upper.as_bytes().get(4).is_some_and(|b| !b.is_ascii_alphanumeric()))
 }

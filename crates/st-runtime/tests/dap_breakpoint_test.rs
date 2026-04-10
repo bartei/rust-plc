@@ -19,14 +19,14 @@ fn breakpoint_resolves_in_multi_file_project() {
     let mut all_sources: Vec<&str> = stdlib.to_vec();
 
     let mut main_source = String::new();
-    let mut main_path = String::new();
+    let mut _main_path = String::new();
     let mut main_virtual_offset = 0usize;
     let stdlib_len: usize = stdlib.iter().map(|s| s.len()).sum();
     let mut cumulative = stdlib_len;
     for (path, content) in &sources {
         if path.ends_with("main.st") {
             main_source = content.clone();
-            main_path = path.to_string_lossy().to_string();
+            _main_path = path.to_string_lossy().to_string();
             main_virtual_offset = cumulative;
         }
         all_sources.push(content.as_str());

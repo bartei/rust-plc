@@ -177,11 +177,7 @@ impl Engine {
             }
             // Jitter: deviation from the configured target cycle time.
             if let Some(target) = self.config.cycle_time {
-                let dev = if period > target {
-                    period - target
-                } else {
-                    target - period
-                };
+                let dev = period.abs_diff(target);
                 if dev > self.stats.jitter_max {
                     self.stats.jitter_max = dev;
                 }

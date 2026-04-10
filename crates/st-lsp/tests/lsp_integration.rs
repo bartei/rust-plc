@@ -1452,7 +1452,7 @@ fn test_inlay_hint_skips_named_arguments() {
     // Named args → no hints should be generated
     let result = &resp["result"];
     assert!(
-        result.is_null() || result.as_array().map_or(false, |a| a.is_empty()),
+        result.is_null() || result.as_array().is_some_and(|a| a.is_empty()),
         "Expected no hints for named arguments, got: {result:?}"
     );
 
@@ -1499,7 +1499,7 @@ fn test_inlay_hint_skips_when_arg_matches_param_name() {
 
     let result = &resp["result"];
     assert!(
-        result.is_null() || result.as_array().map_or(false, |a| a.is_empty()),
+        result.is_null() || result.as_array().is_some_and(|a| a.is_empty()),
         "Expected no hints when arg names match param names, got: {result:?}"
     );
 
@@ -1648,7 +1648,7 @@ fn test_incoming_calls_finds_callers() {
         .find(|c| {
             c["from"]["name"]
                 .as_str()
-                .map_or(false, |n| n.eq_ignore_ascii_case("Main"))
+                .is_some_and(|n| n.eq_ignore_ascii_case("Main"))
         })
         .unwrap();
     let from_ranges = main_call["fromRanges"].as_array().unwrap();

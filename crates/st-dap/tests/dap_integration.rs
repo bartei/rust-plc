@@ -1122,7 +1122,7 @@ fn test_cycle_stats_force_flush_on_step() {
     let last = payloads.last().unwrap();
     let count = last["cycle_count"].as_u64().unwrap_or(0);
     assert!(
-        count >= 1 && count < 20,
+        (1..20).contains(&count),
         "Force-flushed event should fire below the periodic interval, got cycle_count={count}"
     );
 }
@@ -1516,7 +1516,7 @@ END_PROGRAM\n";
     );
     // ctr should have variablesReference > 0 (expandable)
     let ctr_var = vars.iter().find(|v| {
-        v["name"].as_str().map_or(false, |n| n.eq_ignore_ascii_case("ctr"))
+        v["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("ctr"))
     }).unwrap();
     let ctr_ref = ctr_var["variablesReference"].as_i64().unwrap_or(0);
     assert!(
@@ -1568,7 +1568,7 @@ END_PROGRAM\n";
     let locals_resp = find_response(&messages, 7).unwrap();
     let locals = locals_resp["body"]["variables"].as_array().unwrap();
     let ctr = locals.iter().find(|v| {
-        v["name"].as_str().map_or(false, |n| n.eq_ignore_ascii_case("ctr"))
+        v["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("ctr"))
     });
     assert!(ctr.is_some(), "Expected 'ctr' in locals, got: {:?}",
         locals.iter().map(|v| v["name"].as_str()).collect::<Vec<_>>());
