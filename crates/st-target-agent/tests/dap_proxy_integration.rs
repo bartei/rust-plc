@@ -595,3 +595,131 @@ async fn test_dap_attach_to_running_engine() {
 
     eprintln!("[TEST] Program still running with {cycle_count_after} cycles (was {cycle_count_before} before attach)");
 }
+
+/// Comprehensive test: attach → pause → inspect variables → resume → pause again
+/// → disconnect → verify engine resumes → re-attach → verify engine still works.
+/// This catches stateful issues where the engine gets stuck after debug sessions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_dap_attach_pause_resume_reattach_lifecycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, dap_port, _handle) = start_agent_with_dap(test_config(dir.path())).await;
+    let client = Client::new();
+
+    // Upload and start
+    let bundle = make_debug_bundle();
+    upload_bundle(&client, &base, &bundle).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let start_resp = client.post(format!("{base}/api/v1/program/start")).send().await.unwrap();
+    assert_eq!(start_resp.status(), 200);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Verify running
+    let status: serde_json::Value = client.get(format!("{base}/api/v1/status")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(status["status"], "running", "Should be running");
+    let initial_cycles = status["cycle_stats"]["cycle_count"].as_u64().unwrap_or(0);
+    assert!(initial_cycles > 0, "Should have cycles");
+    eprintln!("[TEST] Initial cycles: {initial_cycles}");
+
+    // === SESSION 1: Attach → Pause → Variables → Resume → Disconnect ===
+    let base_clone = base.clone();
+    let session1_result = tokio::task::spawn_blocking(move || {
+        let stream = TcpStream::connect(format!("127.0.0.1:{dap_port}")).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+        let reader_stream = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(&reader_stream);
+        let mut writer = stream;
+
+        // Initialize + Attach
+        send_dap_request(&mut writer, 1, "initialize", serde_json::json!({"adapterID": "st"}));
+        let _ = read_until(&mut reader, |m| m["type"] == "response" && m["command"] == "initialize", 5000);
+        send_dap_request(&mut writer, 2, "attach", serde_json::json!({"stopOnEntry": false}));
+        let _ = read_until(&mut reader, |m| m["type"] == "response" && m["command"] == "attach", 5000);
+        let _ = read_until(&mut reader, |m| m["type"] == "event" && m["event"] == "initialized", 5000);
+        send_dap_request(&mut writer, 3, "configurationDone", serde_json::Value::Null);
+        let _ = read_until(&mut reader, |m| m["type"] == "response" && m["command"] == "configurationDone", 5000);
+        eprintln!("[SESSION1] Attached, engine running");
+
+        // Pause
+        send_dap_request(&mut writer, 4, "pause", serde_json::json!({"threadId": 1}));
+        let _ = read_until(&mut reader, |m| m["type"] == "response" && m["command"] == "pause", 5000);
+        // Wait for stopped event
+        let stopped = read_until(&mut reader, |m| m["type"] == "event" && m["event"] == "stopped", 10000);
+        eprintln!("[SESSION1] Paused: reason={}", stopped["body"]["reason"]);
+
+        // Get variables while paused
+        send_dap_request(&mut writer, 5, "scopes", serde_json::json!({"frameId": 0}));
+        let _ = read_until(&mut reader, |m| m["type"] == "response" && m["command"] == "scopes", 5000);
+        send_dap_request(&mut writer, 6, "variables", serde_json::json!({"variablesReference": 1000}));
+        let vars_resp = read_until(&mut reader, |m| m["type"] == "response" && m["command"] == "variables", 5000);
+        let vars = vars_resp["body"]["variables"].as_array();
+        eprintln!("[SESSION1] Variables: {} items", vars.map(|v| v.len()).unwrap_or(0));
+
+        // Continue
+        send_dap_request(&mut writer, 7, "continue", serde_json::json!({"threadId": 1}));
+        let _ = read_until(&mut reader, |m| m["type"] == "response" && m["command"] == "continue", 5000);
+        eprintln!("[SESSION1] Resumed");
+
+        // Wait a moment for some cycles to run
+        std::thread::sleep(Duration::from_millis(500));
+
+        // Disconnect
+        send_dap_request(&mut writer, 8, "disconnect", serde_json::json!({"terminateDebuggee": false}));
+        eprintln!("[SESSION1] Disconnected");
+    }).await;
+    assert!(session1_result.is_ok(), "Session 1 failed: {:?}", session1_result.err());
+
+    // === VERIFY: Engine resumes after disconnect ===
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    let status: serde_json::Value = client.get(format!("{base}/api/v1/status")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(status["status"], "running", "Engine should resume after disconnect, got: {}", status["status"]);
+    let cycles_after_s1 = status["cycle_stats"]["cycle_count"].as_u64().unwrap_or(0);
+    assert!(cycles_after_s1 > initial_cycles, "Cycles should advance after session 1: was {initial_cycles}, now {cycles_after_s1}");
+    eprintln!("[TEST] After session 1: status={}, cycles={cycles_after_s1}", status["status"]);
+
+    // === SESSION 2: Re-attach to verify engine isn't corrupted ===
+    let base_clone2 = base.clone();
+    let session2_result = tokio::task::spawn_blocking(move || {
+        let stream = TcpStream::connect(format!("127.0.0.1:{dap_port}")).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+        let reader_stream = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(&reader_stream);
+        let mut writer = stream;
+
+        // Initialize + Attach
+        send_dap_request(&mut writer, 1, "initialize", serde_json::json!({"adapterID": "st"}));
+        let _ = read_until(&mut reader, |m| m["type"] == "response" && m["command"] == "initialize", 5000);
+        send_dap_request(&mut writer, 2, "attach", serde_json::json!({"stopOnEntry": false}));
+        let _ = read_until(&mut reader, |m| m["type"] == "response" && m["command"] == "attach", 5000);
+        let _ = read_until(&mut reader, |m| m["type"] == "event" && m["event"] == "initialized", 5000);
+        send_dap_request(&mut writer, 3, "configurationDone", serde_json::Value::Null);
+        let _ = read_until(&mut reader, |m| m["type"] == "response" && m["command"] == "configurationDone", 5000);
+        eprintln!("[SESSION2] Re-attached successfully");
+
+        // Pause again
+        send_dap_request(&mut writer, 4, "pause", serde_json::json!({"threadId": 1}));
+        let _ = read_until(&mut reader, |m| m["type"] == "response" && m["command"] == "pause", 5000);
+        let stopped = read_until(&mut reader, |m| m["type"] == "event" && m["event"] == "stopped", 10000);
+        eprintln!("[SESSION2] Paused: reason={}", stopped["body"]["reason"]);
+
+        // Disconnect without resuming — engine should auto-resume
+        send_dap_request(&mut writer, 5, "disconnect", serde_json::json!({"terminateDebuggee": false}));
+        eprintln!("[SESSION2] Disconnected while paused");
+    }).await;
+    assert!(session2_result.is_ok(), "Session 2 failed: {:?}", session2_result.err());
+
+    // === VERIFY: Engine resumes after session 2 (disconnected while paused) ===
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    let status: serde_json::Value = client.get(format!("{base}/api/v1/status")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(status["status"], "running", "Engine should resume after paused disconnect, got: {}", status["status"]);
+    let cycles_after_s2 = status["cycle_stats"]["cycle_count"].as_u64().unwrap_or(0);
+    assert!(cycles_after_s2 > cycles_after_s1, "Cycles should advance after session 2: was {cycles_after_s1}, now {cycles_after_s2}");
+    eprintln!("[TEST] After session 2: status={}, cycles={cycles_after_s2}", status["status"]);
+
+    // === VERIFY: Stop works from running state ===
+    let stop_resp = client.post(format!("{base}/api/v1/program/stop")).send().await.unwrap();
+    assert_eq!(stop_resp.status(), 200, "Stop should succeed");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let status: serde_json::Value = client.get(format!("{base}/api/v1/status")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(status["status"], "idle", "Should be idle after stop");
+    eprintln!("[TEST] PASS — full lifecycle: attach → pause → resume → disconnect → re-attach → pause → disconnect → stop");
+}

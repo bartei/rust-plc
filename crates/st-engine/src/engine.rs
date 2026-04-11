@@ -222,14 +222,25 @@ impl Engine {
 
         self.vm.reset_instruction_count();
 
-        // 1. Read all device inputs into VM globals
-        self.comm.read_inputs(&mut self.vm);
+        // If the VM has an active call stack (debug resume mid-cycle),
+        // continue execution from where it paused. Otherwise start a
+        // fresh scan cycle with I/O read → execute → I/O write.
+        if self.vm.call_depth() > 0 {
+            // Resuming a debug-paused cycle — skip I/O read (already done)
+            self.vm.continue_execution()?;
+            // Write outputs after the cycle completes
+            self.comm.write_outputs(&self.vm);
+        } else {
+            // Normal fresh cycle
+            // 1. Read all device inputs into VM globals
+            self.comm.read_inputs(&mut self.vm);
 
-        // 2. Execute the user's program
-        self.vm.scan_cycle(&self.program_name)?;
+            // 2. Execute the user's program
+            self.vm.scan_cycle(&self.program_name)?;
 
-        // 3. Write VM globals out to device outputs
-        self.comm.write_outputs(&self.vm);
+            // 3. Write VM globals out to device outputs
+            self.comm.write_outputs(&self.vm);
+        }
 
         let elapsed = start.elapsed();
 

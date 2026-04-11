@@ -291,6 +291,11 @@ impl Vm {
         self.call_stack.clear();
     }
 
+    /// Clear the call stack (for clean recovery after debug detach).
+    pub fn clear_call_stack(&mut self) {
+        self.call_stack.clear();
+    }
+
     /// Reset instruction counter.
     pub fn reset_instruction_count(&mut self) {
         self.instruction_count = 0;

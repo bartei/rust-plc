@@ -143,10 +143,12 @@ impl RuntimeManager {
         Ok(())
     }
 
-    /// Stop the runtime.
+    /// Stop the runtime. Works from both Running and DebugPaused states.
     pub async fn stop(&self) -> Result<(), ApiError> {
         let current_status = self.state.read().unwrap().status;
-        if current_status != RuntimeStatus::Running {
+        if current_status != RuntimeStatus::Running
+            && current_status != RuntimeStatus::DebugPaused
+        {
             return Err(ApiError::not_running());
         }
 
@@ -362,21 +364,28 @@ fn run_cycle_loop(
                         }
                         DebugAction::Detach => {
                             debug_session = None;
+                            // Fully clean up debug state: clear breakpoints,
+                            // reset step mode, and clear the call stack so the
+                            // next scan_cycle starts from a clean state.
                             engine.vm_mut().debug_mut().clear_breakpoints();
                             engine.vm_mut().debug_mut().resume(
                                 st_engine::debug::StepMode::Continue, 0,
                             );
+                            engine.vm_mut().clear_call_stack();
                             state.write().unwrap().status = RuntimeStatus::Running;
+                            tracing::info!("Debug detached — engine resuming normal cycling");
                             continue;
                         }
                         DebugAction::Stop => return Ok(StopReason::Commanded),
                         DebugAction::Shutdown => return Ok(StopReason::Shutdown),
                     }
                 } else {
-                    // No debug session — clear pause and resume
+                    // No debug session — clear pause, call stack, and resume
+                    engine.vm_mut().debug_mut().clear_breakpoints();
                     engine.vm_mut().debug_mut().resume(
                         st_engine::debug::StepMode::Continue, 0,
                     );
+                    engine.vm_mut().clear_call_stack();
                 }
             }
             Err(e) => {
@@ -405,6 +414,7 @@ fn run_cycle_loop(
                 engine.vm_mut().debug_mut().resume(
                     st_engine::debug::StepMode::Continue, 0,
                 );
+                engine.vm_mut().clear_call_stack();
                 tracing::info!("Debug session detached");
             }
             Ok(RuntimeCommand::Start { .. }) => {
@@ -458,6 +468,7 @@ fn run_cycle_loop(
                 engine.vm_mut().debug_mut().resume(
                     st_engine::debug::StepMode::Continue, 0,
                 );
+                engine.vm_mut().clear_call_stack();
                 tracing::info!("Debug session disconnected");
             }
         }
