@@ -58,6 +58,7 @@ Phase 16 (retain/persistent) — after Phase 7+15
 | **14** | Native compilation + hardware targets (LLVM, ESP32, STM32, RPi) — [implementation_native.md](implementation_native.md) |
 | **15** | Remote deployment & online management (agent, SSH, remote debug/monitor) — [design_deploy.md](design_deploy.md) |
 | **16** | RETAIN / PERSISTENT variable persistence (non-volatile storage across restarts) |
+| **17** | Singleton enforcement + debug attach to running engine (safety-critical) |
 
 ---
 

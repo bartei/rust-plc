@@ -300,6 +300,9 @@ Type=simple
 ExecStart={BINARY_PATH} agent --config {CONFIG_PATH}
 Restart=on-failure
 RestartSec=3
+StartLimitBurst=5
+StartLimitIntervalSec=30
+RuntimeDirectory=st-runtime
 StandardOutput=journal
 StandardError=journal
 Environment=RUST_LOG=info

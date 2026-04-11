@@ -300,6 +300,60 @@ and program downloads, per IEC 61131-3 semantics.
 
 ---
 
+## Phase 17: Singleton Enforcement + Debug Attach to Running Engine (SAFETY-CRITICAL)
+
+> Design notes: [design_core.md § Phase 17](design_core.md#phase-17-singleton-enforcement--debug-attach-to-running-engine)
+
+Two instances controlling the same physical I/O can cause machinery damage or
+personal injury. The debugger must attach to the running engine, not spawn a
+second VM. This is the most safety-critical feature in the system.
+
+### Phase A — Singleton enforcement
+
+- [ ] PID file with `flock(LOCK_EX | LOCK_NB)` at `/run/st-runtime/st-runtime.pid`
+- [ ] `SingletonGuard` RAII struct: holds lock, removes PID file on drop
+- [ ] Integrate into `st-runtime agent` startup — exit with clear error if locked
+- [ ] Systemd unit hardening: `StartLimitBurst=5`, `StartLimitIntervalSec=30`, `RuntimeDirectory=st-runtime`
+- [ ] Unit tests: acquire/double-acquire/drop-releases/stale-file (4 tests)
+
+### Phase B — Handle VmError::Halt as debug pause
+
+- [ ] Add `RuntimeStatus::DebugPaused` to runtime status enum
+- [ ] Restructure `run_cycle_loop`: `Halt` → debug pause, not fatal error
+- [ ] Unit test: halt becomes DebugPaused not Error
+
+### Phase C — Debug command channel
+
+- [ ] `DebugCommand` / `DebugResponse` enums in `st-engine/src/debug.rs`
+- [ ] Extend `RuntimeCommand` with `DebugAttach` / `DebugDetach`
+- [ ] `RuntimeManager::debug_attach()` / `debug_detach()` async methods
+- [ ] `handle_debug_commands()` blocking loop in runtime thread
+- [ ] Watchdog: ignore `DebugPaused` status (don't restart paused engine)
+- [ ] Unit tests: attach/detach/variables/channel-drop (5 tests)
+
+### Phase D — In-process DAP handler
+
+- [ ] `dap_attach_handler.rs`: translate DAP protocol ↔ DebugCommand/DebugResponse
+- [ ] DAP proxy: route to attach handler when engine Running, subprocess when Idle
+- [ ] Source file + virtual offset resolution from ProgramStore
+- [ ] Integration tests: attach/breakpoints/step/variables/disconnect (6 tests)
+
+### Phase E — Safety hardening
+
+- [ ] Debug pause timeout (30 min default) — auto-detach on timeout
+- [ ] Auto-detach on TCP disconnect (reader EOF → Disconnect command)
+- [ ] I/O ordering invariant: outputs not written until paused cycle completes
+
+### E2E QEMU tests
+
+- [ ] `test_singleton_second_instance_fails`
+- [ ] `test_singleton_process_count_exactly_one`
+- [ ] `test_dap_attach_no_second_process`
+- [ ] `test_program_resumes_after_debug_disconnect`
+- [ ] `test_debug_pause_timeout_auto_resumes`
+
+---
+
 ## Cross-Cutting Concerns
 
 - [x] Testing: 714+ tests across 10+ crates

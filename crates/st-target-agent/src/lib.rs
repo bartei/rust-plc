@@ -13,4 +13,5 @@ pub mod logging;
 pub mod program_store;
 pub mod runtime_manager;
 pub mod server;
+pub mod singleton;
 pub mod watchdog;

@@ -96,6 +96,24 @@ async fn run_agent(config_path: PathBuf) {
         st_target_agent::config::AgentConfig::default()
     };
 
+    // SAFETY: Acquire singleton lock BEFORE any I/O binding or runtime startup.
+    // Two instances controlling the same physical I/O can cause machinery damage.
+    let pid_path = std::path::Path::new("/run/st-runtime/st-runtime.pid");
+    let _singleton = match st_target_agent::singleton::SingletonGuard::acquire(pid_path) {
+        Ok(guard) => Some(guard),
+        Err(st_target_agent::singleton::SingletonError::AlreadyRunning { pid }) => {
+            eprintln!("FATAL: Another st-runtime instance is already running (PID {pid}).");
+            eprintln!("Two instances controlling the same I/O can cause physical harm.");
+            eprintln!("Stop the existing instance first: sudo systemctl stop st-runtime");
+            std::process::exit(1);
+        }
+        Err(st_target_agent::singleton::SingletonError::IoError(_)) => {
+            // PID lock may fail in dev environments (no /run/ directory).
+            // Port binding below provides fallback singleton enforcement.
+            None
+        }
+    };
+
     // Initialize logging: journald on systemd Linux, stderr fallback otherwise.
     // The log level from agent.yaml is used as the initial filter.
     let log_handle = st_target_agent::logging::init_logging(&config.logging.level);
