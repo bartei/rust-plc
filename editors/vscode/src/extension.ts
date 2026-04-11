@@ -441,54 +441,100 @@ export function activate(context: vscode.ExtensionContext) {
   });
 }
 
+/** Parsed target entry from plc-project.yaml. */
+interface TargetEntry {
+  name: string;
+  host: string;
+  agentPort: number;
+  user: string;
+}
+
 /**
- * Read target hosts from plc-project.yaml in the workspace.
- * Returns an array of "host" strings for quick-pick.
+ * Read targets from plc-project.yaml in the workspace.
+ * Simple YAML extraction — no dependency on a YAML parser.
  */
-function getTargetsFromConfig(): string[] {
+function getTargetsFromConfig(): TargetEntry[] {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) return [];
   const fs = require("fs");
   const path = require("path");
-  for (const name of ["plc-project.yaml", "plc-project.yml"]) {
-    const p = path.join(folder.uri.fsPath, name);
-    if (fs.existsSync(p)) {
-      try {
-        const text = fs.readFileSync(p, "utf8");
-        // Simple YAML target extraction — look for host: lines under targets:
-        const hosts: string[] = [];
-        const lines: string[] = text.split("\n");
-        let inTargets = false;
-        for (const line of lines) {
-          if (/^targets:/.test(line)) { inTargets = true; continue; }
-          if (inTargets && /^\S/.test(line) && !/^\s/.test(line)) { inTargets = false; }
-          if (inTargets) {
-            const m = line.match(/host:\s*(.+)/);
-            if (m) hosts.push(m[1].trim().replace(/["']/g, ""));
+  for (const yamlName of ["plc-project.yaml", "plc-project.yml"]) {
+    const p = path.join(folder.uri.fsPath, yamlName);
+    if (!fs.existsSync(p)) continue;
+    try {
+      const text: string = fs.readFileSync(p, "utf8");
+      const targets: TargetEntry[] = [];
+      const lines = text.split("\n");
+      let inTargets = false;
+      let current: Partial<TargetEntry> = {};
+      for (const line of lines) {
+        if (/^targets:/.test(line)) { inTargets = true; continue; }
+        if (inTargets && /^\S/.test(line)) { inTargets = false; }
+        if (!inTargets) continue;
+        const nameMatch = line.match(/^\s+-\s*name:\s*(.+)/);
+        if (nameMatch) {
+          if (current.name && current.host) {
+            targets.push({
+              name: current.name,
+              host: current.host,
+              agentPort: current.agentPort || 4840,
+              user: current.user || "plc",
+            });
           }
+          current = { name: nameMatch[1].trim().replace(/["']/g, "") };
+          continue;
         }
-        return hosts;
-      } catch {
-        return [];
+        const hostMatch = line.match(/host:\s*(.+)/);
+        if (hostMatch) current.host = hostMatch[1].trim().replace(/["']/g, "");
+        const portMatch = line.match(/agent_port:\s*(\d+)/);
+        if (portMatch) current.agentPort = parseInt(portMatch[1], 10);
+        const userMatch = line.match(/user:\s*(.+)/);
+        if (userMatch) current.user = userMatch[1].trim().replace(/["']/g, "");
       }
+      if (current.name && current.host) {
+        targets.push({
+          name: current.name,
+          host: current.host,
+          agentPort: current.agentPort || 4840,
+          user: current.user || "plc",
+        });
+      }
+      return targets;
+    } catch {
+      return [];
     }
   }
   return [];
 }
 
 /**
- * Show a quick-pick with known targets, or an input box if none configured.
+ * Resolve a target name to host + DAP port from plc-project.yaml.
  */
-async function pickOrInputTarget(targets: string[], title: string): Promise<string | undefined> {
+function resolveTarget(targetName: string): { host: string; dapPort: number } | undefined {
+  const targets = getTargetsFromConfig();
+  const t = targets.find(t => t.name === targetName);
+  if (!t) return undefined;
+  return { host: t.host, dapPort: t.agentPort + 1 };
+}
+
+/**
+ * Show a quick-pick with known targets, or an input box if none configured.
+ * Returns the host string of the selected target.
+ */
+async function pickOrInputTarget(targets: TargetEntry[], title: string): Promise<string | undefined> {
   if (targets.length > 0) {
-    const items = targets.map(h => ({ label: h, description: `Port 4840` }));
-    items.push({ label: "$(add) Enter manually...", description: "" });
+    const items = targets.map(t => ({
+      label: t.name,
+      description: `${t.host}:${t.agentPort}`,
+      host: t.host,
+    }));
+    items.push({ label: "$(add) Enter manually...", description: "", host: "" });
     const pick = await vscode.window.showQuickPick(items, { title, placeHolder: "Select target" });
     if (!pick) return undefined;
     if (pick.label.includes("Enter manually")) {
       return vscode.window.showInputBox({ prompt: "Target host (IP or hostname)", title });
     }
-    return pick.label;
+    return pick.host;
   }
   return vscode.window.showInputBox({ prompt: "Target host (IP or hostname)", placeHolder: "192.168.1.50", title });
 }
@@ -515,9 +561,31 @@ class StDebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory {
     const config = session.configuration;
 
     if (config.request === "attach") {
-      // Remote attach: connect to target agent's DAP proxy TCP port
-      const host = config.host || "127.0.0.1";
-      const port = config.port || 4841;
+      let host: string = config.host;
+      let port: number = config.port;
+
+      // If "target" is specified, resolve host/port from plc-project.yaml
+      if (config.target && !host) {
+        const resolved = resolveTarget(config.target);
+        if (resolved) {
+          host = resolved.host;
+          port = port || resolved.dapPort;
+          console.log(`[ST-DEBUG] Resolved target '${config.target}' → ${host}:${port}`);
+        } else {
+          vscode.window.showErrorMessage(
+            `Target '${config.target}' not found in plc-project.yaml. ` +
+            `Define it under 'targets:' or use explicit 'host' and 'port'.`
+          );
+          // Fall through with defaults so VS Code shows a connection error
+          // rather than a cryptic internal error
+          host = host || "127.0.0.1";
+          port = port || 4841;
+        }
+      }
+
+      host = host || "127.0.0.1";
+      port = port || 4841;
+
       console.log(`[ST-DEBUG] Creating DebugAdapterServer(${port}, ${host})`);
       return new vscode.DebugAdapterServer(port, host);
     }

@@ -151,7 +151,7 @@ Then click **▶ Run** to start the program. The status indicator turns green an
 
 ## 6. Debug Remotely from VS Code
 
-Create a `launch.json` in your project with an `attach` configuration:
+Create a `launch.json` in your project with an `attach` configuration. Use the **target name** from your `plc-project.yaml` — the extension resolves the host and port automatically:
 
 ```jsonc
 {
@@ -161,11 +161,24 @@ Create a `launch.json` in your project with an `attach` configuration:
             "type": "st",
             "request": "attach",
             "name": "Debug on line1-plc",
-            "host": "192.168.1.50",
-            "port": 4841,
+            "target": "line1-plc",
             "stopOnEntry": true
         }
     ]
+}
+```
+
+The `target` field references the name from your `plc-project.yaml` targets section. The extension reads the host and agent_port from the YAML and connects to the DAP proxy automatically (agent_port + 1).
+
+You can also use explicit `host` and `port` if you prefer:
+
+```jsonc
+{
+    "type": "st",
+    "request": "attach",
+    "name": "Debug on 192.168.1.50",
+    "host": "192.168.1.50",
+    "port": 4841
 }
 ```
 

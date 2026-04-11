@@ -97,17 +97,18 @@
             }
           },
           "attach": {
-            "required": ["host", "port"],
             "properties": {
+              "target": {
+                "type": "string",
+                "description": "Target name from plc-project.yaml targets section. Resolves host and port automatically."
+              },
               "host": {
                 "type": "string",
-                "description": "Hostname or IP of the target agent",
-                "default": "127.0.0.1"
+                "description": "Hostname or IP of the target agent (overrides target lookup)"
               },
               "port": {
                 "type": "number",
-                "description": "DAP proxy port on the target agent (default: 4841)",
-                "default": 4841
+                "description": "DAP proxy port on the target agent (default: agent_port + 1)"
               },
               "stopOnEntry": {
                 "type": "boolean",
@@ -139,13 +140,24 @@
             }
           },
           {
-            "label": "ST: Attach to Remote Target",
-            "description": "Debug a program on a remote target agent",
+            "label": "ST: Attach to Remote Target (by name)",
+            "description": "Debug a program on a target defined in plc-project.yaml",
             "body": {
               "type": "st",
               "request": "attach",
-              "name": "Debug on ${1:target}",
-              "host": "${2:192.168.1.50}",
+              "name": "Debug on ${1:my-plc}",
+              "target": "${1:my-plc}",
+              "stopOnEntry": true
+            }
+          },
+          {
+            "label": "ST: Attach to Remote Target (by host)",
+            "description": "Debug a program on a target by IP address",
+            "body": {
+              "type": "st",
+              "request": "attach",
+              "name": "Debug on ${1:192.168.1.50}",
+              "host": "${1:192.168.1.50}",
               "port": 4841,
               "stopOnEntry": true
             }

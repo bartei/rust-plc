@@ -243,9 +243,8 @@ Enable remote debugging and monitoring through the agent.
 - [x] Detect `"request": "attach"` with `host`/`port` in launch.json
 - [x] `StDebugAdapterFactory` returns `DebugAdapterServer(port, host)` for attach mode
 - [x] `package.json` updated with `attach` configuration attributes and snippet
-- [ ] Resolve target connection from `plc-project.yaml` — *deferred, uses explicit host/port*
+- [x] Resolve target connection from `plc-project.yaml` — `"target": "line1-plc"` in launch.json resolves host + DAP port from `targets:` section
 - [ ] `sourceFileMap` auto-configuration for path remapping
-- ~~SSH tunnel in extension~~ — **removed**: users manage tunnels themselves via `ssh -L`
 
 ### VS Code extension: remote monitor
 
