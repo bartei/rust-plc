@@ -100,6 +100,13 @@ export function getPlcVarCatalog(): Array<{ name: string; type: string }> {
 
 class PlcDapTracker implements vscode.DebugAdapterTracker {
   private watchListSynced = false;
+  private isRemote: boolean;
+  private localRoot: string | undefined;
+
+  constructor(session: vscode.DebugSession) {
+    this.isRemote = session.configuration.request === "attach";
+    this.localRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  }
 
   onWillReceiveMessage(message: any): void {
     // Log messages VS Code sends TO the debug adapter (for diagnostics)
@@ -109,6 +116,18 @@ class PlcDapTracker implements vscode.DebugAdapterTracker {
   }
 
   onDidSendMessage(message: any): void {
+    // Rewrite remote source paths in stackTrace responses so VS Code
+    // opens local files instead of unreachable target-side paths.
+    if (this.isRemote && this.localRoot && message?.type === "response") {
+      if (message.command === "stackTrace" && message.body?.stackFrames) {
+        for (const frame of message.body.stackFrames) {
+          if (frame.source?.path) {
+            frame.source.path = this.remapSourcePath(frame.source.path);
+          }
+        }
+      }
+    }
+
     if (
       message?.type !== "event" ||
       message?.event !== "output" ||
@@ -167,6 +186,34 @@ class PlcDapTracker implements vscode.DebugAdapterTracker {
     }
   }
 
+  /**
+   * Remap a target-side source path to a local workspace path.
+   * Target paths look like: /var/lib/st-plc/programs/current_source/main.st
+   * or /var/lib/st-plc/programs/current_source/controllers/fill_controller.st
+   * Local paths:            <workspace>/main.st
+   * or                      <workspace>/controllers/fill_controller.st
+   */
+  private remapSourcePath(remotePath: string): string {
+    if (!this.localRoot) return remotePath;
+    // Find "current_source/" marker in the remote path and extract the relative part
+    const marker = "current_source/";
+    const idx = remotePath.indexOf(marker);
+    if (idx >= 0) {
+      const relPath = remotePath.substring(idx + marker.length);
+      const localPath = path.join(this.localRoot, relPath);
+      if (fs.existsSync(localPath)) {
+        return localPath;
+      }
+    }
+    // Fallback: try matching just the filename in the workspace
+    const basename = path.basename(remotePath);
+    const localByName = path.join(this.localRoot, basename);
+    if (fs.existsSync(localByName)) {
+      return localByName;
+    }
+    return remotePath;
+  }
+
   onWillStartSession(): void {
     plcVarCatalog = [];
     this.watchListSynced = false;
@@ -186,9 +233,9 @@ class PlcDapTracker implements vscode.DebugAdapterTracker {
 
 class PlcDapTrackerFactory implements vscode.DebugAdapterTrackerFactory {
   createDebugAdapterTracker(
-    _session: vscode.DebugSession
+    session: vscode.DebugSession
   ): vscode.ProviderResult<vscode.DebugAdapterTracker> {
-    return new PlcDapTracker();
+    return new PlcDapTracker(session);
   }
 }
 
