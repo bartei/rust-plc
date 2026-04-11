@@ -619,12 +619,29 @@ interface TargetEntry {
  * Simple YAML extraction — no dependency on a YAML parser.
  */
 function getTargetsFromConfig(): TargetEntry[] {
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  if (!folder) return [];
-  const fs = require("fs");
-  const path = require("path");
+  // Search for plc-project.yaml in multiple locations:
+  // 1. Workspace root
+  // 2. Active editor's directory (and parents up to 5 levels)
+  // 3. All workspace folders
+  const searchDirs: string[] = [];
+  for (const f of vscode.workspace.workspaceFolders || []) {
+    searchDirs.push(f.uri.fsPath);
+  }
+  // Walk up from active editor's file
+  const activeFile = vscode.window.activeTextEditor?.document.uri.fsPath;
+  if (activeFile) {
+    let dir = path.dirname(activeFile);
+    for (let i = 0; i < 6; i++) {
+      if (!searchDirs.includes(dir)) searchDirs.push(dir);
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+
+  for (const dirPath of searchDirs) {
   for (const yamlName of ["plc-project.yaml", "plc-project.yml"]) {
-    const p = path.join(folder.uri.fsPath, yamlName);
+    const p = path.join(dirPath, yamlName);
     if (!fs.existsSync(p)) continue;
     try {
       const text: string = fs.readFileSync(p, "utf8");
@@ -666,8 +683,9 @@ function getTargetsFromConfig(): TargetEntry[] {
       }
       return targets;
     } catch {
-      return [];
+      continue;
     }
+  }
   }
   return [];
 }
@@ -760,6 +778,8 @@ class StDebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory {
       let host: string = config.host;
       let port: number = config.port;
 
+      console.log(`[ST-DEBUG] Attach config: target=${config.target} host=${host} port=${port}`);
+
       // If "target" is specified, resolve host/port from plc-project.yaml
       if (config.target && !host) {
         const resolved = resolveTarget(config.target);
@@ -768,13 +788,9 @@ class StDebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory {
           port = port || resolved.dapPort;
           console.log(`[ST-DEBUG] Resolved target '${config.target}' → ${host}:${port}`);
         } else {
-          vscode.window.showErrorMessage(
-            `Target '${config.target}' not found in plc-project.yaml. ` +
-            `Define it under 'targets:' or use explicit 'host' and 'port'.`
-          );
-          // Fall through with defaults so VS Code shows a connection error
-          // rather than a cryptic internal error
-          host = host || "127.0.0.1";
+          // Target name not found — try using the target name directly as a hostname
+          console.log(`[ST-DEBUG] Target '${config.target}' not in plc-project.yaml, using as hostname`);
+          host = config.target;
           port = port || 4841;
         }
       }
@@ -783,6 +799,7 @@ class StDebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory {
       port = port || 4841;
 
       console.log(`[ST-DEBUG] Creating DebugAdapterServer(${port}, ${host})`);
+      vscode.window.setStatusBarMessage(`Connecting to ${host}:${port}...`, 3000);
       return new vscode.DebugAdapterServer(port, host);
     }
 
