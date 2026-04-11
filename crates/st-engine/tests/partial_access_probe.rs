@@ -1,7 +1,7 @@
 //! Probing tests for partial variable access (.%X, .%B, .%W, .%D).
 
 use st_ir::*;
-use st_runtime::*;
+use st_engine::*;
 
 fn run_function(source: &str, func_name: &str) -> Value {
     let parse_result = st_syntax::parse(source);

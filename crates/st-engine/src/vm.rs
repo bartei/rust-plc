@@ -311,6 +311,17 @@ impl Vm {
         &self.module
     }
 
+    /// Get struct field layout from type_defs. Returns None if not a struct.
+    pub fn struct_type_fields(&self, type_def_idx: u16) -> Option<(&str, &[VarSlot])> {
+        self.module.type_defs.get(type_def_idx as usize).and_then(|td| {
+            if let TypeDef::Struct { name, fields } = td {
+                Some((name.as_str(), fields.as_slice()))
+            } else {
+                None
+            }
+        })
+    }
+
     /// Get the call stack as frame info for the debugger.
     pub fn stack_frames(&self) -> Vec<FrameInfo> {
         self.call_stack
@@ -419,6 +430,10 @@ impl Vm {
                         self.catalog_fb_fields(fb_idx, &inst_prefix, &mut result);
                     }
                     VarType::ClassInstance(_) => { /* skip */ }
+                    VarType::Struct(td_idx) => {
+                        let inst_prefix = format!("{prefix}.{}", slot.name);
+                        self.catalog_struct_fields(td_idx, &inst_prefix, &mut result);
+                    }
                     _ => {
                         result.push((
                             format!("{prefix}.{}", slot.name),
@@ -430,6 +445,24 @@ impl Vm {
             }
         }
         result
+    }
+
+    /// Enumerate a struct's fields for the catalog (schema only, no values).
+    fn catalog_struct_fields(
+        &self,
+        type_def_idx: u16,
+        prefix: &str,
+        result: &mut Vec<(String, String)>,
+    ) {
+        if let Some((_, fields)) = self.struct_type_fields(type_def_idx) {
+            for field in fields {
+                result.push((
+                    format!("{prefix}.{}", field.name),
+                    debug::format_var_type_with_width(field.ty, field.int_width)
+                        .to_string(),
+                ));
+            }
+        }
     }
 
     /// Recursively snapshot a FB instance's fields with runtime values.
@@ -546,6 +579,16 @@ impl Vm {
                         );
                     }
                     VarType::ClassInstance(_) => { /* skip */ }
+                    VarType::Struct(td_idx) => {
+                        let inst_prefix = format!("{prefix}.{}", slot.name);
+                        let instance_key = (caller_id, i as u16);
+                        self.snapshot_struct_fields(
+                            td_idx,
+                            &inst_prefix,
+                            &instance_key,
+                            &mut result,
+                        );
+                    }
                     _ => {
                         let value = locals
                             .get(i)
@@ -565,6 +608,32 @@ impl Vm {
         result
     }
 
+    /// Snapshot a struct instance's fields with runtime values.
+    fn snapshot_struct_fields(
+        &self,
+        type_def_idx: u16,
+        prefix: &str,
+        instance_key: &(u32, u16),
+        result: &mut Vec<VariableInfo>,
+    ) {
+        if let Some((_, fields)) = self.struct_type_fields(type_def_idx) {
+            let state = self.fb_instances.get(instance_key);
+            for (j, field) in fields.iter().enumerate() {
+                let value = state
+                    .and_then(|s| s.get(j))
+                    .cloned()
+                    .unwrap_or(Value::default_for_type(field.ty));
+                result.push(VariableInfo {
+                    name: format!("{prefix}.{}", field.name),
+                    value: debug::format_value(&value),
+                    ty: debug::format_var_type_with_width(field.ty, field.int_width)
+                        .to_string(),
+                    var_ref: 0,
+                });
+            }
+        }
+    }
+
     /// Resolve a dotted FB field path like "counter.Q" or "counter.CV"
     /// from the current call frame's context. Returns the field value if
     /// found, or None if the path doesn't resolve.
@@ -580,24 +649,32 @@ impl Vm {
         let frame = self.call_stack.last()?;
         let func = &self.module.functions[frame.func_index as usize];
 
-        // Find the local slot for the object (e.g., "counter")
+        // Find the local slot for the object (e.g., "counter" or "stats")
         let (slot_idx, slot) = func.locals.find_slot(obj_name)?;
 
-        // Must be a FbInstance
-        let fb_func_idx = match slot.ty {
-            VarType::FbInstance(idx) => idx,
+        let caller_id = self.caller_identity();
+        let instance_key = (caller_id, slot_idx);
+
+        // Handle both FbInstance and Struct types
+        let (field_idx, field_slot) = match slot.ty {
+            VarType::FbInstance(fb_idx) => {
+                let fb_func = &self.module.functions[fb_idx as usize];
+                fb_func.locals.find_slot(field_name)?
+            }
+            VarType::Struct(td_idx) => {
+                let (_, fields) = self.struct_type_fields(td_idx)?;
+                fields.iter()
+                    .enumerate()
+                    .find(|(_, f)| f.name.eq_ignore_ascii_case(field_name))
+                    .map(|(i, f)| (i as u16, f))?
+            }
             _ => return None,
         };
 
-        let fb_func = &self.module.functions[fb_func_idx as usize];
-        let (field_idx, field_slot) = fb_func.locals.find_slot(field_name)?;
-
         // Look up the instance state using the current frame's identity.
-        // If the FB hasn't been called yet, fb_instances has no entry —
+        // If the instance hasn't been used yet, fb_instances has no entry —
         // return the default value rather than None so the debugger can
         // still display the field (with a "0" / "FALSE" / "VOID" value).
-        let caller_id = self.caller_identity();
-        let instance_key = (caller_id, slot_idx);
         let fb_state = self.fb_instances.get(&instance_key);
 
         let value = fb_state
@@ -654,6 +731,26 @@ impl Vm {
                     }
                 }
                 VarType::ClassInstance(_) => { /* skip for now */ }
+                VarType::Struct(td_idx) => {
+                    // Show struct fields with dotted names.
+                    if let Some((_, fields)) = self.struct_type_fields(td_idx) {
+                        let instance_key = (caller_id, i as u16);
+                        let state = self.fb_instances.get(&instance_key);
+                        for (j, field) in fields.iter().enumerate() {
+                            let value = state
+                                .and_then(|s| s.get(j))
+                                .cloned()
+                                .unwrap_or(Value::default_for_type(field.ty));
+                            result.push(VariableInfo {
+                                name: format!("{}.{}", slot.name, field.name),
+                                value: debug::format_value(&value),
+                                ty: debug::format_var_type_with_width(field.ty, field.int_width)
+                                    .to_string(),
+                                var_ref: 0,
+                            });
+                        }
+                    }
+                }
                 _ => {
                     let value = frame
                         .locals

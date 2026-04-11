@@ -2,7 +2,7 @@
 //! Verify that classes, interfaces, inheritance, and methods work across file boundaries.
 
 use st_ir::*;
-use st_runtime::*;
+use st_engine::*;
 
 /// Parse multiple source strings, compile, and run.
 fn run_multi(sources: &[&str], cycles: u64) -> Engine {

@@ -1,4 +1,4 @@
-//! st-plc-runtime: Unified PLC runtime binary for target deployment.
+//! st-runtime: Unified PLC runtime binary for target deployment.
 //!
 //! Single statically-linked binary combining agent + debugger + compiler.
 //! Deployed to target devices via `st-cli target install`.
@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "st-plc-runtime")]
+#[command(name = "st-runtime")]
 #[command(about = "PLC runtime for IEC 61131-3 Structured Text")]
 #[command(version)]
 struct Cli {
@@ -74,7 +74,7 @@ async fn main() {
             run_check(path.as_deref());
         }
         Commands::Version => {
-            println!("st-plc-runtime {}", env!("CARGO_PKG_VERSION"));
+            println!("st-runtime {}", env!("CARGO_PKG_VERSION"));
             println!("Target: {}/{}", std::env::consts::OS, std::env::consts::ARCH);
         }
     }
@@ -127,7 +127,7 @@ async fn run_agent(config_path: PathBuf) {
 
     // Spawn DAP proxy — uses current_exe() to spawn self with "debug" subcommand
     let dap_state = state.clone();
-    let st_cli_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("st-plc-runtime"));
+    let st_cli_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("st-runtime"));
     tokio::spawn(st_target_agent::dap_proxy::run_dap_proxy(
         dap_bind,
         dap_port,
@@ -226,11 +226,11 @@ fn run_program(path: Option<&str>, cycles: u64) {
             })
     });
 
-    let config = st_runtime::EngineConfig {
+    let config = st_engine::EngineConfig {
         max_cycles: cycles,
         ..Default::default()
     };
-    let mut engine = st_runtime::Engine::new(module, program_name, config);
+    let mut engine = st_engine::Engine::new(module, program_name, config);
     match engine.run() {
         Ok(()) => {
             let stats = engine.stats();

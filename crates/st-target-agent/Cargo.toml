@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 st-ir.workspace = true
-st-runtime = { path = "../st-runtime" }
+st-engine = { path = "../st-engine" }
 st-deploy = { path = "../st-deploy" }
 st-comm-api = { path = "../st-comm-api" }
 

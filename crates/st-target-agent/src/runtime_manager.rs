@@ -181,7 +181,7 @@ fn runtime_thread(
                 }
 
                 // Build engine config
-                let engine_config = st_runtime::EngineConfig {
+                let engine_config = st_engine::EngineConfig {
                     max_cycles: 0, // unlimited
                     cycle_time,
                     ..Default::default()
@@ -189,7 +189,7 @@ fn runtime_thread(
 
                 // Construct engine inside this thread (avoids Send issues)
                 let mut engine =
-                    st_runtime::Engine::new(module, program_name, engine_config);
+                    st_engine::Engine::new(module, program_name, engine_config);
 
                 // Set state to Running
                 {
@@ -229,7 +229,7 @@ enum StopReason {
 
 /// Run the scan cycle loop until stop/shutdown/error.
 fn run_cycle_loop(
-    engine: &mut st_runtime::Engine,
+    engine: &mut st_engine::Engine,
     state: &Arc<RwLock<RuntimeState>>,
     cmd_rx: &mut tokio::sync::mpsc::Receiver<RuntimeCommand>,
     cycle_time: Option<Duration>,

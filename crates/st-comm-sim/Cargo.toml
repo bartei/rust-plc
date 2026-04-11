@@ -19,5 +19,5 @@ tracing = { workspace = true }
 [dev-dependencies]
 st-syntax = { path = "../st-syntax" }
 st-compiler = { path = "../st-compiler" }
-st-runtime = { path = "../st-runtime" }
+st-engine = { path = "../st-engine" }
 st-ir = { path = "../st-ir" }

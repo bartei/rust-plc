@@ -353,12 +353,12 @@ fn run_program_cmd(args: &[String]) {
         eprintln!("[ENGINE] cycle_time: {ct:?}");
     }
 
-    let config = st_runtime::EngineConfig {
+    let config = st_engine::EngineConfig {
         max_cycles: cycles,
         cycle_time: engine_proj.cycle_time,
         ..Default::default()
     };
-    let mut engine = st_runtime::Engine::new(module, program_name, config);
+    let mut engine = st_engine::Engine::new(module, program_name, config);
 
     // Register simulated devices and start their web UIs (if any).
     if let Some(ref mut setup) = comm_setup {

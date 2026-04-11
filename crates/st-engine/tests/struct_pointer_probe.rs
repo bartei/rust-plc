@@ -2,7 +2,7 @@
 //! Goal: map exactly what works vs what's broken before writing playground.
 
 use st_ir::*;
-use st_runtime::*;
+use st_engine::*;
 
 fn run_program(source: &str, cycles: u64) -> Engine {
     let parse_result = st_syntax::parse(source);

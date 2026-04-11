@@ -8,10 +8,10 @@ use dap::types::*;
 use st_comm_api::CommDevice;
 use st_ir::PouKind;
 use dap::base_message::Sendable;
-use st_runtime::comm_manager::CommManager;
-use st_runtime::debug::{PauseReason, StepMode};
-use st_runtime::engine::CycleStats;
-use st_runtime::vm::{Vm, VmConfig, VmError};
+use st_engine::comm_manager::CommManager;
+use st_engine::debug::{PauseReason, StepMode};
+use st_engine::engine::CycleStats;
+use st_engine::vm::{Vm, VmConfig, VmError};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::sync::mpsc;
 use std::thread;
@@ -353,6 +353,17 @@ struct FbVarRef {
     fb_func_idx: u16,
 }
 
+/// Reference to a struct instance for hierarchical variable expansion.
+#[derive(Debug, Clone, Copy)]
+struct StructVarRef {
+    /// The caller identity (encodes who owns this struct instance).
+    caller_id: u32,
+    /// The slot index of this struct variable in its parent's locals.
+    slot_idx: u16,
+    /// The type_def index for this struct's field layout.
+    type_def_idx: u16,
+}
+
 struct DapSession {
     source_path: String,
     source: String,
@@ -374,6 +385,9 @@ struct DapSession {
     /// it sends a Variables request with the ref ID → we look up the FB
     /// instance state and return its fields as children.
     fb_var_refs: std::collections::HashMap<i64, FbVarRef>,
+    /// Maps variable reference IDs to struct instance locations for
+    /// hierarchical expansion (same pattern as fb_var_refs).
+    struct_var_refs: std::collections::HashMap<i64, StructVarRef>,
     /// Communication manager for simulated devices (read inputs / write outputs each scan).
     comm: CommManager,
     /// Per-file byte offsets in the virtual concatenated text produced by
@@ -443,6 +457,7 @@ impl DapSession {
             pending_breakpoints: std::collections::HashMap::new(),
             scope_refs: std::collections::HashMap::new(),
             fb_var_refs: std::collections::HashMap::new(),
+            struct_var_refs: std::collections::HashMap::new(),
             next_var_ref: 1000,
             comm: CommManager::new(),
             file_virtual_offsets: std::collections::HashMap::new(),
@@ -469,7 +484,7 @@ impl DapSession {
     /// Build a compact summary string for a FB instance, e.g., "CV=2, Q=FALSE".
     fn fb_summary_value(
         &self,
-        vm: &st_runtime::vm::Vm,
+        vm: &st_engine::vm::Vm,
         caller_id: u32,
         slot_idx: u16,
         fb_func_idx: u16,
@@ -490,7 +505,43 @@ impl DapSession {
             if val == st_ir::Value::Void {
                 continue;
             }
-            parts.push(format!("{}={}", fb_slot.name, st_runtime::debug::format_value(&val)));
+            parts.push(format!("{}={}", fb_slot.name, st_engine::debug::format_value(&val)));
+            if parts.len() >= 4 {
+                parts.push("...".to_string());
+                break;
+            }
+        }
+        if parts.is_empty() {
+            "(no state)".to_string()
+        } else {
+            parts.join(", ")
+        }
+    }
+
+    /// Build a compact summary string for a struct instance, e.g.,
+    /// "bottles_filled=3, running=TRUE".
+    fn struct_summary_value(
+        &self,
+        vm: &st_engine::vm::Vm,
+        caller_id: u32,
+        slot_idx: u16,
+        type_def_idx: u16,
+    ) -> String {
+        let Some((_, fields)) = vm.struct_type_fields(type_def_idx) else {
+            return "(no fields)".to_string();
+        };
+        let instance_key = (caller_id, slot_idx);
+        let state = vm.fb_instances_ref().get(&instance_key);
+        let mut parts = Vec::new();
+        for (j, field) in fields.iter().enumerate() {
+            let val = state
+                .and_then(|s| s.get(j))
+                .cloned()
+                .unwrap_or(st_ir::Value::default_for_type(field.ty));
+            if val == st_ir::Value::Void {
+                continue;
+            }
+            parts.push(format!("{}={}", field.name, st_engine::debug::format_value(&val)));
             if parts.len() >= 4 {
                 parts.push("...".to_string());
                 break;
@@ -1140,9 +1191,9 @@ impl DapSession {
 
                     variables.push(Variable {
                         name: fb_slot.name.clone(),
-                        value: st_runtime::debug::format_value(&fb_value),
+                        value: st_engine::debug::format_value(&fb_value),
                         type_field: Some(
-                            st_runtime::debug::format_var_type_with_width(
+                            st_engine::debug::format_var_type_with_width(
                                 fb_slot.ty,
                                 fb_slot.int_width,
                             )
@@ -1151,6 +1202,37 @@ impl DapSession {
                         variables_reference: child_ref,
                         ..Default::default()
                     });
+                }
+                return ok(
+                    seq,
+                    ResponseBody::Variables(dap::responses::VariablesResponse { variables }),
+                );
+            }
+
+            // Check if this is a request for struct instance children.
+            if let Some(sr) = self.struct_var_refs.get(&ref_id).copied() {
+                if let Some((_, fields)) = vm.struct_type_fields(sr.type_def_idx) {
+                    let instance_key = (sr.caller_id, sr.slot_idx);
+                    let state = vm.fb_instances_ref().get(&instance_key);
+                    for (j, field) in fields.iter().enumerate() {
+                        let value = state
+                            .and_then(|s| s.get(j))
+                            .cloned()
+                            .unwrap_or(st_ir::Value::default_for_type(field.ty));
+                        variables.push(Variable {
+                            name: field.name.clone(),
+                            value: st_engine::debug::format_value(&value),
+                            type_field: Some(
+                                st_engine::debug::format_var_type_with_width(
+                                    field.ty,
+                                    field.int_width,
+                                )
+                                .to_string(),
+                            ),
+                            variables_reference: 0,
+                            ..Default::default()
+                        });
+                    }
                 }
                 return ok(
                     seq,
@@ -1191,6 +1273,32 @@ impl DapSession {
                                 variables_reference: fb_ref_id,
                                 ..Default::default()
                             });
+                        } else if let st_ir::VarType::Struct(td_idx) = slot.ty {
+                            // Struct variable → expandable node with variablesReference.
+                            let struct_ref_id = self.next_var_ref;
+                            self.next_var_ref += 1;
+                            self.struct_var_refs.insert(
+                                struct_ref_id,
+                                StructVarRef {
+                                    caller_id,
+                                    slot_idx: i as u16,
+                                    type_def_idx: td_idx,
+                                },
+                            );
+                            // Build a summary and type name from the struct's type_def
+                            let (type_name, summary) = if let Some((name, _)) = vm.struct_type_fields(td_idx) {
+                                let sum = self.struct_summary_value(vm, caller_id, i as u16, td_idx);
+                                (name.to_string(), sum)
+                            } else {
+                                ("STRUCT".to_string(), "(no fields)".to_string())
+                            };
+                            variables.push(Variable {
+                                name: slot.name.clone(),
+                                value: summary,
+                                type_field: Some(type_name),
+                                variables_reference: struct_ref_id,
+                                ..Default::default()
+                            });
                         } else if matches!(slot.ty, st_ir::VarType::ClassInstance(_)) {
                             // Skip class instances for now
                         } else {
@@ -1203,7 +1311,7 @@ impl DapSession {
                                 name: slot.name.clone(),
                                 value,
                                 type_field: Some(
-                                    st_runtime::debug::format_var_type_with_width(
+                                    st_engine::debug::format_var_type_with_width(
                                         slot.ty,
                                         slot.int_width,
                                     )
@@ -1307,6 +1415,24 @@ impl DapSession {
                         result_str = self.fb_summary_value(vm, caller_id, slot_idx, fb_idx);
                         var_ref = ref_id;
                         type_name = Some(fb_func.name.clone());
+                    } else if let st_ir::VarType::Struct(td_idx) = slot.ty {
+                        // Struct instance → expandable in the Watch panel
+                        let ref_id = self.next_var_ref;
+                        self.next_var_ref += 1;
+                        self.struct_var_refs.insert(
+                            ref_id,
+                            StructVarRef {
+                                caller_id,
+                                slot_idx,
+                                type_def_idx: td_idx,
+                            },
+                        );
+                        let tn = vm.struct_type_fields(td_idx)
+                            .map(|(name, _)| name.to_string())
+                            .unwrap_or_else(|| "STRUCT".to_string());
+                        result_str = self.struct_summary_value(vm, caller_id, slot_idx, td_idx);
+                        var_ref = ref_id;
+                        type_name = Some(tn);
                     } else {
                         // Scalar local — look up via current_locals()
                         let locals = vm.current_locals();
@@ -1481,7 +1607,7 @@ impl DapSession {
 
         if self.vm.is_some() {
             self.vm.as_mut().unwrap().force_variable(var_name, value.clone());
-            let result = format!("Forced {} = {}", var_name, st_runtime::debug::format_value(&value));
+            let result = format!("Forced {} = {}", var_name, st_engine::debug::format_value(&value));
             self.pending_events.push(console_output(&result));
             // Push a fresh telemetry snapshot so the Monitor panel updates
             // immediately rather than waiting for the next periodic tick.
@@ -1591,7 +1717,7 @@ impl DapSession {
                 "No forced variables".into()
             } else {
                 forced.iter()
-                    .map(|(name, val)| format!("{} = {}", name, st_runtime::debug::format_value(val)))
+                    .map(|(name, val)| format!("{} = {}", name, st_engine::debug::format_value(val)))
                     .collect::<Vec<_>>()
                     .join(", ")
             }

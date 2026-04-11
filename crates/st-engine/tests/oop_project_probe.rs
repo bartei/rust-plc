@@ -1,7 +1,7 @@
 //! Probe the exact oop_project scenario: cross-file class methods storing to globals.
 
 use st_ir::*;
-use st_runtime::*;
+use st_engine::*;
 
 fn run_multi(sources: &[&str], cycles: u64) -> Engine {
     let parse_result = st_syntax::multi_file::parse_multi(sources);

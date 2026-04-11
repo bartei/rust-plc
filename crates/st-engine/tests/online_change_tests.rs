@@ -1,7 +1,7 @@
 //! End-to-end online change tests: compile, run, hot-reload, verify state.
 
 use st_ir::*;
-use st_runtime::*;
+use st_engine::*;
 
 fn make_engine(source: &str) -> Engine {
     let parse_result = st_syntax::parse(source);

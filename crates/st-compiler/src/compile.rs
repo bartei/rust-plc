@@ -184,8 +184,28 @@ impl ModuleCompiler {
             TopLevelItem::Interface(_) => {
                 // Interfaces have no runtime representation
             }
-            TopLevelItem::TypeDeclaration(_) => {
-                // Type defs are used at compile time, not registered as functions
+            TopLevelItem::TypeDeclaration(tdb) => {
+                for tdef in &tdb.definitions {
+                    if let TypeDefKind::Struct(st) = &tdef.ty {
+                        let fields: Vec<VarSlot> = st.fields.iter().enumerate().map(|(i, f)| {
+                            let ty = Self::var_type_from_ast(&f.ty);
+                            let int_width = Self::int_width_from_ast(&f.ty);
+                            let size = ty.size();
+                            VarSlot {
+                                name: f.name.name.clone(),
+                                ty,
+                                offset: i,
+                                size,
+                                retain: false,
+                                int_width,
+                            }
+                        }).collect();
+                        self.type_defs.push(TypeDef::Struct {
+                            name: tdef.name.name.clone(),
+                            fields,
+                        });
+                    }
+                }
             }
         }
     }
@@ -194,7 +214,7 @@ impl ModuleCompiler {
         match item {
             TopLevelItem::Program(p) => {
                 let func_idx = self.find_func(&p.name.name)?;
-                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases);
+                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases, &self.type_defs);
                 fc.compile_var_blocks(&p.var_blocks);
                 let body_start_pc = fc.current_pc();
                 fc.compile_statements(&p.body)?;
@@ -207,7 +227,7 @@ impl ModuleCompiler {
             }
             TopLevelItem::Function(f) => {
                 let func_idx = self.find_func(&f.name.name)?;
-                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases);
+                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases, &self.type_defs);
                 fc.compile_var_blocks(&f.var_blocks);
                 let ret_ty = Self::var_type_from_ast(&f.return_type);
                 let ret_width = Self::int_width_from_ast(&f.return_type);
@@ -225,7 +245,7 @@ impl ModuleCompiler {
             }
             TopLevelItem::FunctionBlock(fb) => {
                 let func_idx = self.find_func(&fb.name.name)?;
-                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases);
+                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases, &self.type_defs);
                 fc.compile_var_blocks(&fb.var_blocks);
                 let body_start_pc = fc.current_pc();
                 fc.compile_statements(&fb.body)?;
@@ -239,7 +259,7 @@ impl ModuleCompiler {
             TopLevelItem::Class(cls) => {
                 // Compile the class body (inherited + own var initializers)
                 let func_idx = self.find_func(&cls.name.name)?;
-                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases);
+                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases, &self.type_defs);
                 // Inherited vars (with init, so defaults from parent classes are applied)
                 let inherited_for_class = self.collect_inherited_var_blocks(&cls.name.name);
                 for vb in &inherited_for_class {
@@ -263,7 +283,7 @@ impl ModuleCompiler {
                     }
                     let method_name = format!("{}.{}", cls.name.name, method.name.name);
                     let method_idx = self.find_func(&method_name)?;
-                    let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases);
+                    let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases, &self.type_defs);
                     // First: register inherited var_blocks (ancestor classes)
                     for vb in &inherited_var_blocks {
                         fc.register_var_blocks(std::slice::from_ref(vb));
@@ -308,7 +328,7 @@ impl ModuleCompiler {
         if self.pending_global_inits.is_empty() {
             return;
         }
-        let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases);
+        let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases, &self.type_defs);
         // Drain the pending list into a local so we can iterate without
         // holding the borrow on self.
         let pending: Vec<(u16, Expression)> =
@@ -408,6 +428,8 @@ struct FunctionCompiler<'a> {
     module_functions: &'a [Function],
     /// Reference to global variables.
     globals: &'a MemoryLayout,
+    /// Reference to user-defined type definitions (for struct field resolution).
+    type_defs: &'a [TypeDef],
     /// Loop exit label stack (for EXIT statements).
     loop_exit_labels: Vec<Label>,
     /// Source range to attach to next emitted instruction.
@@ -423,6 +445,7 @@ impl<'a> FunctionCompiler<'a> {
         module_functions: &'a [Function],
         globals: &'a MemoryLayout,
         class_bases: &'a std::collections::HashMap<String, String>,
+        type_defs: &'a [TypeDef],
     ) -> Self {
         Self {
             instructions: Vec::new(),
@@ -433,6 +456,7 @@ impl<'a> FunctionCompiler<'a> {
             label_positions: Vec::new(),
             module_functions,
             globals,
+            type_defs,
             loop_exit_labels: Vec::new(),
             pending_source: None,
             fb_type_names: std::collections::HashMap::new(),
@@ -519,6 +543,31 @@ impl<'a> FunctionCompiler<'a> {
         self.globals.find_slot(name).map(|(i, _)| i)
     }
 
+    /// Resolve a field index for a user-defined type (FB, class, or struct).
+    /// First tries module_functions (for FBs/classes), then type_defs (for structs).
+    fn resolve_field_index(&self, type_name: &str, field_name: &str) -> Option<u16> {
+        // Try FB/class: look up function with matching name, then find field in locals
+        if let Some(idx) = self.module_functions.iter()
+            .find(|f| f.name.eq_ignore_ascii_case(type_name))
+            .and_then(|f| f.locals.find_slot(field_name))
+            .map(|(i, _)| i)
+        {
+            return Some(idx);
+        }
+        // Try struct: look up TypeDef::Struct with matching name, then find field
+        for td in self.type_defs {
+            if let TypeDef::Struct { name, fields } = td {
+                if name.eq_ignore_ascii_case(type_name) {
+                    return fields.iter()
+                        .enumerate()
+                        .find(|(_, s)| s.name.eq_ignore_ascii_case(field_name))
+                        .map(|(i, _)| i as u16);
+                }
+            }
+        }
+        None
+    }
+
     /// Walk the class hierarchy to find a method. Returns the function index.
     fn find_method_in_hierarchy(&self, class_name: &str, method_name: &str) -> Option<usize> {
         // Try ClassName.MethodName at each level of the hierarchy
@@ -587,13 +636,13 @@ impl<'a> FunctionCompiler<'a> {
                 };
                 for name in &decl.names {
                     let slot = self.add_local(&name.name, ty, int_width);
-                    // Remember the FB type name so we can resolve calls later
+                    // Remember the type name so we can resolve field access later
                     if let Some(ref type_name) = fb_type_name {
                         self.fb_type_names.insert(slot, type_name.clone());
                         // Fix the VarType from the generic Int placeholder to
-                        // the actual FB/class type. This is critical for the
-                        // debugger's variable display — without it, FB instance
-                        // fields like counter.Q can't be expanded.
+                        // the actual FB/class/struct type. This is critical for
+                        // the debugger's variable display — without it, instance
+                        // fields can't be expanded.
                         if let Some(func_idx) = self.module_functions.iter().position(|f| {
                             f.name.eq_ignore_ascii_case(type_name)
                         }) {
@@ -605,6 +654,11 @@ impl<'a> FunctionCompiler<'a> {
                                 self.locals.slots[slot as usize].ty =
                                     VarType::ClassInstance(func_idx as u16);
                             }
+                        } else if let Some(td_idx) = self.type_defs.iter().position(|td| {
+                            matches!(td, TypeDef::Struct { name, .. } if name.eq_ignore_ascii_case(type_name))
+                        }) {
+                            self.locals.slots[slot as usize].ty =
+                                VarType::Struct(td_idx as u16);
                         }
                     }
                     // Emit initializer if present
@@ -691,17 +745,12 @@ impl<'a> FunctionCompiler<'a> {
                 (target.parts.first(), target.parts.get(1))
             {
                 if let Some(slot) = self.find_local(&obj.name) {
-                    if self.fb_type_names.contains_key(&slot) {
-                        let fb_type = self.fb_type_names.get(&slot).unwrap().clone();
-                        let field_idx = self.module_functions
-                            .iter()
-                            .find(|f| f.name.eq_ignore_ascii_case(&fb_type))
-                            .and_then(|f| f.locals.find_slot(&field.name))
-                            .map(|(i, _)| i)
+                    if let Some(type_name) = self.fb_type_names.get(&slot).cloned() {
+                        let field_idx = self.resolve_field_index(&type_name, &field.name)
                             .unwrap_or_else(|| {
                                 eprintln!(
-                                    "[COMPILER] warning: field '{}' not found in FB '{}'",
-                                    field.name, fb_type
+                                    "[COMPILER] warning: field '{}' not found in type '{}'",
+                                    field.name, type_name
                                 );
                                 0
                             });
@@ -936,18 +985,13 @@ impl<'a> FunctionCompiler<'a> {
                         (va.parts.first(), va.parts.get(1))
                     {
                         if let Some(slot) = self.find_local(&obj.name) {
-                            if self.fb_type_names.contains_key(&slot) {
-                                let fb_type = self.fb_type_names.get(&slot).unwrap().clone();
-                                let field_idx = self.module_functions
-                                    .iter()
-                                    .find(|f| f.name.eq_ignore_ascii_case(&fb_type))
-                                    .and_then(|f| f.locals.find_slot(&field.name))
-                                    .map(|(i, _)| i)
+                            if let Some(type_name) = self.fb_type_names.get(&slot).cloned() {
+                                let field_idx = self.resolve_field_index(&type_name, &field.name)
                                     .unwrap_or_else(|| {
                                         eprintln!(
-                                            "[COMPILER] warning: field '{}' not found in FB '{}' — \
-                                             was the FB compiled before its caller?",
-                                            field.name, fb_type
+                                            "[COMPILER] warning: field '{}' not found in type '{}' — \
+                                             was the type compiled before its caller?",
+                                            field.name, type_name
                                         );
                                         0
                                     });

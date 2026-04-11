@@ -12,7 +12,7 @@ semver_check = false
 name = "st-cli"
 publish = false  # Don't publish to crates.io (binary only)
 git_release_enable = true
-changelog_include = ["st-cli", "st-grammar", "st-syntax", "st-semantics", "st-ir", "st-compiler", "st-runtime", "st-lsp"]
+changelog_include = ["st-cli", "st-grammar", "st-syntax", "st-semantics", "st-ir", "st-compiler", "st-engine", "st-lsp"]
 
 # Internal crates: bump versions but don't publish
 [[package]]
@@ -33,6 +33,10 @@ publish = false
 
 [[package]]
 name = "st-compiler"
+publish = false
+
+[[package]]
+name = "st-engine"
 publish = false
 
 [[package]]

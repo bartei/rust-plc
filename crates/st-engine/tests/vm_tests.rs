@@ -1,7 +1,7 @@
 //! End-to-end tests: parse → compile → execute in VM.
 
 use st_ir::*;
-use st_runtime::*;
+use st_engine::*;
 
 /// Helper: parse + compile + run N cycles, return the engine.
 fn run_program(source: &str, cycles: u64) -> Engine {

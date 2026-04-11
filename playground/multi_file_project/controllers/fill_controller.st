@@ -24,6 +24,7 @@ END_VAR
     IF edge.Q AND NOT filling THEN
         filling := TRUE;
         fill_count := 0;
+        fill_done := FALSE;
     END_IF;
 
     pulse_toggle := NOT pulse_toggle;

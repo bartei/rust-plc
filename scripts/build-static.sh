@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build static musl binary of st-plc-runtime for target deployment.
+# Build static musl binary of st-runtime for target deployment.
 #
 # Produces a fully statically linked ELF binary with zero runtime dependencies.
 # Runs on any Linux distro (Debian, Ubuntu, Alpine, etc.) regardless of glibc version.
@@ -13,7 +13,7 @@
 #   - Nix package manager (for musl cross-compiler)
 #
 # Output:
-#   target/x86_64-unknown-linux-musl/release-static/st-plc-runtime
+#   target/x86_64-unknown-linux-musl/release-static/st-runtime
 
 set -euo pipefail
 
@@ -42,7 +42,7 @@ case "$ARCH" in
         ;;
 esac
 
-echo "Building st-plc-runtime for ${TARGET}..."
+echo "Building st-runtime for ${TARGET}..."
 echo "  Profile: release-static (opt-level=s, LTO, strip, panic=abort)"
 
 # Ensure the musl target is installed
@@ -51,11 +51,11 @@ rustup target add "$TARGET" 2>/dev/null || true
 # Build with nix-provided musl cross-compiler
 nix-shell -p "$NIX_PKG" --run \
     "${CC_VAR}=${CC_BIN} cargo build \
-        -p st-plc-runtime \
+        -p st-runtime \
         --target ${TARGET} \
         --profile release-static"
 
-BINARY="target/${TARGET}/release-static/st-plc-runtime"
+BINARY="target/${TARGET}/release-static/st-runtime"
 
 if [ -f "$BINARY" ]; then
     SIZE=$(ls -lh "$BINARY" | awk '{print $5}')

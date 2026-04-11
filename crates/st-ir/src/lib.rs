@@ -131,6 +131,7 @@ pub enum VarType {
     Time,   // nanoseconds as i64
     FbInstance(u16),    // index into Module::functions
     ClassInstance(u16), // index into Module::functions (the class)
+    Struct(u16),        // index into Module::type_defs
     Ref,                // REF_TO pointer
 }
 
@@ -142,6 +143,7 @@ impl VarType {
             VarType::String => 24, // ptr + len + capacity
             VarType::FbInstance(_) => 0, // size determined by the FB's MemoryLayout
             VarType::ClassInstance(_) => 0, // size determined by the class's MemoryLayout
+            VarType::Struct(_) => 0, // fields stored externally (like FB instances)
             VarType::Ref => 4, // scope_tag + slot_index
         }
     }
@@ -203,6 +205,7 @@ impl Value {
             VarType::Time => Value::Time(0),
             VarType::FbInstance(_) => Value::Void,
             VarType::ClassInstance(_) => Value::Void,
+            VarType::Struct(_) => Value::Void,
             VarType::Ref => Value::Null,
         }
     }

@@ -6,7 +6,7 @@
 
 use st_comm_api::{write_io_map_file, CommConfig, DeviceProfile, EngineProjectConfig};
 use st_comm_sim::SimulatedDevice;
-use st_runtime::Engine;
+use st_engine::Engine;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

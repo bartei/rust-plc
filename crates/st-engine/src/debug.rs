@@ -392,6 +392,7 @@ pub fn format_var_type(ty: VarType) -> &'static str {
         VarType::Time => "TIME",
         VarType::FbInstance(_) => "FB_INSTANCE",
         VarType::ClassInstance(_) => "CLASS_INSTANCE",
+        VarType::Struct(_) => "STRUCT",
         VarType::Ref => "REF_TO",
     }
 }

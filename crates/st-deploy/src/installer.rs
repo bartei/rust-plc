@@ -22,7 +22,7 @@ impl Default for InstallOptions {
     fn default() -> Self {
         InstallOptions {
             agent_port: 4840,
-            agent_name: "st-plc-runtime".to_string(),
+            agent_name: "st-runtime".to_string(),
             upgrade: false,
         }
     }
@@ -40,14 +40,14 @@ pub struct InstallResult {
 
 // Target paths on the remote device
 const BINARY_DIR: &str = "/opt/st-plc";
-const BINARY_PATH: &str = "/opt/st-plc/st-plc-runtime";
-const BACKUP_PATH: &str = "/opt/st-plc/st-plc-runtime.backup";
+const BINARY_PATH: &str = "/opt/st-plc/st-runtime";
+const BACKUP_PATH: &str = "/opt/st-plc/st-runtime.backup";
 const CONFIG_DIR: &str = "/etc/st-plc";
 const CONFIG_PATH: &str = "/etc/st-plc/agent.yaml";
 const DATA_DIR: &str = "/var/lib/st-plc/programs";
 const LOG_DIR: &str = "/var/log/st-plc";
-const SERVICE_NAME: &str = "st-plc-runtime";
-const SERVICE_PATH: &str = "/etc/systemd/system/st-plc-runtime.service";
+const SERVICE_NAME: &str = "st-runtime";
+const SERVICE_PATH: &str = "/etc/systemd/system/st-runtime.service";
 
 /// Install the PLC runtime on a remote target.
 ///
@@ -100,10 +100,10 @@ pub fn install(
 
     // 6. Upload binary
     progress(&format!(
-        "Uploading st-plc-runtime ({})...",
+        "Uploading st-runtime ({})...",
         format_file_size(binary_path)
     ));
-    let tmp_path = "/tmp/st-plc-runtime.upload";
+    let tmp_path = "/tmp/st-runtime.upload";
     target.upload(binary_path, tmp_path)?;
     target.sudo_exec(&format!("mv {tmp_path} {BINARY_PATH}"))?;
     target.sudo_exec(&format!("chmod +x {BINARY_PATH}"))?;
@@ -115,7 +115,7 @@ pub fn install(
         .lines()
         .next()
         .unwrap_or("unknown")
-        .replace("st-plc-runtime ", "");
+        .replace("st-runtime ", "");
     progress(&format!("  Version: {version}"));
 
     // 8. Write config (only on fresh install, preserve on upgrade)
@@ -156,7 +156,7 @@ pub fn install(
             });
         }
         return Err(SshError {
-            message: "Agent failed to start. Check logs: journalctl -u st-plc-runtime".to_string(),
+            message: "Agent failed to start. Check logs: journalctl -u st-runtime".to_string(),
             kind: SshErrorKind::CommandFailed,
         });
     }
@@ -224,8 +224,8 @@ pub fn find_static_binary(arch: &str) -> Result<PathBuf, String> {
     };
 
     let suffixes = [
-        format!("target/{target_triple}/release-static/st-plc-runtime"),
-        format!("target/{target_triple}/release/st-plc-runtime"),
+        format!("target/{target_triple}/release-static/st-runtime"),
+        format!("target/{target_triple}/release/st-runtime"),
     ];
 
     // Search from: CWD, then walk up to find workspace root (has Cargo.toml with [workspace])

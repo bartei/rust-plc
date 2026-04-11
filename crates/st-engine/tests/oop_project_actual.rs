@@ -1,7 +1,7 @@
 //! Test using the ACTUAL oop_project files from disk.
 
 use st_ir::*;
-use st_runtime::*;
+use st_engine::*;
 use std::path::Path;
 
 #[test]

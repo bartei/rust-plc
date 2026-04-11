@@ -16,7 +16,7 @@
 //! ## Running
 //!
 //! ```bash
-//! ST_E2E_QEMU=1 cargo test -p st-plc-runtime --test e2e_installer -- --test-threads=1
+//! ST_E2E_QEMU=1 cargo test -p st-runtime --test e2e_installer -- --test-threads=1
 //! ```
 //!
 //! Tests run sequentially (`--test-threads=1`) because they share the QEMU VM.
@@ -56,7 +56,7 @@ fn ssh_key_path() -> PathBuf {
 }
 
 fn static_binary() -> PathBuf {
-    project_root().join("target/x86_64-unknown-linux-musl/release-static/st-plc-runtime")
+    project_root().join("target/x86_64-unknown-linux-musl/release-static/st-runtime")
 }
 
 fn st_cli_binary() -> PathBuf {
@@ -347,7 +347,7 @@ fn test_after_install_binary_exists() {
     let vm = boot_fresh_vm();
     vm.run_install(&[]);
 
-    let result = vm.ssh("test -x /opt/st-plc/st-plc-runtime && echo YES || echo NO");
+    let result = vm.ssh("test -x /opt/st-plc/st-runtime && echo YES || echo NO");
     assert_eq!(result.unwrap(), "YES", "Binary should exist and be executable");
 }
 
@@ -371,7 +371,7 @@ fn test_after_install_systemd_active() {
     let vm = boot_fresh_vm();
     vm.run_install(&[]);
 
-    let status = vm.ssh("systemctl is-active st-plc-runtime").unwrap();
+    let status = vm.ssh("systemctl is-active st-runtime").unwrap();
     assert_eq!(status, "active", "systemd service should be active");
 }
 
@@ -381,7 +381,7 @@ fn test_after_install_systemd_enabled() {
     let vm = boot_fresh_vm();
     vm.run_install(&[]);
 
-    let enabled = vm.ssh("systemctl is-enabled st-plc-runtime").unwrap();
+    let enabled = vm.ssh("systemctl is-enabled st-runtime").unwrap();
     assert_eq!(enabled, "enabled", "systemd service should be enabled (starts on boot)");
 }
 
@@ -512,7 +512,7 @@ fn test_service_auto_restarts_after_crash() {
     assert_eq!(status, 200);
 
     // Kill the process (simulate crash)
-    let _ = vm.ssh("sudo pkill -9 -f st-plc-runtime");
+    let _ = vm.ssh("sudo pkill -9 -f st-runtime");
 
     // Wait for systemd to restart it (RestartSec=3)
     std::thread::sleep(Duration::from_secs(5));
@@ -617,14 +617,14 @@ fn test_uninstall_removes_service() {
     assert!(ok, "Uninstall should succeed:\n{output}");
 
     // Service should be gone
-    let result = vm.ssh("systemctl is-active st-plc-runtime 2>&1 || true").unwrap();
+    let result = vm.ssh("systemctl is-active st-runtime 2>&1 || true").unwrap();
     assert!(
         result.contains("inactive") || result.contains("could not be found"),
         "Service should be stopped: {result}"
     );
 
     // Binary should be gone
-    let result = vm.ssh("test -f /opt/st-plc/st-plc-runtime && echo EXISTS || echo GONE").unwrap();
+    let result = vm.ssh("test -f /opt/st-plc/st-runtime && echo EXISTS || echo GONE").unwrap();
     assert_eq!(result, "GONE", "Binary should be removed");
 
     // Config should be gone
@@ -793,7 +793,7 @@ fn test_full_installer_lifecycle() {
     assert!(ok);
 
     // 10. Verify gone
-    let result = vm.ssh("test -f /opt/st-plc/st-plc-runtime && echo EXISTS || echo GONE").unwrap();
+    let result = vm.ssh("test -f /opt/st-plc/st-runtime && echo EXISTS || echo GONE").unwrap();
     assert_eq!(result, "GONE");
 
     eprintln!("[LIFECYCLE] Complete: install → deploy → run → stop → upgrade → uninstall");
@@ -809,7 +809,7 @@ fn test_logs_written_to_journald() {
 
     // The agent logs to journald. Verify with journalctl.
     let result = vm.ssh(
-        "sudo journalctl -u st-plc-runtime --no-pager -n 10 2>&1"
+        "sudo journalctl -u st-runtime --no-pager -n 10 2>&1"
     ).unwrap();
     assert!(
         result.contains("Starting") || result.contains("Agent ready") || result.contains("INFO"),
@@ -870,7 +870,7 @@ fn test_log_level_runtime_change() {
     vm.upload_bundle(&bundle_path);
 
     let result = vm.ssh(
-        "sudo journalctl -u st-plc-runtime --no-pager -n 20 --since '1 min ago' 2>&1"
+        "sudo journalctl -u st-runtime --no-pager -n 20 --since '1 min ago' 2>&1"
     ).unwrap();
     // With debug level, we should see more verbose output
     assert!(

@@ -550,6 +550,32 @@ impl LanguageServer for Backend {
         }
 
         // Then: standard symbol resolution
+        // Extract word at cursor for both standard resolution and type fallback.
+        let word_at_cursor = {
+            let bytes = doc.source.as_bytes();
+            if offset < bytes.len() {
+                let mut start = offset;
+                while start > 0
+                    && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
+                {
+                    start -= 1;
+                }
+                let mut end = offset;
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+                {
+                    end += 1;
+                }
+                if start < end {
+                    std::str::from_utf8(&bytes[start..end]).ok().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
         if let Some((word, scope_id)) = self.resolve_at_position(doc, offset) {
             if let Some((_sid, sym)) =
                 doc.analysis.symbols.resolve(scope_id, &word)
@@ -564,6 +590,30 @@ impl LanguageServer for Backend {
                 }
 
                 // Fall back to current file: convert virtual → file-local.
+                let local_range = st_syntax::ast::TextRange::new(
+                    doc.from_virtual(sym_range.start),
+                    doc.from_virtual(sym_range.end),
+                );
+                if local_range.end <= doc.source.len() {
+                    let range = doc.text_range_to_lsp(local_range);
+                    return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                        uri: uri.clone(),
+                        range,
+                    })));
+                }
+            }
+        }
+
+        // Fallback: try resolving as a type name directly (e.g., ProcessData
+        // in a variable declaration like `stats : ProcessData`).
+        if let Some(ref word) = word_at_cursor {
+            if let Some(type_sym) = doc.analysis.symbols.resolve_type(word) {
+                let sym_range = type_sym.range;
+                if !doc.project_files.is_empty() {
+                    if let Some(location) = self.resolve_cross_file_location(doc, sym_range) {
+                        return Ok(Some(GotoDefinitionResponse::Scalar(location)));
+                    }
+                }
                 let local_range = st_syntax::ast::TextRange::new(
                     doc.from_virtual(sym_range.start),
                     doc.from_virtual(sym_range.end),

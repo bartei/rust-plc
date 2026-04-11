@@ -1,7 +1,7 @@
 //! Advanced class instantiation probes: harder scenarios.
 
 use st_ir::*;
-use st_runtime::*;
+use st_engine::*;
 
 fn run_program(source: &str, cycles: u64) -> Engine {
     let parse_result = st_syntax::parse(source);

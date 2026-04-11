@@ -3,7 +3,7 @@
 //! and verifying execution results.
 
 use st_ir::*;
-use st_runtime::*;
+use st_engine::*;
 
 /// Parse with stdlib, compile, and run N cycles.
 fn run_with_stdlib(source: &str, cycles: u64) -> Engine {

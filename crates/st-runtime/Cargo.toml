@@ -1,22 +1,39 @@
 [package]
 name = "st-runtime"
-description = "PLC bytecode VM, scan cycle engine, and task scheduler"
+description = "Unified PLC runtime binary for target deployment — agent, debugger, compiler in one static executable"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-[dev-dependencies]
-st-syntax.workspace = true
-st-compiler.workspace = true
-serde_yaml.workspace = true
+[[bin]]
+name = "st-runtime"
+path = "src/main.rs"
 
 [dependencies]
-st-ir.workspace = true
-st-syntax.workspace = true
-st-compiler.workspace = true
+# Agent server (HTTP API, runtime manager, program store)
+st-target-agent = { path = "../st-target-agent" }
+
+# DAP debug server
+st-dap = { path = "../st-dap" }
+
+# Compilation pipeline (for run/check commands)
+st-syntax = { path = "../st-syntax" }
+st-semantics = { path = "../st-semantics" }
+st-compiler = { path = "../st-compiler" }
+st-ir = { path = "../st-ir" }
+st-engine = { path = "../st-engine" }
 st-comm-api = { path = "../st-comm-api" }
+
+# CLI framework
+clap = { version = "4", features = ["derive"] }
 tokio.workspace = true
 tracing.workspace = true
-thiserror.workspace = true
-serde.workspace = true
+tracing-subscriber.workspace = true
+axum = { version = "0.8" }
+
+[dev-dependencies]
+tempfile = "3"
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+st-deploy = { path = "../st-deploy" }
+serde_json.workspace = true

@@ -3,7 +3,7 @@
 //! On Linux targets, logs are sent to systemd's journald via the native
 //! journal socket. This means:
 //! - No log files to manage (journald handles rotation and compression)
-//! - Logs are queryable with `journalctl -u st-plc-runtime`
+//! - Logs are queryable with `journalctl -u st-runtime`
 //! - Structured fields (unit name, priority) are preserved
 //! - Log level can be changed at runtime via the HTTP API
 //!

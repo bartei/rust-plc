@@ -12,7 +12,7 @@ st-syntax.workspace = true
 st-semantics.workspace = true
 st-compiler.workspace = true
 st-ir.workspace = true
-st-runtime.workspace = true
+st-engine.workspace = true
 st-comm-api = { path = "../st-comm-api" }
 st-comm-sim = { path = "../st-comm-sim" }
 st-deploy = { path = "../st-deploy" }

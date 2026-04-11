@@ -5,7 +5,7 @@ members = [
     "crates/st-semantics",
     "crates/st-ir",
     "crates/st-compiler",
-    "crates/st-runtime",
+    "crates/st-engine",
     "crates/st-lsp",
     "crates/st-dap",
     "crates/st-monitor",
@@ -14,7 +14,7 @@ members = [
     "crates/st-comm-sim",
     "crates/st-deploy",
     "crates/st-target-agent",
-    "crates/st-plc-runtime",
+    "crates/st-runtime",
 ]
 resolver = "3"
 
@@ -62,7 +62,7 @@ st-syntax = { path = "crates/st-syntax" }
 st-semantics = { path = "crates/st-semantics" }
 st-ir = { path = "crates/st-ir" }
 st-compiler = { path = "crates/st-compiler" }
-st-runtime = { path = "crates/st-runtime" }
+st-engine = { path = "crates/st-engine" }
 st-lsp = { path = "crates/st-lsp" }
 st-dap = { path = "crates/st-dap" }
 st-monitor = { path = "crates/st-monitor" }

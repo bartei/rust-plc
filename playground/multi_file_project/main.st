@@ -58,12 +58,10 @@ END_VAR
     IF filler.fill_done AND filling THEN
         filling := FALSE;
         moving := TRUE;
+        stats.bottles_filled := stats.bottles_filled + 1;
     END_IF;
 
     // Update stats
-    IF filler.fill_done THEN
-        stats.bottles_filled := stats.bottles_filled + 1;
-    END_IF;
     stats.running := conveyor.motor_running;
 
     g_bottles_total := stats.bottles_filled;

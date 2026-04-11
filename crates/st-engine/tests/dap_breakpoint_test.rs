@@ -1,6 +1,6 @@
 //! Tests that reproduce the exact DAP breakpoint failure in multi-file projects.
 
-use st_runtime::debug::*;
+use st_engine::debug::*;
 
 /// Build the actual oop_project module and test breakpoint resolution.
 #[test]
@@ -121,7 +121,7 @@ END_PROGRAM
     let parse_result = st_syntax::parse(source);
     let module = st_compiler::compile(&parse_result.source_file).unwrap();
 
-    let mut vm = st_runtime::vm::Vm::new(module.clone(), st_runtime::vm::VmConfig::default());
+    let mut vm = st_engine::vm::Vm::new(module.clone(), st_engine::vm::VmConfig::default());
 
     // Set breakpoint on line 5 ("x := x + 1;")
     let results = vm.debug_mut().set_line_breakpoints(&module, source, &[5], 0);
@@ -135,7 +135,7 @@ END_PROGRAM
 
     // It should halt on the breakpoint
     assert!(result.is_err(), "VM should halt on breakpoint");
-    if let Err(st_runtime::vm::VmError::Halt) = result {
+    if let Err(st_engine::vm::VmError::Halt) = result {
         assert_eq!(vm.debug_state().pause_reason, PauseReason::Breakpoint,
             "Should be a breakpoint halt, got {:?}", vm.debug_state().pause_reason);
     } else {
@@ -165,7 +165,7 @@ END_PROGRAM
     let parse_result = st_syntax::multi_file::parse_multi(&[file_class, file_main]);
     let module = st_compiler::compile(&parse_result.source_file).unwrap();
 
-    let mut vm = st_runtime::vm::Vm::new(module.clone(), st_runtime::vm::VmConfig::default());
+    let mut vm = st_engine::vm::Vm::new(module.clone(), st_engine::vm::VmConfig::default());
 
     // Set breakpoint on line 5 of file_main ("x := x + 1;")
     // file_main's virtual offset = file_class.len()
@@ -178,7 +178,7 @@ END_PROGRAM
     let result = vm.run("Main");
     eprintln!("Multi-file run result: {result:?}");
 
-    assert!(matches!(result, Err(st_runtime::vm::VmError::Halt)),
+    assert!(matches!(result, Err(st_engine::vm::VmError::Halt)),
         "VM should halt on breakpoint, got {result:?}");
     assert_eq!(vm.debug_state().pause_reason, PauseReason::Breakpoint);
 }

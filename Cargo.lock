@@ -1733,11 +1733,11 @@ dependencies = [
  "st-compiler",
  "st-dap",
  "st-deploy",
+ "st-engine",
  "st-grammar",
  "st-ir",
  "st-lsp",
  "st-monitor",
- "st-runtime",
  "st-semantics",
  "st-syntax",
  "tokio",
@@ -1767,8 +1767,8 @@ dependencies = [
  "serde_yaml",
  "st-comm-api",
  "st-compiler",
+ "st-engine",
  "st-ir",
- "st-runtime",
  "st-syntax",
  "tokio",
  "tokio-tungstenite",
@@ -1795,8 +1795,8 @@ dependencies = [
  "st-comm-api",
  "st-comm-sim",
  "st-compiler",
+ "st-engine",
  "st-ir",
- "st-runtime",
  "st-syntax",
  "tempfile",
  "tokio",
@@ -1821,6 +1821,21 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "st-engine"
+version = "0.1.1"
+dependencies = [
+ "serde",
+ "serde_yaml",
+ "st-comm-api",
+ "st-compiler",
+ "st-ir",
+ "st-syntax",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1860,8 +1875,8 @@ dependencies = [
  "serde",
  "serde_json",
  "st-compiler",
+ "st-engine",
  "st-ir",
- "st-runtime",
  "st-syntax",
  "tokio",
  "tokio-tungstenite",
@@ -1869,7 +1884,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "st-plc-runtime"
+name = "st-runtime"
 version = "0.1.1"
 dependencies = [
  "axum",
@@ -1880,8 +1895,8 @@ dependencies = [
  "st-compiler",
  "st-dap",
  "st-deploy",
+ "st-engine",
  "st-ir",
- "st-runtime",
  "st-semantics",
  "st-syntax",
  "st-target-agent",
@@ -1889,21 +1904,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "st-runtime"
-version = "0.1.1"
-dependencies = [
- "serde",
- "serde_yaml",
- "st-comm-api",
- "st-compiler",
- "st-ir",
- "st-syntax",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -1941,8 +1941,8 @@ dependencies = [
  "st-comm-api",
  "st-compiler",
  "st-deploy",
+ "st-engine",
  "st-ir",
- "st-runtime",
  "st-semantics",
  "st-syntax",
  "tempfile",
