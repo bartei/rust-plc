@@ -21,6 +21,7 @@ export class MonitorPanel {
   private disposables: vscode.Disposable[] = [];
   private catalog: Array<{ name: string; type: string }> = [];
   private watchList: string[] = [];
+  private statusPollTimer: ReturnType<typeof setInterval> | undefined;
 
   private constructor(panel: vscode.WebviewPanel) {
     this.panel = panel;
@@ -169,9 +170,10 @@ export class MonitorPanel {
         if (msg.host) {
           this.selectedTargetHost = msg.host;
           this.selectedTargetPort = msg.agentPort || 4840;
-          this.pollTargetStatus();
+          this.startStatusPolling();
         } else {
           this.selectedTargetHost = undefined;
+          this.stopStatusPolling();
           this.updateTargetStatus("offline");
         }
         break;
@@ -216,6 +218,21 @@ export class MonitorPanel {
       }
     } catch {
       this.updateTargetStatus("offline", host);
+    }
+  }
+
+  /** Start periodic status polling (every 5s). */
+  private startStatusPolling() {
+    this.stopStatusPolling();
+    this.pollTargetStatus(); // immediate first poll
+    this.statusPollTimer = setInterval(() => this.pollTargetStatus(), 5000);
+  }
+
+  /** Stop periodic status polling. */
+  private stopStatusPolling() {
+    if (this.statusPollTimer) {
+      clearInterval(this.statusPollTimer);
+      this.statusPollTimer = undefined;
     }
   }
 
@@ -1169,6 +1186,7 @@ export class MonitorPanel {
   }
 
   private dispose() {
+    this.stopStatusPolling();
     MonitorPanel.currentPanel = undefined;
     this.panel.dispose();
     while (this.disposables.length) {
