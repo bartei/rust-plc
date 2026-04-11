@@ -367,8 +367,8 @@ fn var_type_sizes() {
 fn memory_layout_find_and_size() {
     let layout = MemoryLayout {
         slots: vec![
-            VarSlot { name: "x".into(), ty: VarType::Int, offset: 0, size: 8, retain: false, int_width: IntWidth::None },
-            VarSlot { name: "y".into(), ty: VarType::Real, offset: 8, size: 8, retain: false, int_width: IntWidth::None },
+            VarSlot { name: "x".into(), ty: VarType::Int, offset: 0, size: 8, retain: false, persistent: false, int_width: IntWidth::None },
+            VarSlot { name: "y".into(), ty: VarType::Real, offset: 8, size: 8, retain: false, persistent: false, int_width: IntWidth::None },
         ],
     };
     assert_eq!(layout.find_slot("x").unwrap().0, 0);

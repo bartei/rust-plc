@@ -1,0 +1,5 @@
+# Auto-generated I/O map (regenerated from plc-project.yaml)
+_io_map.st
+
+# Retain/persistent variable storage
+.st-retain/

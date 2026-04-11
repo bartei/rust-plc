@@ -66,6 +66,8 @@ pub struct VarSlot {
     pub offset: usize,
     pub size: usize,
     pub retain: bool,
+    #[serde(default)]
+    pub persistent: bool,
     /// Original integer width / signedness from the source declaration.
     /// Used by the VM at store time to wrap values according to two's
     /// complement semantics — so a SINT cycle counter wraps at 127→-128

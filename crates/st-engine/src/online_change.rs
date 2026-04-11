@@ -348,6 +348,7 @@ mod tests {
                 offset,
                 size,
                 retain: false,
+                persistent: false,
                 int_width: IntWidth::None,
             });
             offset += size;
@@ -484,11 +485,11 @@ mod tests {
     fn global_variable_type_change_is_incompatible() {
         let mut old_globals = MemoryLayout::default();
         old_globals.slots.push(VarSlot {
-            name: "g".into(), ty: VarType::Int, offset: 0, size: 8, retain: false, int_width: IntWidth::None,
+            name: "g".into(), ty: VarType::Int, offset: 0, size: 8, retain: false, persistent: false, int_width: IntWidth::None,
         });
         let mut new_globals = MemoryLayout::default();
         new_globals.slots.push(VarSlot {
-            name: "g".into(), ty: VarType::Real, offset: 0, size: 8, retain: false, int_width: IntWidth::None,
+            name: "g".into(), ty: VarType::Real, offset: 0, size: 8, retain: false, persistent: false, int_width: IntWidth::None,
         });
 
         let old = make_module(vec![make_func("Main", PouKind::Program, vec![])], old_globals);
@@ -505,13 +506,13 @@ mod tests {
     #[test]
     fn migrate_preserves_existing_vars() {
         let mut old_layout = MemoryLayout::default();
-        old_layout.slots.push(VarSlot { name: "x".into(), ty: VarType::Int, offset: 0, size: 8, retain: false, int_width: IntWidth::None });
-        old_layout.slots.push(VarSlot { name: "y".into(), ty: VarType::Real, offset: 8, size: 8, retain: false, int_width: IntWidth::None });
+        old_layout.slots.push(VarSlot { name: "x".into(), ty: VarType::Int, offset: 0, size: 8, retain: false, persistent: false, int_width: IntWidth::None });
+        old_layout.slots.push(VarSlot { name: "y".into(), ty: VarType::Real, offset: 8, size: 8, retain: false, persistent: false, int_width: IntWidth::None });
 
         let mut new_layout = MemoryLayout::default();
-        new_layout.slots.push(VarSlot { name: "x".into(), ty: VarType::Int, offset: 0, size: 8, retain: false, int_width: IntWidth::None });
-        new_layout.slots.push(VarSlot { name: "y".into(), ty: VarType::Real, offset: 8, size: 8, retain: false, int_width: IntWidth::None });
-        new_layout.slots.push(VarSlot { name: "z".into(), ty: VarType::Bool, offset: 16, size: 1, retain: false, int_width: IntWidth::None });
+        new_layout.slots.push(VarSlot { name: "x".into(), ty: VarType::Int, offset: 0, size: 8, retain: false, persistent: false, int_width: IntWidth::None });
+        new_layout.slots.push(VarSlot { name: "y".into(), ty: VarType::Real, offset: 8, size: 8, retain: false, persistent: false, int_width: IntWidth::None });
+        new_layout.slots.push(VarSlot { name: "z".into(), ty: VarType::Bool, offset: 16, size: 1, retain: false, persistent: false, int_width: IntWidth::None });
 
         let old_locals = vec![Value::Int(42), Value::Real(1.5)];
         let new_locals = migrate_locals(&old_locals, &old_layout, &new_layout);
@@ -525,12 +526,12 @@ mod tests {
     #[test]
     fn migrate_with_reordered_vars() {
         let mut old_layout = MemoryLayout::default();
-        old_layout.slots.push(VarSlot { name: "a".into(), ty: VarType::Int, offset: 0, size: 8, retain: false, int_width: IntWidth::None });
-        old_layout.slots.push(VarSlot { name: "b".into(), ty: VarType::Int, offset: 8, size: 8, retain: false, int_width: IntWidth::None });
+        old_layout.slots.push(VarSlot { name: "a".into(), ty: VarType::Int, offset: 0, size: 8, retain: false, persistent: false, int_width: IntWidth::None });
+        old_layout.slots.push(VarSlot { name: "b".into(), ty: VarType::Int, offset: 8, size: 8, retain: false, persistent: false, int_width: IntWidth::None });
 
         let mut new_layout = MemoryLayout::default();
-        new_layout.slots.push(VarSlot { name: "b".into(), ty: VarType::Int, offset: 0, size: 8, retain: false, int_width: IntWidth::None });
-        new_layout.slots.push(VarSlot { name: "a".into(), ty: VarType::Int, offset: 8, size: 8, retain: false, int_width: IntWidth::None });
+        new_layout.slots.push(VarSlot { name: "b".into(), ty: VarType::Int, offset: 0, size: 8, retain: false, persistent: false, int_width: IntWidth::None });
+        new_layout.slots.push(VarSlot { name: "a".into(), ty: VarType::Int, offset: 8, size: 8, retain: false, persistent: false, int_width: IntWidth::None });
 
         let old_locals = vec![Value::Int(10), Value::Int(20)];
         let new_locals = migrate_locals(&old_locals, &old_layout, &new_layout);
@@ -542,11 +543,11 @@ mod tests {
     #[test]
     fn migrate_with_removed_var() {
         let mut old_layout = MemoryLayout::default();
-        old_layout.slots.push(VarSlot { name: "x".into(), ty: VarType::Int, offset: 0, size: 8, retain: false, int_width: IntWidth::None });
-        old_layout.slots.push(VarSlot { name: "y".into(), ty: VarType::Int, offset: 8, size: 8, retain: false, int_width: IntWidth::None });
+        old_layout.slots.push(VarSlot { name: "x".into(), ty: VarType::Int, offset: 0, size: 8, retain: false, persistent: false, int_width: IntWidth::None });
+        old_layout.slots.push(VarSlot { name: "y".into(), ty: VarType::Int, offset: 8, size: 8, retain: false, persistent: false, int_width: IntWidth::None });
 
         let mut new_layout = MemoryLayout::default();
-        new_layout.slots.push(VarSlot { name: "x".into(), ty: VarType::Int, offset: 0, size: 8, retain: false, int_width: IntWidth::None });
+        new_layout.slots.push(VarSlot { name: "x".into(), ty: VarType::Int, offset: 0, size: 8, retain: false, persistent: false, int_width: IntWidth::None });
 
         let old_locals = vec![Value::Int(42), Value::Int(99)];
         let new_locals = migrate_locals(&old_locals, &old_layout, &new_layout);

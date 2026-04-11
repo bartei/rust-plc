@@ -35,3 +35,6 @@ tests/e2e-deploy/vm/images/
 # Bundle artifacts
 *.st-bundle
 $TMPDIR/
+
+# Retain/persistent variable storage
+.st-retain/

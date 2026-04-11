@@ -159,6 +159,8 @@ pub struct StorageConfig {
     pub program_dir: PathBuf,
     #[serde(default = "default_log_dir")]
     pub log_dir: PathBuf,
+    #[serde(default = "default_retain_dir")]
+    pub retain_dir: PathBuf,
 }
 
 impl Default for StorageConfig {
@@ -166,8 +168,13 @@ impl Default for StorageConfig {
         StorageConfig {
             program_dir: default_program_dir(),
             log_dir: default_log_dir(),
+            retain_dir: default_retain_dir(),
         }
     }
+}
+
+fn default_retain_dir() -> PathBuf {
+    PathBuf::from("/var/lib/st-plc/retain")
 }
 
 fn default_program_dir() -> PathBuf {

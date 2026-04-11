@@ -770,6 +770,29 @@ impl Vm {
         result
     }
 
+    /// Read-only access to the global values slice (for retain capture).
+    pub fn globals_ref(&self) -> &[Value] {
+        &self.globals
+    }
+
+    /// Set a global variable by slot index, bypassing force checks.
+    /// Used by retain restore at startup before any scan cycle runs.
+    pub fn set_global_unchecked(&mut self, slot: u16, value: Value) {
+        if (slot as usize) < self.globals.len() {
+            self.globals[slot as usize] = value;
+        }
+    }
+
+    /// Read-only access to the retained locals map (for retain capture).
+    pub fn retained_locals_ref(&self) -> &std::collections::HashMap<u16, Vec<Value>> {
+        &self.retained_locals
+    }
+
+    /// Inject retained locals for a program (used by retain restore).
+    pub fn set_retained_locals(&mut self, func_index: u16, locals: Vec<Value>) {
+        self.retained_locals.insert(func_index, locals);
+    }
+
     /// Read-only access to the FB instance state map. Used by the DAP
     /// server to build hierarchical variable views.
     pub fn fb_instances_ref(&self) -> &std::collections::HashMap<(u32, u16), Vec<Value>> {

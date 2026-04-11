@@ -129,6 +129,7 @@ impl ModuleCompiler {
                             offset,
                             size,
                             retain: vb.qualifiers.contains(&VarQualifier::Retain),
+                            persistent: vb.qualifiers.contains(&VarQualifier::Persistent),
                             int_width,
                         });
                         // Defer initializer compilation until pass 3 — we
@@ -197,6 +198,7 @@ impl ModuleCompiler {
                                 offset: i,
                                 size,
                                 retain: false,
+                                persistent: false,
                                 int_width,
                             }
                         }).collect();
@@ -521,6 +523,17 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn add_local(&mut self, name: &str, ty: VarType, int_width: IntWidth) -> u16 {
+        self.add_local_with_qualifiers(name, ty, int_width, false, false)
+    }
+
+    fn add_local_with_qualifiers(
+        &mut self,
+        name: &str,
+        ty: VarType,
+        int_width: IntWidth,
+        retain: bool,
+        persistent: bool,
+    ) -> u16 {
         let offset = self.locals.total_size();
         let size = ty.size();
         let idx = self.locals.slots.len() as u16;
@@ -529,7 +542,8 @@ impl<'a> FunctionCompiler<'a> {
             ty,
             offset,
             size,
-            retain: false,
+            retain,
+            persistent,
             int_width,
         });
         idx
@@ -626,6 +640,8 @@ impl<'a> FunctionCompiler<'a> {
 
     fn compile_var_blocks_inner(&mut self, var_blocks: &[VarBlock], emit_init: bool) {
         for vb in var_blocks {
+            let is_retain = vb.qualifiers.contains(&VarQualifier::Retain);
+            let is_persistent = vb.qualifiers.contains(&VarQualifier::Persistent);
             for decl in &vb.declarations {
                 let ty = ModuleCompiler::var_type_from_ast(&decl.ty);
                 let int_width = ModuleCompiler::int_width_from_ast(&decl.ty);
@@ -635,7 +651,9 @@ impl<'a> FunctionCompiler<'a> {
                     _ => None,
                 };
                 for name in &decl.names {
-                    let slot = self.add_local(&name.name, ty, int_width);
+                    let slot = self.add_local_with_qualifiers(
+                        &name.name, ty, int_width, is_retain, is_persistent,
+                    );
                     // Remember the type name so we can resolve field access later
                     if let Some(ref type_name) = fb_type_name {
                         self.fb_type_names.insert(slot, type_name.clone());

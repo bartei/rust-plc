@@ -71,6 +71,8 @@ pub struct EngineConfig {
     pub vm_config: VmConfig,
     /// Watchdog timeout — if a single cycle exceeds this, abort.
     pub watchdog_timeout: Option<Duration>,
+    /// Retain/persistent variable storage. None = no persistence.
+    pub retain: Option<crate::retain_store::RetainConfig>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -81,6 +83,7 @@ impl Default for EngineConfig {
             max_cycles: 0,
             vm_config: VmConfig::default(),
             watchdog_timeout: None,
+            retain: None,
         }
     }
 }
@@ -94,6 +97,8 @@ pub struct Engine {
     comm: CommManager,
     /// Tracks when the previous scan cycle started (for period calculation).
     previous_cycle_start: Option<Instant>,
+    /// Cycle counter for periodic retain checkpoints.
+    retain_cycle_counter: u32,
 }
 
 impl Engine {
@@ -106,6 +111,31 @@ impl Engine {
         // we leave the engine constructible — the VM keeps its default
         // values and the user will see the issue at runtime.
         let _ = vm.run_global_init();
+
+        // Restore retained/persistent variables from disk (warm restart).
+        if let Some(ref retain_cfg) = config.retain {
+            if retain_cfg.path.exists() {
+                match crate::retain_store::load_from_file(&retain_cfg.path) {
+                    Ok(snapshot) => {
+                        let warnings =
+                            crate::retain_store::restore_snapshot(&mut vm, &snapshot, true);
+                        for w in &warnings {
+                            tracing::warn!("Retain restore: {w}");
+                        }
+                        tracing::info!(
+                            "Restored {} globals, {} programs from {}",
+                            snapshot.globals.len(),
+                            snapshot.program_locals.len(),
+                            retain_cfg.path.display(),
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to load retain file: {e}");
+                    }
+                }
+            }
+        }
+
         Self {
             vm,
             config,
@@ -117,6 +147,7 @@ impl Engine {
             program_name,
             comm: CommManager::new(),
             previous_cycle_start: None,
+            retain_cycle_counter: 0,
         }
     }
 
@@ -220,7 +251,33 @@ impl Engine {
             self.stats.max_cycle_time = elapsed;
         }
 
+        // Periodic retain checkpoint
+        if let Some(ref retain_cfg) = self.config.retain {
+            if retain_cfg.checkpoint_cycles > 0 {
+                self.retain_cycle_counter += 1;
+                if self.retain_cycle_counter >= retain_cfg.checkpoint_cycles {
+                    self.retain_cycle_counter = 0;
+                    if let Err(e) = self.save_retain() {
+                        tracing::warn!("Retain checkpoint failed: {e}");
+                    }
+                }
+            }
+        }
+
         Ok(elapsed)
+    }
+
+    /// Save retained/persistent variables to disk. Called on shutdown,
+    /// periodically during execution, and before online change.
+    pub fn save_retain(&self) -> Result<(), String> {
+        let Some(ref retain_cfg) = self.config.retain else {
+            return Ok(());
+        };
+        let snapshot = crate::retain_store::capture_snapshot(&self.vm);
+        if snapshot.globals.is_empty() && snapshot.program_locals.is_empty() {
+            return Ok(());
+        }
+        crate::retain_store::save_to_file(&snapshot, &retain_cfg.path)
     }
 
     /// Get the current cycle statistics.
@@ -241,6 +298,10 @@ impl Engine {
     /// Apply an online change from new source code.
     /// Call this between scan cycles (not during execution).
     pub fn online_change(&mut self, new_source: &str) -> Result<crate::online_change::ChangeAnalysis, String> {
+        // Save retain state before applying change (cold restart save point).
+        if let Err(e) = self.save_retain() {
+            tracing::warn!("Retain save before online change failed: {e}");
+        }
         let stdlib = st_syntax::multi_file::builtin_stdlib();
         let mut all: Vec<&str> = stdlib;
         all.push(new_source);

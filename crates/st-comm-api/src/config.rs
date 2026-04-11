@@ -45,6 +45,8 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
 pub struct EngineProjectConfig {
     /// Target scan cycle time. `None` means "run as fast as the CPU allows".
     pub cycle_time: Option<Duration>,
+    /// Retain checkpoint interval in scan cycles. `None` = use default (0 = only on shutdown).
+    pub retain_checkpoint_cycles: Option<u32>,
 }
 
 impl EngineProjectConfig {
@@ -76,7 +78,14 @@ impl EngineProjectConfig {
             None => None,
         };
 
-        Ok(Self { cycle_time })
+        // Parse optional engine.retain.checkpoint_cycles
+        let retain_checkpoint_cycles = engine
+            .get("retain")
+            .and_then(|r| r.get("checkpoint_cycles"))
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32);
+
+        Ok(Self { cycle_time, retain_checkpoint_cycles })
     }
 }
 
@@ -329,6 +338,30 @@ name: NoEngine
 "#;
         let cfg = EngineProjectConfig::from_project_yaml(yaml).unwrap();
         assert_eq!(cfg.cycle_time, None);
+        assert_eq!(cfg.retain_checkpoint_cycles, None);
+    }
+
+    #[test]
+    fn parse_engine_retain_config() {
+        let yaml = r#"
+engine:
+  cycle_time: 10ms
+  retain:
+    checkpoint_cycles: 500
+"#;
+        let cfg = EngineProjectConfig::from_project_yaml(yaml).unwrap();
+        assert_eq!(cfg.cycle_time, Some(Duration::from_millis(10)));
+        assert_eq!(cfg.retain_checkpoint_cycles, Some(500));
+    }
+
+    #[test]
+    fn parse_engine_retain_absent() {
+        let yaml = r#"
+engine:
+  cycle_time: 10ms
+"#;
+        let cfg = EngineProjectConfig::from_project_yaml(yaml).unwrap();
+        assert_eq!(cfg.retain_checkpoint_cycles, None);
     }
 
     #[test]

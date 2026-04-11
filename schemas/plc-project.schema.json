@@ -60,6 +60,19 @@
             { "type": "integer", "minimum": 0 }
           ],
           "examples": ["10ms", "1ms", "500us", 5]
+        },
+        "retain": {
+          "type": "object",
+          "description": "RETAIN/PERSISTENT variable storage settings. Variables declared with RETAIN or PERSISTENT qualifiers are saved to disk and restored across restarts.",
+          "properties": {
+            "checkpoint_cycles": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "description": "Number of scan cycles between automatic retain checkpoints. 0 disables periodic checkpoints (variables are only saved on shutdown)."
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

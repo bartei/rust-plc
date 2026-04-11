@@ -353,9 +353,23 @@ fn run_program_cmd(args: &[String]) {
         eprintln!("[ENGINE] cycle_time: {ct:?}");
     }
 
+    // Resolve retain path: <project-root>/.st-retain/<program>.retain
+    let retain_config = if !is_single_file {
+        let root = resolve_project_root(target);
+        let retain_dir = root.join(".st-retain");
+        let retain_path = retain_dir.join(format!("{program_name}.retain"));
+        Some(st_engine::RetainConfig {
+            path: retain_path,
+            checkpoint_cycles: engine_proj.retain_checkpoint_cycles.unwrap_or(0),
+        })
+    } else {
+        None
+    };
+
     let config = st_engine::EngineConfig {
         max_cycles: cycles,
         cycle_time: engine_proj.cycle_time,
+        retain: retain_config,
         ..Default::default()
     };
     let mut engine = st_engine::Engine::new(module, program_name, config);
@@ -396,8 +410,12 @@ fn run_program_cmd(args: &[String]) {
         }
         Err(e) => {
             eprintln!("Runtime error: {e}");
-            process::exit(1);
         }
+    }
+
+    // Save retained variables on exit
+    if let Err(e) = engine.save_retain() {
+        eprintln!("[RETAIN] Save failed: {e}");
     }
 }
 

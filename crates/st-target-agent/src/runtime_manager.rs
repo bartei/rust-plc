@@ -180,10 +180,16 @@ fn runtime_thread(
                     s.started_at = Some(chrono::Utc::now().to_rfc3339());
                 }
 
-                // Build engine config
+                // Build engine config with retain persistence
+                let retain_dir = std::path::PathBuf::from("/var/lib/st-plc/retain");
+                let retain_path = retain_dir.join(format!("{program_name}.retain"));
                 let engine_config = st_engine::EngineConfig {
                     max_cycles: 0, // unlimited
                     cycle_time,
+                    retain: Some(st_engine::RetainConfig {
+                        path: retain_path,
+                        checkpoint_cycles: 10_000,
+                    }),
                     ..Default::default()
                 };
 
@@ -199,6 +205,11 @@ fn runtime_thread(
 
                 // Scan cycle loop
                 let run_result = run_cycle_loop(&mut engine, &state, &mut cmd_rx, cycle_time);
+
+                // Save retained variables before dropping the engine
+                if let Err(e) = engine.save_retain() {
+                    tracing::warn!("Retain save on stop: {e}");
+                }
 
                 // Update state based on result
                 {
