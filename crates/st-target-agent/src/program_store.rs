@@ -5,6 +5,19 @@ use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Persisted metadata (written to disk alongside bytecode for reboot survival).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedMeta {
+    name: String,
+    version: String,
+    mode: String,
+    compiled_at: String,
+    entry_point: Option<String>,
+    bytecode_checksum: String,
+    deployed_at: String,
+    has_debug_map: bool,
+}
+
 /// Manages program bundles on the target's filesystem.
 pub struct ProgramStore {
     program_dir: PathBuf,
@@ -35,13 +48,45 @@ pub struct ProgramMetadata {
 
 impl ProgramStore {
     /// Create a new program store using the given directory.
+    /// Loads the previously deployed program from disk if present.
     pub fn new(program_dir: &Path) -> Result<Self, String> {
         fs::create_dir_all(program_dir)
             .map_err(|e| format!("Cannot create program dir {}: {e}", program_dir.display()))?;
-        Ok(ProgramStore {
+        let mut store = ProgramStore {
             program_dir: program_dir.to_path_buf(),
             current: None,
-        })
+        };
+        // Try to load a previously deployed program from disk
+        store.load_persisted();
+        Ok(store)
+    }
+
+    /// Load a previously deployed program from disk (bytecode + metadata).
+    /// Called on startup to restore state after a reboot.
+    fn load_persisted(&mut self) {
+        let bytecode_path = self.program_dir.join("current.bytecode");
+        let meta_path = self.program_dir.join("current.meta.json");
+        let source_dir = self.program_dir.join("current_source");
+
+        let Ok(bytecode) = fs::read(&bytecode_path) else { return };
+        let Ok(meta_json) = fs::read_to_string(&meta_path) else { return };
+        let Ok(persisted) = serde_json::from_str::<PersistedMeta>(&meta_json) else { return };
+
+        self.current = Some(StoredProgram {
+            metadata: ProgramMetadata {
+                name: persisted.name.clone(),
+                version: persisted.version.clone(),
+                mode: persisted.mode.clone(),
+                compiled_at: persisted.compiled_at.clone(),
+                entry_point: persisted.entry_point.clone(),
+                bytecode_checksum: persisted.bytecode_checksum.clone(),
+                deployed_at: persisted.deployed_at.clone(),
+                has_debug_map: persisted.has_debug_map,
+            },
+            bytecode,
+            entry_point: persisted.entry_point.clone().unwrap_or_else(|| "Main".to_string()),
+            source_dir: if source_dir.is_dir() { Some(source_dir) } else { None },
+        });
     }
 
     /// Store a program bundle from raw bytes. Validates the bundle, extracts
@@ -103,6 +148,25 @@ impl ProgramStore {
         } else {
             None
         };
+
+        // Persist bytecode and metadata to disk for reboot survival
+        let _ = fs::write(
+            self.program_dir.join("current.bytecode"),
+            &bundle.bytecode,
+        );
+        let persisted = PersistedMeta {
+            name: metadata.name.clone(),
+            version: metadata.version.clone(),
+            mode: metadata.mode.clone(),
+            compiled_at: metadata.compiled_at.clone(),
+            entry_point: metadata.entry_point.clone(),
+            bytecode_checksum: metadata.bytecode_checksum.clone(),
+            deployed_at: metadata.deployed_at.clone(),
+            has_debug_map: metadata.has_debug_map,
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&persisted) {
+            let _ = fs::write(self.program_dir.join("current.meta.json"), json);
+        }
 
         self.current = Some(StoredProgram {
             metadata: metadata.clone(),

@@ -164,8 +164,8 @@ fn handle_dap_request(
             }));
         }
 
-        "attach" => {
-            send_dap_response(writer, req_seq, "attach", serde_json::json!(null));
+        "attach" | "launch" => {
+            send_dap_response(writer, req_seq, command, serde_json::json!(null));
             // Send Initialized event so VS Code sends configurationDone
             send_dap_event(writer, seq, "initialized", serde_json::json!({}));
             // Do NOT pause or send Stopped — the engine keeps running.
@@ -174,6 +174,16 @@ fn handle_dap_request(
 
         "configurationDone" => {
             send_dap_response(writer, req_seq, "configurationDone", serde_json::json!(null));
+        }
+
+        "loadedSources" => {
+            send_dap_response(writer, req_seq, "loadedSources", serde_json::json!({
+                "sources": [],
+            }));
+        }
+
+        "setExceptionBreakpoints" => {
+            send_dap_response(writer, req_seq, "setExceptionBreakpoints", serde_json::json!(null));
         }
 
         "threads" => {
