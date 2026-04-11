@@ -737,6 +737,19 @@ fn run_bundle_cmd(args: &[String]) {
     let target = path_arg.map(Path::new);
     let root = resolve_project_root(target);
 
+    // Bundle requires a project with plc-project.yaml — autodiscovering
+    // an arbitrary directory tree picks up unrelated files and produces
+    // confusing duplicate-declaration errors.
+    if !root.join("plc-project.yaml").exists() && !root.join("plc-project.yml").exists() {
+        eprintln!(
+            "No plc-project.yaml found in {} (or any parent directory).\n\
+             Run this command from inside a project directory, or specify the path:\n  \
+             st-cli bundle <project-dir>",
+            root.display()
+        );
+        process::exit(1);
+    }
+
     // Regenerate I/O map before bundling
     if let Err(e) = comm_setup::load_for_project(&root) {
         eprintln!("Comm config error: {e}");
