@@ -438,3 +438,160 @@ async fn test_dap_proxy_no_program_rejects() {
         }
     }
 }
+
+/// Test that DAP attach to a RUNNING engine works without stopping execution.
+/// This replicates the VS Code attach flow exactly:
+/// Initialize → Attach → ConfigurationDone → verify session stays alive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_dap_attach_to_running_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, dap_port, _handle) = start_agent_with_dap(test_config(dir.path())).await;
+    let client = Client::new();
+
+    // 1. Upload a development bundle
+    let bundle = make_debug_bundle();
+    upload_bundle(&client, &base, &bundle).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // 2. Start the program via API
+    let start_resp = client
+        .post(format!("{base}/api/v1/program/start"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(start_resp.status(), 200, "Start should succeed");
+
+    // 3. Let it run a few cycles
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Verify it's actually running
+    let status_resp: serde_json::Value = client
+        .get(format!("{base}/api/v1/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status_resp["status"], "running", "Program should be running: {status_resp}");
+    let cycle_count_before = status_resp["cycle_stats"]["cycle_count"].as_u64().unwrap_or(0);
+    assert!(cycle_count_before > 0, "Should have run some cycles: {status_resp}");
+
+    // 4. Connect to DAP port and do the attach protocol
+    let base_clone = base.clone();
+    let dap_result = tokio::task::spawn_blocking(move || {
+        // Check status using raw TCP (no blocking reqwest needed)
+        let addr_str = base_clone.strip_prefix("http://").unwrap_or(&base_clone);
+        if let Ok(mut s) = TcpStream::connect_timeout(
+            &addr_str.parse().unwrap(),
+            Duration::from_secs(2),
+        ) {
+            let _ = s.write_all(b"GET /api/v1/status HTTP/1.0\r\nHost: localhost\r\n\r\n");
+            let mut resp = String::new();
+            let _ = std::io::Read::read_to_string(&mut s, &mut resp);
+            if let Some(body) = resp.split("\r\n\r\n").nth(1) {
+                eprintln!("[TEST] Status before DAP connect: {body}");
+            }
+        }
+
+        let stream = TcpStream::connect(format!("127.0.0.1:{dap_port}"))
+            .expect("Cannot connect to DAP proxy");
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+
+        let reader_stream = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(&reader_stream);
+        let mut writer = stream;
+
+        // 4a. Initialize
+        eprintln!("[TEST] Sending initialize...");
+        send_dap_request(&mut writer, 1, "initialize", serde_json::json!({
+            "adapterID": "st",
+            "clientID": "test",
+            "clientName": "AttachTest",
+            "supportsRunInTerminalRequest": false
+        }));
+
+        let init_resp = read_until(&mut reader, |m| {
+            m["type"] == "response" && m["command"] == "initialize"
+        }, 10000);
+        assert_eq!(init_resp["success"], true, "Initialize failed: {init_resp}");
+        eprintln!("[TEST] Initialize OK: {init_resp}");
+
+        // 4b. Attach (NOT launch)
+        eprintln!("[TEST] Sending attach...");
+        send_dap_request(&mut writer, 2, "attach", serde_json::json!({
+            "target": "test",
+            "stopOnEntry": false
+        }));
+
+        let attach_resp = read_until(&mut reader, |m| {
+            m["type"] == "response" && m["command"] == "attach"
+        }, 10000);
+        assert_eq!(attach_resp["success"], true, "Attach failed: {attach_resp}");
+        eprintln!("[TEST] Attach OK");
+
+        // 4c. Should receive "initialized" event
+        let init_event = read_until(&mut reader, |m| {
+            m["type"] == "event" && m["event"] == "initialized"
+        }, 5000);
+        eprintln!("[TEST] Got initialized event: {init_event}");
+
+        // 4d. ConfigurationDone
+        eprintln!("[TEST] Sending configurationDone...");
+        send_dap_request(&mut writer, 3, "configurationDone", serde_json::Value::Null);
+
+        let config_resp = read_until(&mut reader, |m| {
+            m["type"] == "response" && m["command"] == "configurationDone"
+        }, 5000);
+        assert_eq!(config_resp["success"], true, "ConfigurationDone failed: {config_resp}");
+        eprintln!("[TEST] ConfigurationDone OK");
+
+        // 4e. We should NOT receive a "stopped" event — engine keeps running.
+        // Wait 2 seconds and verify no stopped event arrives.
+        eprintln!("[TEST] Verifying no stopped event (engine should keep running)...");
+        writer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let stopped = read_dap_message_timeout(&mut reader);
+        if let Some(ref msg) = stopped {
+            if msg["type"] == "event" && msg["event"] == "stopped" {
+                panic!("Engine should NOT stop on attach! Got: {msg}");
+            }
+            eprintln!("[TEST] Got non-stopped message (OK): {msg}");
+        } else {
+            eprintln!("[TEST] No stopped event — engine is running (correct!)");
+        }
+
+        // 4f. Send threads request to verify session is alive
+        writer.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        send_dap_request(&mut writer, 4, "threads", serde_json::Value::Null);
+        let threads_resp = read_until(&mut reader, |m| {
+            m["type"] == "response" && m["command"] == "threads"
+        }, 5000);
+        assert_eq!(threads_resp["success"], true, "Threads failed: {threads_resp}");
+        eprintln!("[TEST] Threads OK — session is alive");
+
+        // 4g. Disconnect
+        send_dap_request(&mut writer, 5, "disconnect", serde_json::json!({
+            "terminateDebuggee": false
+        }));
+        eprintln!("[TEST] Disconnect sent");
+    })
+    .await;
+
+    assert!(dap_result.is_ok(), "DAP attach protocol failed: {:?}", dap_result.err());
+
+    // 5. Verify the program is STILL running after disconnect
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let status_after: serde_json::Value = client
+        .get(format!("{base}/api/v1/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status_after["status"], "running", "Program should still be running after debug disconnect: {status_after}");
+    let cycle_count_after = status_after["cycle_stats"]["cycle_count"].as_u64().unwrap_or(0);
+    assert!(cycle_count_after > cycle_count_before, "Cycles should advance after disconnect: before={cycle_count_before}, after={cycle_count_after}");
+
+    eprintln!("[TEST] Program still running with {cycle_count_after} cycles (was {cycle_count_before} before attach)");
+}

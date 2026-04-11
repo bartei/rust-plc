@@ -37,9 +37,13 @@ pub fn handle_dap_attach(
     info!("DAP attach: session from {peer}");
 
     // Attach to the running engine
+    info!("DAP attach: calling debug_attach()...");
     let rt = tokio::runtime::Handle::current();
     let (cmd_tx, event_rx) = match rt.block_on(app_state.runtime_manager.debug_attach()) {
-        Ok(channels) => channels,
+        Ok(channels) => {
+            info!("DAP attach: debug_attach() succeeded — channels ready");
+            channels
+        }
         Err(e) => {
             error!("DAP attach: cannot attach to engine: {e}");
             send_dap_error(&stream, 0, &format!("Cannot attach: {e}"));
@@ -155,6 +159,7 @@ fn handle_dap_request(
 ) {
     let req_seq = msg["seq"].as_i64().unwrap_or(0);
     let command = msg["command"].as_str().unwrap_or("");
+    tracing::debug!("DAP attach: request seq={req_seq} command={command}");
 
     match command {
         "initialize" => {
@@ -440,12 +445,20 @@ fn handle_engine_event(
 // =============================================================================
 
 fn read_dap_message(reader: &mut BufReader<std::net::TcpStream>) -> Result<Option<serde_json::Value>, String> {
+    // Ensure blocking mode for the reader (no timeout interference)
+    let _ = reader.get_ref().set_read_timeout(None);
+
     let mut header = String::new();
     loop {
         header.clear();
         match reader.read_line(&mut header) {
             Ok(0) => return Ok(None),
             Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.kind() == std::io::ErrorKind::TimedOut => {
+                // Retry — transient timeout from inherited socket config
+                continue;
+            }
             Err(e) => return Err(format!("Read error: {e}")),
         }
         let trimmed = header.trim();

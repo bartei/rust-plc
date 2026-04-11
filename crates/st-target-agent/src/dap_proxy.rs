@@ -89,6 +89,7 @@ pub async fn run_dap_proxy_with_listener(
         // - Running/DebugPaused → attach to running engine (no subprocess)
         // - Idle → spawn subprocess for offline debugging
         let status = app_state.runtime_manager.state().status;
+        info!("DAP proxy: engine status = {status:?}");
         if status == crate::runtime_manager::RuntimeStatus::Running
             || status == crate::runtime_manager::RuntimeStatus::DebugPaused
         {
