@@ -933,13 +933,27 @@ fn run_target_install(args: &[String]) {
         }
     };
 
+    // Auto-build the static binary if it doesn't exist or is stale
     let binary_path = match st_deploy::installer::find_static_binary(&arch) {
         Ok(p) => p,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            process::exit(1);
+        Err(_) => {
+            eprintln!("  Static binary not found — building...");
+            build_static_binary(&arch);
+            match st_deploy::installer::find_static_binary(&arch) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            }
         }
     };
+
+    // Rebuild if the binary is older than any source file in the workspace
+    if should_rebuild_binary(&binary_path) {
+        eprintln!("  Static binary is stale — rebuilding...");
+        build_static_binary(&arch);
+    }
 
     eprintln!("  Binary: {} ({})", binary_path.display(), arch);
 
@@ -1016,6 +1030,101 @@ fn run_target_uninstall(args: &[String]) {
             process::exit(1);
         }
     }
+}
+
+/// Build the static musl binary by running the build-static.sh script.
+fn build_static_binary(arch: &str) {
+    // Find the build script relative to the workspace root
+    let workspace_root = find_workspace_root();
+    let script = workspace_root.join("scripts/build-static.sh");
+
+    if !script.exists() {
+        eprintln!("Error: build script not found at {}", script.display());
+        eprintln!("Run manually: ./scripts/build-static.sh {arch}");
+        process::exit(1);
+    }
+
+    let status = std::process::Command::new("bash")
+        .arg(&script)
+        .arg(arch)
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            eprintln!("  Build complete.");
+        }
+        Ok(s) => {
+            eprintln!("Error: build-static.sh exited with {s}");
+            process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Error running build-static.sh: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+/// Check if the static binary needs rebuilding by comparing its mtime
+/// against the newest Rust source file in the workspace.
+fn should_rebuild_binary(binary_path: &Path) -> bool {
+    let Ok(bin_meta) = std::fs::metadata(binary_path) else {
+        return true;
+    };
+    let Ok(bin_mtime) = bin_meta.modified() else {
+        return true;
+    };
+
+    let workspace_root = find_workspace_root();
+    let crates_dir = workspace_root.join("crates");
+    if !crates_dir.is_dir() {
+        return false;
+    }
+
+    // Check if any .rs file in crates/ is newer than the binary
+    fn newest_rs_mtime(dir: &Path) -> Option<std::time::SystemTime> {
+        let mut newest = None;
+        let Ok(entries) = std::fs::read_dir(dir) else { return None };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(t) = newest_rs_mtime(&path) {
+                    newest = Some(newest.map_or(t, |n: std::time::SystemTime| n.max(t)));
+                }
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                if let Ok(m) = path.metadata().and_then(|m| m.modified()) {
+                    newest = Some(newest.map_or(m, |n: std::time::SystemTime| n.max(m)));
+                }
+            }
+        }
+        newest
+    }
+
+    if let Some(src_mtime) = newest_rs_mtime(&crates_dir) {
+        return src_mtime > bin_mtime;
+    }
+    false
+}
+
+/// Find the workspace root (directory containing Cargo.toml + crates/).
+fn find_workspace_root() -> PathBuf {
+    // Try relative to st-cli binary
+    if let Ok(exe) = std::env::current_exe() {
+        // exe is in target/debug/st-cli → workspace root is ../../
+        if let Some(root) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+            if root.join("Cargo.toml").exists() && root.join("crates").is_dir() {
+                return root.to_path_buf();
+            }
+        }
+    }
+    // Walk up from CWD
+    let mut cur = std::env::current_dir().unwrap_or_default();
+    for _ in 0..10 {
+        if cur.join("Cargo.toml").exists() && cur.join("crates").is_dir() {
+            return cur;
+        }
+        if !cur.pop() { break; }
+    }
+    std::env::current_dir().unwrap_or_default()
 }
 
 fn format_size(bytes: u64) -> String {
