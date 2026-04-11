@@ -14,6 +14,8 @@ pub enum RuntimeStatus {
     Idle,
     Starting,
     Running,
+    /// Engine is paused at a breakpoint by an attached debugger.
+    DebugPaused,
     Stopping,
     Error,
 }
@@ -247,31 +249,33 @@ fn run_cycle_loop(
 ) -> Result<StopReason, String> {
     loop {
         // Execute one scan cycle
-        let cycle_elapsed = engine
-            .run_one_cycle()
-            .map_err(|e| format!("Runtime error: {e}"))?;
+        match engine.run_one_cycle() {
+            Ok(cycle_elapsed) => {
+                // Normal cycle completed — update stats and sleep
+                update_cycle_stats(engine, state);
 
-        // Update shared state with latest stats
-        {
-            let stats = engine.stats();
-            let mut s = state.write().unwrap();
-            s.cycle_stats = Some(CycleStatsSnapshot {
-                cycle_count: stats.cycle_count,
-                last_cycle_time_us: stats.last_cycle_time.as_micros() as u64,
-                min_cycle_time_us: stats.min_cycle_time.as_micros() as u64,
-                max_cycle_time_us: stats.max_cycle_time.as_micros() as u64,
-                avg_cycle_time_us: stats.avg_cycle_time().as_micros() as u64,
-            });
-        }
-
-        // Sleep for remaining cycle time
-        if let Some(target) = cycle_time {
-            if let Some(remaining) = target.checked_sub(cycle_elapsed) {
-                std::thread::sleep(remaining);
+                if let Some(target) = cycle_time {
+                    if let Some(remaining) = target.checked_sub(cycle_elapsed) {
+                        std::thread::sleep(remaining);
+                    }
+                } else {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
             }
-        } else {
-            // No cycle time configured — yield briefly to allow commands through
-            std::thread::sleep(Duration::from_millis(1));
+            Err(st_engine::VmError::Halt) => {
+                // Debug breakpoint/pause hit — NOT a fatal error.
+                // The VM is paused mid-cycle. For now (without a debug
+                // session attached via Phase C), clear the pause state
+                // and resume. Phase C will add debug command handling here.
+                engine.vm_mut().debug_mut().resume(
+                    st_engine::debug::StepMode::Continue,
+                    0,
+                );
+            }
+            Err(e) => {
+                // True runtime error (division by zero, stack overflow, etc.)
+                return Err(format!("Runtime error: {e}"));
+            }
         }
 
         // Check for commands (non-blocking)
@@ -289,6 +293,19 @@ fn run_cycle_loop(
             }
         }
     }
+}
+
+/// Update shared cycle stats from the engine (factored out for readability).
+fn update_cycle_stats(engine: &st_engine::Engine, state: &Arc<RwLock<RuntimeState>>) {
+    let stats = engine.stats();
+    let mut s = state.write().unwrap();
+    s.cycle_stats = Some(CycleStatsSnapshot {
+        cycle_count: stats.cycle_count,
+        last_cycle_time_us: stats.last_cycle_time.as_micros() as u64,
+        min_cycle_time_us: stats.min_cycle_time.as_micros() as u64,
+        max_cycle_time_us: stats.max_cycle_time.as_micros() as u64,
+        avg_cycle_time_us: stats.avg_cycle_time().as_micros() as u64,
+    });
 }
 
 #[cfg(test)]

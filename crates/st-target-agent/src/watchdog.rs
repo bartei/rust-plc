@@ -111,6 +111,11 @@ impl Watchdog {
                     last_cycle_count = 0;
                 }
 
+                RuntimeStatus::DebugPaused => {
+                    // Engine is paused by an attached debugger — this is expected.
+                    // Do NOT count as a stall. Do NOT restart.
+                }
+
                 _ => {}
             }
         }
