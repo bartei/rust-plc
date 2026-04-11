@@ -1,0 +1,27 @@
+[package]
+name = "st-deploy"
+description = "Program bundler and deployment target configuration for remote PLC deployment"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+sha2 = "0.10"
+tar = "0.4"
+flate2 = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Internal crates needed for compilation pipeline
+st-syntax = { path = "../st-syntax" }
+st-semantics = { path = "../st-semantics" }
+st-compiler = { path = "../st-compiler" }
+st-ir = { path = "../st-ir" }
+st-comm-api = { path = "../st-comm-api" }
+
+[dev-dependencies]
+tempfile = "3"

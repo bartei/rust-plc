@@ -101,6 +101,13 @@ export function getPlcVarCatalog(): Array<{ name: string; type: string }> {
 class PlcDapTracker implements vscode.DebugAdapterTracker {
   private watchListSynced = false;
 
+  onWillReceiveMessage(message: any): void {
+    // Log messages VS Code sends TO the debug adapter (for diagnostics)
+    if (message?.type === "request") {
+      console.log(`[DAP-TRACKER] → ${message.command} (seq=${message.seq})`);
+    }
+  }
+
   onDidSendMessage(message: any): void {
     if (
       message?.type !== "event" ||
@@ -167,10 +174,12 @@ class PlcDapTracker implements vscode.DebugAdapterTracker {
   onWillStopSession(): void {
     cycleStatusBar?.hide();
   }
-  onError(): void {
+  onError(error: Error): void {
+    console.log(`[DAP-TRACKER] ERROR: ${error.message}`);
     cycleStatusBar?.hide();
   }
-  onExit(): void {
+  onExit(code: number | undefined, signal: string | undefined): void {
+    console.log(`[DAP-TRACKER] EXIT: code=${code} signal=${signal}`);
     cycleStatusBar?.hide();
   }
 }
@@ -344,6 +353,86 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  // ── Deployment toolbar commands ──────────────────────────────────
+  context.subscriptions.push(
+    vscode.commands.registerCommand("structured-text.targetInstall", async () => {
+      const target = await vscode.window.showInputBox({
+        prompt: "Target (user@host)",
+        placeHolder: "plc@192.168.1.50",
+        title: "Install PLC Runtime",
+      });
+      if (!target) return;
+      const terminal = vscode.window.createTerminal("PLC Install");
+      terminal.show();
+      terminal.sendText(`st-cli target install ${target}`);
+    }),
+
+    vscode.commands.registerCommand("structured-text.targetUpload", async () => {
+      const targets = getTargetsFromConfig();
+      const host = await pickOrInputTarget(targets, "Upload PLC Program");
+      if (!host) return;
+      const terminal = vscode.window.createTerminal("PLC Upload");
+      terminal.show();
+      terminal.sendText(`st-cli bundle && curl -X POST -F "file=@$(ls -t *.st-bundle | head -1)" http://${host}:4840/api/v1/program/upload`);
+    }),
+
+    vscode.commands.registerCommand("structured-text.targetOnlineUpdate", async () => {
+      const targets = getTargetsFromConfig();
+      const host = await pickOrInputTarget(targets, "Online Update");
+      if (!host) return;
+      // Build, stop, upload, start — with online change prompt if needed
+      const terminal = vscode.window.createTerminal("PLC Online Update");
+      terminal.show();
+      terminal.sendText([
+        "st-cli bundle",
+        `curl -sf -X POST http://${host}:4840/api/v1/program/stop 2>/dev/null || true`,
+        `curl -sf -X POST -F "file=@$(ls -t *.st-bundle | head -1)" http://${host}:4840/api/v1/program/upload`,
+        `curl -sf -X POST http://${host}:4840/api/v1/program/start`,
+        `echo "Update complete" && curl -sf http://${host}:4840/api/v1/status`,
+      ].join(" && "));
+    }),
+
+    vscode.commands.registerCommand("structured-text.targetRun", async () => {
+      const targets = getTargetsFromConfig();
+      const host = await pickOrInputTarget(targets, "Start PLC Program");
+      if (!host) return;
+      try {
+        const resp = await fetch(`http://${host}:4840/api/v1/program/start`, { method: "POST" });
+        if (resp.ok) {
+          vscode.window.showInformationMessage("PLC program started");
+          if (MonitorPanel.currentPanel) {
+            MonitorPanel.currentPanel.updateTargetStatus("running", host);
+          }
+        } else {
+          const body = await resp.json().catch(() => ({}));
+          vscode.window.showErrorMessage(`Start failed: ${(body as any).error || resp.statusText}`);
+        }
+      } catch (e: any) {
+        vscode.window.showErrorMessage(`Cannot reach target: ${e.message}`);
+      }
+    }),
+
+    vscode.commands.registerCommand("structured-text.targetStop", async () => {
+      const targets = getTargetsFromConfig();
+      const host = await pickOrInputTarget(targets, "Stop PLC Program");
+      if (!host) return;
+      try {
+        const resp = await fetch(`http://${host}:4840/api/v1/program/stop`, { method: "POST" });
+        if (resp.ok) {
+          vscode.window.showInformationMessage("PLC program stopped");
+          if (MonitorPanel.currentPanel) {
+            MonitorPanel.currentPanel.updateTargetStatus("idle", host);
+          }
+        } else {
+          const body = await resp.json().catch(() => ({}));
+          vscode.window.showErrorMessage(`Stop failed: ${(body as any).error || resp.statusText}`);
+        }
+      } catch (e: any) {
+        vscode.window.showErrorMessage(`Cannot reach target: ${e.message}`);
+      }
+    })
+  );
+
   // ── Cleanup ──────────────────────────────────────────────────────
   context.subscriptions.push({
     dispose: () => {
@@ -352,12 +441,69 @@ export function activate(context: vscode.ExtensionContext) {
   });
 }
 
+/**
+ * Read target hosts from plc-project.yaml in the workspace.
+ * Returns an array of "host" strings for quick-pick.
+ */
+function getTargetsFromConfig(): string[] {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder) return [];
+  const fs = require("fs");
+  const path = require("path");
+  for (const name of ["plc-project.yaml", "plc-project.yml"]) {
+    const p = path.join(folder.uri.fsPath, name);
+    if (fs.existsSync(p)) {
+      try {
+        const text = fs.readFileSync(p, "utf8");
+        // Simple YAML target extraction — look for host: lines under targets:
+        const hosts: string[] = [];
+        const lines: string[] = text.split("\n");
+        let inTargets = false;
+        for (const line of lines) {
+          if (/^targets:/.test(line)) { inTargets = true; continue; }
+          if (inTargets && /^\S/.test(line) && !/^\s/.test(line)) { inTargets = false; }
+          if (inTargets) {
+            const m = line.match(/host:\s*(.+)/);
+            if (m) hosts.push(m[1].trim().replace(/["']/g, ""));
+          }
+        }
+        return hosts;
+      } catch {
+        return [];
+      }
+    }
+  }
+  return [];
+}
+
+/**
+ * Show a quick-pick with known targets, or an input box if none configured.
+ */
+async function pickOrInputTarget(targets: string[], title: string): Promise<string | undefined> {
+  if (targets.length > 0) {
+    const items = targets.map(h => ({ label: h, description: `Port 4840` }));
+    items.push({ label: "$(add) Enter manually...", description: "" });
+    const pick = await vscode.window.showQuickPick(items, { title, placeHolder: "Select target" });
+    if (!pick) return undefined;
+    if (pick.label.includes("Enter manually")) {
+      return vscode.window.showInputBox({ prompt: "Target host (IP or hostname)", title });
+    }
+    return pick.label;
+  }
+  return vscode.window.showInputBox({ prompt: "Target host (IP or hostname)", placeHolder: "192.168.1.50", title });
+}
+
 export function deactivate(): Thenable<void> | undefined {
   return client?.stop();
 }
 
 /**
- * Spawns `st-cli debug <file>` as the debug adapter process.
+ * Debug adapter factory that supports both local launch and remote attach.
+ *
+ * - **launch**: Spawns `st-cli debug <file>` as a local subprocess (existing behavior).
+ * - **attach**: Connects to a remote target agent's DAP proxy TCP port. The agent
+ *   bridges the TCP connection to `st-cli debug` running on the target device.
+ *   VS Code sends/receives DAP messages directly over TCP (Content-Length framing).
  */
 class StDebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory {
   constructor(private stCliPath: string) {}
@@ -367,8 +513,17 @@ class StDebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory {
     _executable: vscode.DebugAdapterExecutable | undefined
   ): vscode.ProviderResult<vscode.DebugAdapterDescriptor> {
     const config = session.configuration;
-    const program = config.program || "";
 
+    if (config.request === "attach") {
+      // Remote attach: connect to target agent's DAP proxy TCP port
+      const host = config.host || "127.0.0.1";
+      const port = config.port || 4841;
+      console.log(`[ST-DEBUG] Creating DebugAdapterServer(${port}, ${host})`);
+      return new vscode.DebugAdapterServer(port, host);
+    }
+
+    // Local launch: spawn st-cli debug as a subprocess
+    const program = config.program || "";
     return new vscode.DebugAdapterExecutable(this.stCliPath, ["debug", program]);
   }
 }

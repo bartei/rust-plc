@@ -148,7 +148,33 @@ export class MonitorPanel {
           this.saveExpandedNodes(msg.nodes);
         }
         break;
+
+      // ── Deployment toolbar commands ──────────────────────────
+      case "tb:install":
+        vscode.commands.executeCommand("structured-text.targetInstall");
+        break;
+      case "tb:upload":
+        vscode.commands.executeCommand("structured-text.targetUpload");
+        break;
+      case "tb:onlineUpdate":
+        vscode.commands.executeCommand("structured-text.targetOnlineUpdate");
+        break;
+      case "tb:run":
+        vscode.commands.executeCommand("structured-text.targetRun");
+        break;
+      case "tb:stop":
+        vscode.commands.executeCommand("structured-text.targetStop");
+        break;
     }
+  }
+
+  /** Update the target status indicator in the toolbar. */
+  public updateTargetStatus(status: string, targetName?: string) {
+    this.panel.webview.postMessage({
+      command: "updateTargetStatus",
+      status,
+      targetName: targetName || "",
+    });
   }
 
   /// Send a synthetic evaluate request to the active DAP session — used
@@ -373,9 +399,95 @@ export class MonitorPanel {
       border-color: var(--vscode-inputValidation-errorBorder, #be1100) !important;
       background: var(--vscode-inputValidation-errorBackground) !important;
     }
+    /* ── Deployment Toolbar ─────────────────────────────────── */
+    .deploy-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 6px 0 10px 0;
+      border-bottom: 1px solid var(--vscode-panel-border);
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .deploy-toolbar .tb-group {
+      display: flex;
+      gap: 3px;
+      align-items: center;
+    }
+    .deploy-toolbar .tb-sep {
+      width: 1px;
+      height: 20px;
+      background: var(--vscode-panel-border);
+      margin: 0 6px;
+    }
+    .deploy-toolbar button {
+      padding: 3px 8px;
+      font-size: 11px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
+    }
+    .deploy-toolbar button .tb-icon {
+      font-size: 13px;
+      line-height: 1;
+    }
+    .deploy-toolbar button:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+    .deploy-toolbar .tb-status {
+      font-size: 11px;
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--vscode-descriptionForeground);
+    }
+    .tb-status .tb-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--vscode-descriptionForeground);
+    }
+    .tb-dot.running { background: var(--vscode-charts-green, #4caf50); }
+    .tb-dot.stopped { background: var(--vscode-descriptionForeground); }
+    .tb-dot.error   { background: var(--vscode-charts-red, #f44336); }
+    .tb-dot.offline { background: var(--vscode-descriptionForeground); opacity: 0.4; }
   </style>
 </head>
 <body>
+  <div class="deploy-toolbar" id="deploy-toolbar">
+    <div class="tb-group">
+      <button onclick="tbInstall()" title="Install or upgrade the PLC runtime on the target">
+        <span class="tb-icon">&#x2B07;</span> Install
+      </button>
+    </div>
+    <div class="tb-sep"></div>
+    <div class="tb-group">
+      <button onclick="tbUpload()" title="Upload PLC program to target (offline update — stops the program)">
+        <span class="tb-icon">&#x2191;</span> Upload
+      </button>
+      <button onclick="tbOnlineUpdate()" title="Online update — hot-reload without stopping (when possible)">
+        <span class="tb-icon">&#x21BB;</span> Online
+      </button>
+    </div>
+    <div class="tb-sep"></div>
+    <div class="tb-group">
+      <button onclick="tbRun()" id="tb-run" title="Start or restart the PLC program on the target">
+        <span class="tb-icon">&#x25B6;</span> Run
+      </button>
+      <button onclick="tbStop()" id="tb-stop" title="Stop the PLC program on the target">
+        <span class="tb-icon">&#x25A0;</span> Stop
+      </button>
+    </div>
+    <div class="tb-status" id="tb-status">
+      <span class="tb-dot offline" id="tb-dot"></span>
+      <span id="tb-status-text">No target</span>
+    </div>
+  </div>
+
   <h2>Scan Cycle</h2>
   <div class="stats">
     <span class="stat-label">Cycles:</span><span class="stat-value" id="s-cycles">0</span>
@@ -795,6 +907,51 @@ export class MonitorPanel {
       vscode.postMessage({ command: "removeWatch", variable: name });
     }
 
+    // ── Deployment Toolbar Handlers ─────────────────────────────
+    function tbInstall() {
+      vscode.postMessage({ command: "tb:install" });
+    }
+    function tbUpload() {
+      vscode.postMessage({ command: "tb:upload" });
+    }
+    function tbOnlineUpdate() {
+      vscode.postMessage({ command: "tb:onlineUpdate" });
+    }
+    function tbRun() {
+      vscode.postMessage({ command: "tb:run" });
+    }
+    function tbStop() {
+      vscode.postMessage({ command: "tb:stop" });
+    }
+
+    /** Update the status indicator in the toolbar. */
+    function updateToolbarStatus(status, targetName) {
+      const dot = document.getElementById("tb-dot");
+      const text = document.getElementById("tb-status-text");
+      if (!dot || !text) return;
+
+      dot.className = "tb-dot";
+      if (status === "running") {
+        dot.classList.add("running");
+        text.textContent = targetName ? targetName + " — Running" : "Running";
+      } else if (status === "idle" || status === "stopped") {
+        dot.classList.add("stopped");
+        text.textContent = targetName ? targetName + " — Stopped" : "Stopped";
+      } else if (status === "error") {
+        dot.classList.add("error");
+        text.textContent = targetName ? targetName + " — Error" : "Error";
+      } else {
+        dot.classList.add("offline");
+        text.textContent = targetName || "No target";
+      }
+
+      // Enable/disable Run/Stop buttons based on state
+      const runBtn = document.getElementById("tb-run");
+      const stopBtn = document.getElementById("tb-stop");
+      if (runBtn) runBtn.disabled = (status === "running");
+      if (stopBtn) stopBtn.disabled = (status !== "running");
+    }
+
     function clearAll() {
       if (watchList.length === 0) return;
       watchList = [];
@@ -886,6 +1043,8 @@ export class MonitorPanel {
       } else if (msg.command === "updateWatchList") {
         watchList = msg.watchList;
         renderWatchTable();
+      } else if (msg.command === "updateTargetStatus") {
+        updateToolbarStatus(msg.status, msg.targetName);
       }
     });
 

@@ -12,6 +12,9 @@ members = [
     "crates/st-cli",
     "crates/st-comm-api",
     "crates/st-comm-sim",
+    "crates/st-deploy",
+    "crates/st-target-agent",
+    "crates/st-plc-runtime",
 ]
 resolver = "3"
 
@@ -64,3 +67,13 @@ st-lsp = { path = "crates/st-lsp" }
 st-dap = { path = "crates/st-dap" }
 st-monitor = { path = "crates/st-monitor" }
 st-cli = { path = "crates/st-cli" }
+st-deploy = { path = "crates/st-deploy" }
+
+# Optimized profile for static target binaries (musl)
+[profile.release-static]
+inherits = "release"
+opt-level = "s"        # Optimize for size
+lto = true             # Link-time optimization (smaller + faster)
+strip = true           # Strip debug symbols
+panic = "abort"        # No unwinding (smaller binary)
+codegen-units = 1      # Maximum optimization

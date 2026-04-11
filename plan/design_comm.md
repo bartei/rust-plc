@@ -3,6 +3,7 @@
 > **Parent plan:** [implementation.md](implementation.md) — core platform progress tracker (Phases 0-12).
 > **Todo list:** [implementation_comm.md](implementation_comm.md) — progress tracking and actionable items.
 > **See also:** [implementation_native.md](implementation_native.md) — LLVM native compilation + hardware targets (Phase 14).
+> **See also:** [design_deploy.md](design_deploy.md) — remote deployment & online management (Phase 15).
 
 ## Communication Extension System & Modbus Implementation
 

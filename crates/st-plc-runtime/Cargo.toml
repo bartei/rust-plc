@@ -1,0 +1,39 @@
+[package]
+name = "st-plc-runtime"
+description = "Unified PLC runtime binary for target deployment — agent, debugger, compiler in one static executable"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "st-plc-runtime"
+path = "src/main.rs"
+
+[dependencies]
+# Agent server (HTTP API, runtime manager, program store)
+st-target-agent = { path = "../st-target-agent" }
+
+# DAP debug server
+st-dap = { path = "../st-dap" }
+
+# Compilation pipeline (for run/check commands)
+st-syntax = { path = "../st-syntax" }
+st-semantics = { path = "../st-semantics" }
+st-compiler = { path = "../st-compiler" }
+st-ir = { path = "../st-ir" }
+st-runtime = { path = "../st-runtime" }
+st-comm-api = { path = "../st-comm-api" }
+
+# CLI framework
+clap = { version = "4", features = ["derive"] }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+axum = { version = "0.8" }
+
+[dev-dependencies]
+tempfile = "3"
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+st-deploy = { path = "../st-deploy" }
+serde_json.workspace = true

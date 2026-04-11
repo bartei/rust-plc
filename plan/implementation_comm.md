@@ -3,6 +3,7 @@
 > **Design document:** [design_comm.md](design_comm.md) — architecture, examples, rationale.
 > **Parent plan:** [implementation.md](implementation.md) — core platform progress tracker.
 > **See also:** [implementation_native.md](implementation_native.md) — native compilation.
+> **See also:** [implementation_deploy.md](implementation_deploy.md) — remote deployment (Phase 15).
 
 ---
 

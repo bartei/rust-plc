@@ -585,6 +585,17 @@ impl DapSession {
                 self.pending_events.push(Event::Initialized);
                 response
             }
+            Command::Attach(_) => {
+                // Attach works the same as Launch — the proxy already set up the source.
+                // We use the same load/compile logic but return an Attach response body.
+                let mut response = self.handle_launch(seq);
+                // Override the response body to match the Attach command
+                if response.success {
+                    response.body = Some(ResponseBody::Attach);
+                }
+                self.pending_events.push(Event::Initialized);
+                response
+            }
             Command::SetBreakpoints(args) => self.handle_set_breakpoints(seq, args),
             Command::ConfigurationDone => ok(seq, ResponseBody::ConfigurationDone),
             Command::Threads => ok(seq, ResponseBody::Threads(dap::responses::ThreadsResponse {

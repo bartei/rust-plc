@@ -15,6 +15,7 @@ st-ir.workspace = true
 st-runtime.workspace = true
 st-comm-api = { path = "../st-comm-api" }
 st-comm-sim = { path = "../st-comm-sim" }
+st-deploy = { path = "../st-deploy" }
 st-lsp.workspace = true
 st-dap.workspace = true
 st-monitor.workspace = true
