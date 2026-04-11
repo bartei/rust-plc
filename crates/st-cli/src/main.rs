@@ -1032,21 +1032,52 @@ fn run_target_uninstall(args: &[String]) {
     }
 }
 
-/// Build the static musl binary by running the build-static.sh script.
+/// Build the static musl binary.
+///
+/// Tries direct `cargo build` first (works when the musl target is installed
+/// and a C compiler is available, e.g., in devcontainers). Falls back to
+/// `scripts/build-static.sh` which uses nix-shell for the cross-compiler.
 fn build_static_binary(arch: &str) {
-    // Find the build script relative to the workspace root
-    let workspace_root = find_workspace_root();
-    let script = workspace_root.join("scripts/build-static.sh");
+    let target_triple = match arch {
+        "x86_64" => "x86_64-unknown-linux-musl",
+        "aarch64" => "aarch64-unknown-linux-musl",
+        _ => {
+            eprintln!("Error: unsupported architecture '{arch}'");
+            process::exit(1);
+        }
+    };
 
+    let workspace_root = find_workspace_root();
+
+    // Try direct cargo build first (no nix dependency)
+    eprintln!("  Building st-runtime for {target_triple}...");
+    let cargo_status = std::process::Command::new("cargo")
+        .args(["build", "-p", "st-runtime", "--target", target_triple, "--profile", "release-static"])
+        .env("CC", "gcc") // Use system gcc for tree-sitter C compilation
+        .current_dir(&workspace_root)
+        .status();
+
+    match cargo_status {
+        Ok(s) if s.success() => {
+            eprintln!("  Build complete.");
+            return;
+        }
+        _ => {
+            eprintln!("  Direct cargo build failed, trying build-static.sh...");
+        }
+    }
+
+    // Fallback: nix-shell based build script
+    let script = workspace_root.join("scripts/build-static.sh");
     if !script.exists() {
         eprintln!("Error: build script not found at {}", script.display());
-        eprintln!("Run manually: ./scripts/build-static.sh {arch}");
         process::exit(1);
     }
 
     let status = std::process::Command::new("bash")
         .arg(&script)
         .arg(arch)
+        .current_dir(&workspace_root)
         .status();
 
     match status {
@@ -1054,11 +1085,11 @@ fn build_static_binary(arch: &str) {
             eprintln!("  Build complete.");
         }
         Ok(s) => {
-            eprintln!("Error: build-static.sh exited with {s}");
+            eprintln!("Error: build failed with {s}");
             process::exit(1);
         }
         Err(e) => {
-            eprintln!("Error running build-static.sh: {e}");
+            eprintln!("Error: {e}");
             process::exit(1);
         }
     }
