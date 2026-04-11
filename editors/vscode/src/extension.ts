@@ -108,10 +108,25 @@ class PlcDapTracker implements vscode.DebugAdapterTracker {
     this.localRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   }
 
+  /** The target-side source prefix, discovered from the first stackTrace response. */
+  private remotePrefix: string | undefined;
+
   onWillReceiveMessage(message: any): void {
     // Log messages VS Code sends TO the debug adapter (for diagnostics)
     if (message?.type === "request") {
       console.log(`[DAP-TRACKER] → ${message.command} (seq=${message.seq})`);
+    }
+    // Remap local source paths to target-side paths in setBreakpoints requests
+    // so the DAP server on the target can find the source files.
+    if (this.isRemote && this.localRoot && message?.type === "request" && message.command === "setBreakpoints") {
+      const srcPath = message.arguments?.source?.path;
+      if (srcPath && srcPath.startsWith(this.localRoot)) {
+        const relPath = srcPath.substring(this.localRoot.length).replace(/^[/\\]/, "");
+        if (this.remotePrefix) {
+          message.arguments.source.path = this.remotePrefix + "/" + relPath;
+          console.log(`[DAP-TRACKER] Remapped breakpoint path: ${srcPath} → ${message.arguments.source.path}`);
+        }
+      }
     }
   }
 
@@ -122,6 +137,15 @@ class PlcDapTracker implements vscode.DebugAdapterTracker {
       if (message.command === "stackTrace" && message.body?.stackFrames) {
         for (const frame of message.body.stackFrames) {
           if (frame.source?.path) {
+            // Discover the remote prefix from the first stack frame
+            if (!this.remotePrefix) {
+              const marker = "current_source";
+              const idx = frame.source.path.indexOf(marker);
+              if (idx >= 0) {
+                this.remotePrefix = frame.source.path.substring(0, idx + marker.length);
+                console.log(`[DAP-TRACKER] Discovered remote prefix: ${this.remotePrefix}`);
+              }
+            }
             frame.source.path = this.remapSourcePath(frame.source.path);
           }
         }

@@ -59,6 +59,18 @@ pub async fn run_dap_proxy_with_listener(
         info!("DAP proxy: connection from {peer}");
 
         // Check if we have a program and it's debuggable
+        // Stop the running program before starting a debug session —
+        // the debugger spawns its own VM and the two can't coexist.
+        {
+            let status = app_state.runtime_manager.state().status;
+            if status == crate::runtime_manager::RuntimeStatus::Running {
+                info!("DAP proxy: stopping running program for debug session");
+                let _ = app_state.runtime_manager.stop().await;
+                // Brief wait for the runtime thread to actually stop
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+
         let source_path = {
             let store = app_state.program_store.read().unwrap();
             match store.current_program() {
