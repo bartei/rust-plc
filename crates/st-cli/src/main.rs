@@ -1049,6 +1049,12 @@ fn build_static_binary(arch: &str) {
 
     let workspace_root = find_workspace_root();
 
+    // Ensure the musl target is installed
+    let _ = std::process::Command::new("rustup")
+        .args(["target", "add", target_triple])
+        .current_dir(&workspace_root)
+        .status();
+
     // Try direct cargo build first (no nix dependency)
     eprintln!("  Building st-runtime for {target_triple}...");
     let cargo_status = std::process::Command::new("cargo")
