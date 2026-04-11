@@ -169,8 +169,10 @@ export class MonitorPanel {
         if (msg.host) {
           this.selectedTargetHost = msg.host;
           this.selectedTargetPort = msg.agentPort || 4840;
+          this.pollTargetStatus();
         } else {
           this.selectedTargetHost = undefined;
+          this.updateTargetStatus("offline");
         }
         break;
       case "tb:refreshTargets":
@@ -186,6 +188,35 @@ export class MonitorPanel {
       status,
       targetName: targetName || "",
     });
+  }
+
+  /** Poll the selected target's /api/v1/status endpoint and update toolbar. */
+  public async pollTargetStatus() {
+    if (!this.selectedTargetHost) {
+      this.updateTargetStatus("offline");
+      return;
+    }
+    const host = this.selectedTargetHost;
+    const port = this.selectedTargetPort;
+    try {
+      const resp = await fetch(
+        `http://${host}:${port}/api/v1/status`,
+        { signal: AbortSignal.timeout(3000) }
+      );
+      if (resp.ok) {
+        const body = await resp.json() as any;
+        const status = body.runtime_status?.toLowerCase() || "idle";
+        if (status === "running") {
+          this.updateTargetStatus("running", host);
+        } else {
+          this.updateTargetStatus("idle", host);
+        }
+      } else {
+        this.updateTargetStatus("error", host);
+      }
+    } catch {
+      this.updateTargetStatus("offline", host);
+    }
   }
 
   /** Populate the target dropdown from plc-project.yaml targets. */
@@ -991,8 +1022,16 @@ export class MonitorPanel {
         opt.dataset.port = String(t.agentPort);
         select.appendChild(opt);
       }
-      // Restore selection
-      if (current) { select.value = current; }
+      // Restore previous selection, or auto-select if only one target
+      if (current && [...select.options].some(o => o.value === current)) {
+        select.value = current;
+      } else if (targets.length === 1) {
+        select.value = targets[0].host;
+      }
+      // Notify extension of the selection so it polls status
+      if (select.value) {
+        onTargetChange(select);
+      }
     }
 
     /** Update the status indicator in the toolbar. */

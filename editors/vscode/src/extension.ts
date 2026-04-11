@@ -487,15 +487,12 @@ export function activate(context: vscode.ExtensionContext) {
     }),
 
     vscode.commands.registerCommand("structured-text.targetRun", async () => {
-      const host = await resolveActiveTarget("Start PLC Program");
+      const { host, port } = await resolveActiveTargetWithPort("Start PLC Program") || {};
       if (!host) return;
       try {
-        const resp = await fetch(`http://${host}:4840/api/v1/program/start`, { method: "POST" });
+        const resp = await fetch(`http://${host}:${port}/api/v1/program/start`, { method: "POST" });
         if (resp.ok) {
           vscode.window.showInformationMessage("PLC program started");
-          if (MonitorPanel.currentPanel) {
-            MonitorPanel.currentPanel.updateTargetStatus("running", host);
-          }
         } else {
           const body = await resp.json().catch(() => ({}));
           vscode.window.showErrorMessage(`Start failed: ${(body as any).error || resp.statusText}`);
@@ -503,24 +500,29 @@ export function activate(context: vscode.ExtensionContext) {
       } catch (e: any) {
         vscode.window.showErrorMessage(`Cannot reach target: ${e.message}`);
       }
+      // Poll actual status from the target
+      if (MonitorPanel.currentPanel) {
+        MonitorPanel.currentPanel.pollTargetStatus();
+      }
     }),
 
     vscode.commands.registerCommand("structured-text.targetStop", async () => {
-      const host = await resolveActiveTarget("Stop PLC Program");
+      const { host, port } = await resolveActiveTargetWithPort("Stop PLC Program") || {};
       if (!host) return;
       try {
-        const resp = await fetch(`http://${host}:4840/api/v1/program/stop`, { method: "POST" });
+        const resp = await fetch(`http://${host}:${port}/api/v1/program/stop`, { method: "POST" });
         if (resp.ok) {
           vscode.window.showInformationMessage("PLC program stopped");
-          if (MonitorPanel.currentPanel) {
-            MonitorPanel.currentPanel.updateTargetStatus("idle", host);
-          }
         } else {
           const body = await resp.json().catch(() => ({}));
           vscode.window.showErrorMessage(`Stop failed: ${(body as any).error || resp.statusText}`);
         }
       } catch (e: any) {
         vscode.window.showErrorMessage(`Cannot reach target: ${e.message}`);
+      }
+      // Poll actual status from the target
+      if (MonitorPanel.currentPanel) {
+        MonitorPanel.currentPanel.pollTargetStatus();
       }
     })
   );
@@ -607,6 +609,24 @@ function resolveTarget(targetName: string): { host: string; dapPort: number } | 
   const t = targets.find(t => t.name === targetName);
   if (!t) return undefined;
   return { host: t.host, dapPort: t.agentPort + 1 };
+}
+
+/**
+ * Resolve the active target with agent port. Returns { host, port }.
+ */
+async function resolveActiveTargetWithPort(title: string): Promise<{ host: string; port: number } | undefined> {
+  const { MonitorPanel } = require("./monitorPanel");
+  if (MonitorPanel.currentPanel?.selectedTargetHost) {
+    return {
+      host: MonitorPanel.currentPanel.selectedTargetHost,
+      port: MonitorPanel.currentPanel.selectedTargetPort,
+    };
+  }
+  const targets = getTargetsFromConfig();
+  const host = await pickOrInputTarget(targets, title);
+  if (!host) return undefined;
+  const t = targets.find((t: TargetEntry) => t.host === host);
+  return { host, port: t?.agentPort || 4840 };
 }
 
 /**
