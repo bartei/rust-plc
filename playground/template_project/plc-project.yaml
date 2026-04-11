@@ -1,0 +1,180 @@
+# ============================================================================
+# PLC Project Configuration — Template
+# ============================================================================
+#
+# This file configures the IEC 61131-3 Structured Text project for the
+# rust-plc toolchain. It is the single source of truth for:
+#   - Project identity and versioning
+#   - Source file discovery
+#   - Scan cycle timing
+#   - Communication devices (Modbus, simulated I/O, etc.)
+#   - Remote deployment targets
+#
+# Copy this file to your project root as `plc-project.yaml` and edit to suit.
+# The toolchain auto-discovers this file by walking up from any .st source.
+#
+# VS Code auto-completion: uncomment the next line if you have the YAML
+# Language Server extension installed:
+# yaml-language-server: $schema=../../schemas/plc-project.schema.json
+# ============================================================================
+
+# ── Project Identity ────────────────────────────────────────────────────
+
+# Project name (shown in CLI output, bundle manifests, and agent API).
+name: MyProject
+
+# Semantic version. Included in program bundles for tracking deployments.
+version: "1.0.0"
+
+# Entry point PROGRAM to execute. Defaults to the first PROGRAM found.
+# Must match a PROGRAM block name in your source files exactly.
+entryPoint: Main
+
+
+# ── Source Files ────────────────────────────────────────────────────────
+#
+# By default, all .st and .scl files in the project directory (and
+# subdirectories) are auto-discovered. Use these options to override.
+
+# Explicit list of source files or glob patterns (disables auto-discovery).
+# Paths are relative to this YAML file's directory.
+# sources:
+#   - main.st
+#   - controllers/*.st
+#   - "**/*.st"
+
+# Extra library directories. Files in these directories are compiled but
+# not treated as the main program — they provide reusable POUs.
+# libraries:
+#   - libs/
+#   - ../shared_libs/
+
+# Patterns to exclude from auto-discovery. Hidden directories (.*) and
+# target/ / node_modules/ are always excluded.
+# exclude:
+#   - test_*.st          # Skip test files
+#   - deprecated/        # Skip deprecated directory
+#   - "*.bak"            # Skip backup files
+
+
+# ── Scan Cycle Engine ──────────────────────────────────────────────────
+#
+# The engine executes your PROGRAM in a continuous scan cycle:
+#   read_inputs → execute program → write_outputs → sleep → repeat
+#
+# cycle_time sets the target period between scan cycle starts. The engine
+# sleeps the difference between execution time and the target, so the
+# loop runs at a stable, predictable rate — same as a real PLC.
+#
+# Omit cycle_time to run as fast as the CPU allows (good for tests/benchmarks).
+#
+# Accepted units: ns, us (or µs), ms, s. A bare number = milliseconds.
+# Examples: 10ms, 500us, 1s, 100
+
+engine:
+  cycle_time: 10ms
+
+
+# ── Communication Links ────────────────────────────────────────────────
+#
+# Links define the physical transport layer — how the PLC talks to the
+# outside world. Each link is a shared channel (TCP connection, serial
+# bus, etc.) that one or more devices use.
+#
+# Supported link types:
+#   simulated  — in-memory (for development/testing, no hardware needed)
+#   tcp        — TCP socket (for Modbus TCP, future protocols)
+#   serial     — RS-485/RS-232 (for Modbus RTU, future protocols)
+
+links:
+  # Simulated link for development — no network, no hardware
+  - name: sim_link
+    type: simulated
+
+  # TCP link example (uncomment to use):
+  # - name: eth_rack
+  #   type: tcp
+  #   host: 192.168.1.100
+  #   port: 502
+  #   timeout: 500ms
+
+  # Serial link example (uncomment to use):
+  # - name: rs485_bus
+  #   type: serial
+  #   port: /dev/ttyUSB0
+  #   baud: 19200
+  #   parity: even
+  #   data_bits: 8
+  #   stop_bits: 1
+  #   timeout: 200ms
+
+
+# ── Communication Devices ──────────────────────────────────────────────
+#
+# Devices are addressable units on a link. Each device references a
+# device profile (YAML file in profiles/) that defines the I/O structure.
+#
+# The device name becomes a VAR_GLOBAL prefix in your ST code:
+#   io_rack_DI_0, io_rack_DO_0, pump_vfd_SPEED_REF, etc.
+#
+# An _io_map.st file is auto-generated with all device globals.
+
+devices:
+  # Simulated 8 DI + 4 AI + 4 DO + 2 AO module
+  - name: io_rack
+    link: sim_link
+    protocol: simulated
+    mode: cyclic                     # cyclic = every scan cycle
+    device_profile: sim_8di_4ai_4do_2ao
+
+  # Simulated variable frequency drive (VFD)
+  - name: pump_vfd
+    link: sim_link
+    protocol: simulated
+    mode: cyclic
+    device_profile: sim_vfd
+
+  # Modbus TCP device example (uncomment to use):
+  # - name: rack_left
+  #   link: eth_rack
+  #   protocol: modbus-tcp
+  #   unit_id: 1
+  #   mode: cyclic
+  #   cycle_time: 10ms             # Per-device cycle time (optional)
+  #   device_profile: wago_750_352
+
+
+# ── Deployment Targets ─────────────────────────────────────────────────
+#
+# Targets are remote Linux devices that run the PLC runtime. Install with:
+#   st-cli target install user@host
+#
+# In VS Code, the "target" field in launch.json resolves host + port
+# from this section automatically:
+#   { "type": "st", "request": "attach", "target": "line1-plc" }
+
+targets:
+  # Production PLC on the shop floor
+  - name: line1-plc
+    host: 192.168.1.50
+    user: plc                        # SSH username (default: plc)
+    # auth: key                      # SSH key auth (default, only option)
+    # os: linux                      # Target OS (default: linux)
+    # arch: x86_64                   # CPU architecture (default: x86_64)
+    agent_port: 4840                 # Agent HTTP API port (default: 4840)
+                                     # DAP debug port is always agent_port + 1
+
+  # ARM64 target (Raspberry Pi, etc.)
+  # - name: line2-plc
+  #   host: 192.168.1.51
+  #   user: plc
+  #   arch: aarch64
+
+  # Direct API connection (no SSH, requires TLS on the agent)
+  # - name: cloud-plc
+  #   host: plc.example.com
+  #   auth: agent
+  #   agent_port: 4840
+
+# Default target used when --target is omitted from CLI commands.
+default_target: line1-plc
