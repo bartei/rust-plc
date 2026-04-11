@@ -82,13 +82,7 @@ async fn main() {
 
 /// Run the agent daemon (HTTP API server + DAP proxy).
 async fn run_agent(config_path: PathBuf) {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .init();
-
+    // Load config FIRST so we can read the log level before initializing logging
     let config = if config_path.exists() {
         match st_target_agent::config::load_config(&config_path) {
             Ok(c) => c,
@@ -98,9 +92,13 @@ async fn run_agent(config_path: PathBuf) {
             }
         }
     } else {
-        tracing::info!("No config at {}, using defaults", config_path.display());
+        eprintln!("No config at {}, using defaults", config_path.display());
         st_target_agent::config::AgentConfig::default()
     };
+
+    // Initialize logging: journald on systemd Linux, stderr fallback otherwise.
+    // The log level from agent.yaml is used as the initial filter.
+    let log_handle = st_target_agent::logging::init_logging(&config.logging.level);
 
     let bind_addr = format!("{}:{}", config.network.bind, config.network.port);
     let dap_port = config.network.dap_port();
@@ -110,7 +108,7 @@ async fn run_agent(config_path: PathBuf) {
         config.agent.name, bind_addr, dap_bind, dap_port
     );
 
-    let state = match st_target_agent::server::build_app_state(config) {
+    let state = match st_target_agent::server::build_app_state(config, Some(log_handle)) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Startup error: {e}");

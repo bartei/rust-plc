@@ -48,7 +48,7 @@ async fn main() {
     );
 
     // Build application state
-    let state = match st_target_agent::server::build_app_state(config) {
+    let state = match st_target_agent::server::build_app_state(config, None) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Startup error: {e}");

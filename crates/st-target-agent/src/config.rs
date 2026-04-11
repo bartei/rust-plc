@@ -17,6 +17,8 @@ pub struct AgentConfig {
     pub storage: StorageConfig,
     #[serde(default)]
     pub security: SecurityConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 
@@ -182,6 +184,25 @@ pub struct SecurityConfig {
     pub require_signed: bool,
     #[serde(default)]
     pub trusted_keys: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoggingConfig {
+    /// Log level: trace, debug, info, warn, error. Default: info.
+    #[serde(default = "default_log_level")]
+    pub level: String,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        LoggingConfig {
+            level: default_log_level(),
+        }
+    }
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
 }
 
 /// Load agent configuration from a YAML file.

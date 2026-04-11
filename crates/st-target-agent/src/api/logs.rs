@@ -55,3 +55,50 @@ pub async fn query_logs(
         total,
     }))
 }
+
+// ── Log Level Control ───────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct LogLevelResponse {
+    pub level: String,
+}
+
+/// GET /api/v1/log-level — get the current log level.
+pub async fn get_log_level(
+    State(state): State<Arc<AppState>>,
+) -> Json<LogLevelResponse> {
+    let level = state
+        .log_level_handle
+        .as_ref()
+        .map(|h| h.current_level())
+        .unwrap_or_else(|| state.config.logging.level.clone());
+
+    Json(LogLevelResponse { level })
+}
+
+#[derive(Deserialize)]
+pub struct SetLogLevelRequest {
+    pub level: String,
+}
+
+/// PUT /api/v1/log-level — change the log level at runtime.
+///
+/// Valid levels: trace, debug, info, warn, error.
+/// The change takes effect immediately for all subsequent log messages.
+pub async fn set_log_level(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SetLogLevelRequest>,
+) -> Result<Json<LogLevelResponse>, ApiError> {
+    let handle = state
+        .log_level_handle
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("Log level control not available"))?;
+
+    handle
+        .set_level(&body.level)
+        .map_err(ApiError::invalid_bundle)?;
+
+    Ok(Json(LogLevelResponse {
+        level: body.level,
+    }))
+}

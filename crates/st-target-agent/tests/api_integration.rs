@@ -14,7 +14,7 @@ use tokio::net::TcpListener;
 
 /// Start a test agent on a random port, return the base URL.
 async fn start_agent(config: AgentConfig) -> (String, tokio::task::JoinHandle<()>) {
-    let state = build_app_state(config).unwrap();
+    let state = build_app_state(config, None).unwrap();
     let router = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -474,4 +474,101 @@ async fn test_full_lifecycle() {
     // 9. Verify clean
     let resp = client.get(format!("{base}/api/v1/program/info")).send().await.unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+// ─── Log Level Control ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_get_log_level() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    config.logging.level = "warn".to_string();
+    // Use None handle — GET should return the config's level
+    let (base, _handle) = start_agent(config).await;
+    let client = Client::new();
+
+    let resp = client.get(format!("{base}/api/v1/log-level")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["level"], "warn", "Should return configured log level");
+}
+
+#[tokio::test]
+async fn test_set_log_level() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = test_config(dir.path());
+    // Use init_logging to get a real handle. The try_init inside
+    // may or may not succeed (depends on test ordering), but the
+    // LogLevelHandle still tracks the level internally.
+    let log_handle = st_target_agent::logging::init_logging("info");
+    let state = build_app_state(config, Some(log_handle)).unwrap();
+    let router = build_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    // Change to debug
+    let resp = client
+        .put(format!("{base}/api/v1/log-level"))
+        .json(&serde_json::json!({ "level": "debug" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["level"], "debug");
+
+    // Verify it persisted
+    let resp = client.get(format!("{base}/api/v1/log-level")).send().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["level"], "debug");
+}
+
+#[tokio::test]
+async fn test_set_invalid_log_level() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = test_config(dir.path());
+    let log_handle = st_target_agent::logging::init_logging("info");
+    let state = build_app_state(config, Some(log_handle)).unwrap();
+    let router = build_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let resp = client
+        .put(format!("{base}/api/v1/log-level"))
+        .json(&serde_json::json!({ "level": "verbose" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "Invalid log level should return 400");
+}
+
+#[tokio::test]
+async fn test_log_level_without_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    // GET should still return the config default
+    let resp = client.get(format!("{base}/api/v1/log-level")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["level"], "info");
+
+    // PUT should fail gracefully (no handle available)
+    let resp = client
+        .put(format!("{base}/api/v1/log-level"))
+        .json(&serde_json::json!({ "level": "debug" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 500);
 }

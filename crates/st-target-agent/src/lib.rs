@@ -9,6 +9,7 @@ pub mod auth;
 pub mod config;
 pub mod dap_proxy;
 pub mod error;
+pub mod logging;
 pub mod program_store;
 pub mod runtime_manager;
 pub mod server;

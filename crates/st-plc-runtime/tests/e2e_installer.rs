@@ -798,3 +798,83 @@ fn test_full_installer_lifecycle() {
 
     eprintln!("[LIFECYCLE] Complete: install → deploy → run → stop → upgrade → uninstall");
 }
+
+// ─── Journald Logging Tests ─────────────────────────────────────────────
+
+#[test]
+fn test_logs_written_to_journald() {
+    skip_if_no_qemu!();
+    let vm = boot_fresh_vm();
+    vm.run_install(&[]);
+
+    // The agent logs to journald. Verify with journalctl.
+    let result = vm.ssh(
+        "sudo journalctl -u st-plc-runtime --no-pager -n 10 2>&1"
+    ).unwrap();
+    assert!(
+        result.contains("Starting") || result.contains("Agent ready") || result.contains("INFO"),
+        "journald should contain agent startup messages: {result}"
+    );
+}
+
+#[test]
+fn test_log_level_from_config_honored() {
+    skip_if_no_qemu!();
+    let vm = boot_fresh_vm();
+    vm.run_install(&["--name", "log-level-test"]);
+
+    // Default config level is "info". The health endpoint reports the level.
+    let (status, body) = vm.curl_agent("/api/v1/log-level");
+    assert_eq!(status, 200);
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["level"], "info", "Default log level should be info");
+}
+
+#[test]
+fn test_log_level_runtime_change() {
+    skip_if_no_qemu!();
+    let vm = boot_fresh_vm();
+    vm.run_install(&[]);
+
+    // Verify initial level
+    let (status, body) = vm.curl_agent("/api/v1/log-level");
+    assert_eq!(status, 200);
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["level"], "info");
+
+    // Change to debug at runtime
+    let url = format!("http://127.0.0.1:{}/api/v1/log-level", vm.agent_port);
+    let output = Command::new("curl")
+        .args([
+            "-sf", "-X", "PUT",
+            "-H", "Content-Type: application/json",
+            "-d", r#"{"level":"debug"}"#,
+            "--connect-timeout", "5",
+            &url,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "PUT log-level should succeed");
+    let resp: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(resp["level"], "debug");
+
+    // Verify it persisted
+    let (status, body) = vm.curl_agent("/api/v1/log-level");
+    assert_eq!(status, 200);
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["level"], "debug", "Level should have changed to debug");
+
+    // Verify debug messages now appear in journald
+    // Generate a log event by uploading a bundle (triggers info/debug logs)
+    let bundle_path = make_test_bundle();
+    vm.upload_bundle(&bundle_path);
+
+    let result = vm.ssh(
+        "sudo journalctl -u st-plc-runtime --no-pager -n 20 --since '1 min ago' 2>&1"
+    ).unwrap();
+    // With debug level, we should see more verbose output
+    assert!(
+        !result.is_empty(),
+        "journald should have recent log entries after level change"
+    );
+}

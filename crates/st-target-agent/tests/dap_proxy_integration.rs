@@ -18,7 +18,7 @@ use tokio::net::TcpListener;
 async fn start_agent_with_dap(
     config: AgentConfig,
 ) -> (String, u16, tokio::task::JoinHandle<()>) {
-    let state = build_app_state(config).unwrap();
+    let state = build_app_state(config, None).unwrap();
     let router = build_router(state.clone());
 
     // HTTP server on random port

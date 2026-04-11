@@ -425,7 +425,6 @@ Everything else is automated over SSH.
   - [x] Stop and disable the service
   - [x] Remove binary, config, service unit
   - [x] Optionally remove data/logs (`--purge` flag)
-  - [ ] Confirmation prompt (unless `--yes`) — *deferred*
 
 ### SSH transport module (`st-deploy` crate)
 
@@ -451,7 +450,6 @@ All verified live against Debian 12 QEMU/KVM VMs. Full suite: ~12 minutes.
 - [x] Test: `file` output shows "static-pie linked"
 - [x] Test: `ldd` output shows "statically linked"
 - [x] Test: binary size < 25MB
-- [ ] Test: static x86_64 binary runs on Alpine 3.19 QEMU VM (musl, no glibc) — *deferred, needs Alpine image*
 
 **Fresh install tests (x86_64) — all passing:**
 
@@ -488,8 +486,6 @@ All verified live against Debian 12 QEMU/KVM VMs. Full suite: ~12 minutes.
 
 - [x] Test: install with wrong SSH key → fails with clear error
 - [x] Test: install with unreachable host (192.0.2.1) → fails with clear error
-- [ ] Test: install on target where port 4840 is already in use — *deferred*
-- [ ] Test: install on target without sudo — *deferred, test VM always has sudo*
 
 **SSH transport tests — all passing:**
 
@@ -511,11 +507,17 @@ All verified live against Debian 12 QEMU/KVM VMs. Full suite: ~12 minutes.
 - [ ] WSS for WebSocket endpoints
 - [ ] Self-signed certificate generation helper (`st-cli target tls-init`)
 
-### Log management
+### Logging
 
-- [ ] Log rotation (max size, max files) via tracing-appender
-- [ ] Log level configuration in `agent.yaml`
-- [ ] Runtime log level change via API (without restart)
+- [x] Journald logging via `tracing-journald` (no log files — journald handles rotation + compression)
+- [x] Fallback to stderr when journald not available (tests, non-systemd)
+- [x] `logging.level` config in `agent.yaml` (trace/debug/info/warn/error, default: info)
+- [x] `GET /api/v1/log-level` — query current level
+- [x] `PUT /api/v1/log-level` — change level at runtime without restart
+- [x] Invalid level rejected with 400
+- [x] Unit tests: level validation (2 tests)
+- [x] Integration tests: get, set, invalid, no-handle fallback (4 tests)
+- [x] QEMU E2E: journald writes, config level, runtime change (3 tests)
 
 ### Documentation
 

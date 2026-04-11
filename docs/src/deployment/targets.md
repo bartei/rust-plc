@@ -231,7 +231,41 @@ auth:
   mode: none            # none | token
   # token: "my-secret"  # Required when mode: token
   # read_only: false    # Reject uploads/start/stop when true
+
+logging:
+  level: info           # trace | debug | info | warn | error
 ```
+
+### Logging
+
+The agent logs to **systemd's journald** on Linux targets. No log files to manage — journald handles rotation, compression, and querying automatically.
+
+```bash
+# View agent logs
+sudo journalctl -u st-plc-runtime -f
+
+# Last 50 entries
+sudo journalctl -u st-plc-runtime --no-pager -n 50
+
+# Errors only
+sudo journalctl -u st-plc-runtime -p err
+```
+
+The log level can be set in `agent.yaml` (`logging.level`) and changed at runtime without restarting:
+
+```bash
+# Get current level
+curl http://192.168.1.50:4840/api/v1/log-level
+# → {"level":"info"}
+
+# Change to debug (immediate, no restart needed)
+curl -X PUT -H "Content-Type: application/json" \
+  -d '{"level":"debug"}' \
+  http://192.168.1.50:4840/api/v1/log-level
+# → {"level":"debug"}
+```
+
+Valid levels: `trace`, `debug`, `info`, `warn`, `error`.
 
 ## Agent HTTP API
 
@@ -256,6 +290,8 @@ The agent exposes a REST API on the configured port (default 4840):
 | `GET` | `/api/v1/health` | Health check (200 OK / 503) |
 | `GET` | `/api/v1/target-info` | OS, arch, agent version, uptime |
 | `GET` | `/api/v1/logs` | Query agent log entries |
+| `GET` | `/api/v1/log-level` | Get current log level |
+| `PUT` | `/api/v1/log-level` | Change log level at runtime (JSON body: `{"level":"debug"}`) |
 
 ### DAP Proxy
 

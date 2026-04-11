@@ -34,3 +34,4 @@ tests/e2e-deploy/vm/images/
 
 # Bundle artifacts
 *.st-bundle
+$TMPDIR/
