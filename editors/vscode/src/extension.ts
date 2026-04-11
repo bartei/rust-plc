@@ -206,18 +206,22 @@ function resolveStCliPath(context: vscode.ExtensionContext): string {
       .replace(/\$\{containerWorkspaceFolder\}/g, wsPath);
   }
 
-  // If not an absolute path, try to find it relative to the extension
-  if (!path.isAbsolute(serverPath) && !serverPath.includes(path.sep)) {
-    const devBinary = path.resolve(
-      context.extensionPath,
-      "..",
-      "..",
-      "target",
-      "debug",
-      "st-cli"
-    );
-    if (fs.existsSync(devBinary)) {
-      serverPath = devBinary;
+  // If the resolved path exists, use it directly
+  if (path.isAbsolute(serverPath) && fs.existsSync(serverPath)) {
+    return serverPath;
+  }
+
+  // Search order for the binary:
+  // 1. Relative to extension (dev layout: extension is symlinked from editors/vscode)
+  // 2. /usr/local/bin/st-cli (devcontainer post-create symlink)
+  // 3. Fall through with the original name (PATH lookup by LanguageClient)
+  const candidates = [
+    path.resolve(context.extensionPath, "..", "..", "target", "debug", "st-cli"),
+    "/usr/local/bin/st-cli",
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
     }
   }
 
@@ -251,8 +255,8 @@ export function activate(context: vscode.ExtensionContext) {
     () => {},
     (err: Error) => {
       vscode.window.showErrorMessage(
-        `Failed to start ST language server: ${err.message}.\n` +
-        `Build it with: cargo build -p st-cli`
+        `Failed to start ST language server (${stCliPath}): ${err.message}.\n` +
+        `Build with: cargo build -p st-cli, or set structured-text.serverPath in settings.`
       );
     }
   );
@@ -302,6 +306,17 @@ export function activate(context: vscode.ExtensionContext) {
       // it into the panel immediately so the autocomplete is populated.
       if (MonitorPanel.currentPanel && plcVarCatalog.length > 0) {
         MonitorPanel.currentPanel.updateCatalog(plcVarCatalog);
+      }
+    })
+  );
+
+  // ── Refresh Monitor targets command ──────────────────────────────
+  context.subscriptions.push(
+    vscode.commands.registerCommand("structured-text.refreshMonitorTargets", () => {
+      const { MonitorPanel } = require("./monitorPanel");
+      if (MonitorPanel.currentPanel) {
+        const targets = getTargetsFromConfig();
+        MonitorPanel.currentPanel.setTargets(targets);
       }
     })
   );

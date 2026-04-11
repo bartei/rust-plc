@@ -173,6 +173,9 @@ export class MonitorPanel {
           this.selectedTargetHost = undefined;
         }
         break;
+      case "tb:refreshTargets":
+        vscode.commands.executeCommand("structured-text.refreshMonitorTargets");
+        break;
     }
   }
 
@@ -518,6 +521,7 @@ export class MonitorPanel {
       <select id="tb-target-select" onchange="onTargetChange(this)" title="Select deployment target">
         <option value="">-- No target --</option>
       </select>
+      <button onclick="tbRefreshTargets()" title="Reload targets from plc-project.yaml" style="background:none;border:none;color:var(--vscode-descriptionForeground);cursor:pointer;font-size:12px;padding:0 2px;">&#x21BB;</button>
       <span id="tb-status-text"></span>
     </div>
   </div>
@@ -956,6 +960,10 @@ export class MonitorPanel {
     }
     function tbStop() {
       vscode.postMessage({ command: "tb:stop" });
+    }
+
+    function tbRefreshTargets() {
+      vscode.postMessage({ command: "tb:refreshTargets" });
     }
 
     /** Handle target dropdown change. */
