@@ -34,6 +34,7 @@ Phase 12 (OOP) — after Phase 7
 Communication layer — after Phase 7, see design_comm.md
 Native compilation — after Phase 6, see implementation_native.md
 Remote deployment — after Phase 8+9+10+11, see design_deploy.md
+Phase 16 (retain/persistent) — after Phase 7+15
 ```
 
 ### Phase Summary
@@ -56,6 +57,127 @@ Remote deployment — after Phase 8+9+10+11, see design_deploy.md
 | **13** | Communication layer (device profiles, simulated + real I/O) — [design_comm.md](design_comm.md) |
 | **14** | Native compilation + hardware targets (LLVM, ESP32, STM32, RPi) — [implementation_native.md](implementation_native.md) |
 | **15** | Remote deployment & online management (agent, SSH, remote debug/monitor) — [design_deploy.md](design_deploy.md) |
+| **16** | RETAIN / PERSISTENT variable persistence (non-volatile storage across restarts) |
+
+---
+
+## Phase 16: RETAIN / PERSISTENT Variable Persistence
+
+### IEC 61131-3 Semantics
+
+IEC 61131-3 defines three retention classes for variables:
+
+| Qualifier | Power-cycle (warm restart) | Program download (cold restart) |
+|-----------|---------------------------|--------------------------------|
+| *(none)* | Cleared to initial value | Cleared to initial value |
+| `RETAIN` | **Preserved** | Cleared to initial value |
+| `PERSISTENT` | Cleared to initial value | **Preserved** |
+| `RETAIN PERSISTENT` | **Preserved** | **Preserved** |
+
+- **Warm restart**: runtime process restarts (service restart, power cycle,
+  crash recovery). RETAIN variables survive.
+- **Cold restart**: new program deployed (online change that changes variable
+  layout, or explicit `st-cli target deploy`). PERSISTENT variables survive;
+  RETAIN variables are re-initialized.
+
+### Storage Locations
+
+The persistence file location depends on the execution context:
+
+| Context | Retain file path | Discovery method |
+|---------|-----------------|------------------|
+| **Target host** (agent daemon) | `/var/lib/st-plc/retain/<program>.retain` | Default, configurable via `agent.yaml` |
+| **Local development** (st-cli run / DAP debug) | `<project-root>/.st-retain/<program>.retain` | Sibling of `plc-project.yaml`; falls back to CWD |
+
+The `.st-retain/` directory is created on first write. It should be added to
+`.gitignore` in project templates.
+
+### Retain File Format
+
+Binary file with a header and a sequence of named variable entries. Using a
+name-keyed format (not offset-based) so that the file survives minor program
+changes where variable order shifts but names/types are preserved.
+
+```
+[Header]
+  magic:      4 bytes  "STRT"
+  version:    u16      format version (1)
+  program:    u16+str  program name (length-prefixed)
+  timestamp:  i64      Unix epoch millis when snapshot was taken
+  entry_count: u32     number of variable entries
+
+[Entry] × entry_count
+  name:       u16+str  fully qualified variable name (e.g., "Main.stats.bottles_filled")
+  qualifier:  u8       0=retain, 1=persistent, 2=retain+persistent
+  var_type:   u8       VarType discriminant
+  int_width:  u8       IntWidth discriminant
+  value:      variable-length encoded Value (bool=1B, int/uint/real/time=8B, string=u16+data)
+```
+
+### Save/Restore Lifecycle
+
+**Save triggers:**
+1. **Clean shutdown** — engine stop, service stop, SIGTERM
+2. **Periodic checkpoint** — every N scan cycles (configurable, default 1000)
+3. **Before program download** — snapshot taken before online change is applied
+
+**Restore on startup:**
+1. Engine reads the retain file before the first scan cycle
+2. For each entry in the file, match by name and type against the compiled module
+3. If name + type match, inject the value into the VM's initial state
+4. Mismatched entries (renamed/retyped variables) are silently skipped
+5. Variables not present in the file are initialized to their declared defaults
+
+**Warm restart** (retain file exists, same program):
+- Load entries with qualifier `RETAIN` or `RETAIN PERSISTENT`
+- Skip entries with qualifier `PERSISTENT` only (these survive cold restart, not warm)
+
+**Cold restart** (new program deployed):
+- Load entries with qualifier `PERSISTENT` or `RETAIN PERSISTENT`
+- Skip entries with qualifier `RETAIN` only (these are cleared on download)
+
+### Configuration
+
+`plc-project.yaml` extension:
+```yaml
+engine:
+  cycle_time: "10ms"
+  retain:
+    checkpoint_cycles: 1000     # save every N cycles (0 = only on shutdown)
+    path: ".st-retain"          # override retain directory (relative to project root)
+```
+
+`agent.yaml` extension:
+```yaml
+storage:
+  retain_dir: /var/lib/st-plc/retain   # default on target host
+```
+
+### IR Changes
+
+Add a `persistent` flag to `VarSlot` alongside the existing `retain` flag:
+```rust
+pub struct VarSlot {
+    // ... existing fields ...
+    pub retain: bool,
+    pub persistent: bool,
+}
+```
+
+The compiler sets both flags from the parsed `VarQualifier` list:
+- `VAR RETAIN` → `retain=true, persistent=false`
+- `VAR PERSISTENT` → `retain=false, persistent=true`
+- `VAR RETAIN PERSISTENT` → `retain=true, persistent=true`
+
+### Engine Integration
+
+The `Engine` gains a `RetainStore` that handles serialization:
+- `RetainStore::save(vm, path)` — snapshot all retain/persistent variables
+- `RetainStore::load(path, module) → HashMap<String, Value>` — read back
+- `Engine::apply_retained(values)` — inject into VM before first cycle
+
+The DAP and CLI `run` command pass the retain path based on context (project
+root for local, `/var/lib/st-plc/retain/` for agent).
 
 ---
 

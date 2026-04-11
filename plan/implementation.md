@@ -243,6 +243,63 @@ Infrastructure: `@vscode/test-electron` (real Electron instance) + Playwright (w
 
 ---
 
+## Phase 16: RETAIN / PERSISTENT Variable Persistence
+
+> Design notes: [design_core.md § Phase 16](design_core.md#phase-16-retain--persistent-variable-persistence)
+
+Non-volatile storage for RETAIN and PERSISTENT variables across runtime restarts
+and program downloads, per IEC 61131-3 semantics.
+
+### IR + Compiler
+
+- [ ] Add `persistent: bool` field to `VarSlot` (alongside existing `retain`)
+- [ ] Compiler: set `retain` and `persistent` from `VarQualifier` list
+- [ ] Compiler: support combined `VAR RETAIN PERSISTENT` qualifier
+- [ ] Semantic checker: validate retain/persistent only on VAR_GLOBAL and PROGRAM locals
+
+### Retain file format + serialization
+
+- [ ] Define binary retain file format (header + named entries)
+- [ ] `RetainStore::save(vm, path)` — serialize retain/persistent variables
+- [ ] `RetainStore::load(path, module)` — deserialize and match by name+type
+- [ ] Handle version migration (skip mismatched entries gracefully)
+- [ ] Unit tests: round-trip save/load for all Value types
+
+### Engine integration
+
+- [ ] `Engine::apply_retained(values)` — inject into VM before first scan cycle
+- [ ] Save on clean shutdown (SIGTERM / engine stop)
+- [ ] Periodic checkpoint every N cycles (configurable, default 1000)
+- [ ] Snapshot before online change / program download
+- [ ] Warm restart: load RETAIN + RETAIN PERSISTENT entries
+- [ ] Cold restart: load PERSISTENT + RETAIN PERSISTENT entries
+- [ ] Integration tests: values survive engine restart
+
+### Storage location resolution
+
+- [ ] Target host: default `/var/lib/st-plc/retain/<program>.retain`
+- [ ] Local dev: `<project-root>/.st-retain/<program>.retain` (sibling of plc-project.yaml)
+- [ ] Fallback: CWD when no project file found
+- [ ] CLI `run` / DAP `launch` resolve and pass retain path to engine
+- [ ] Agent resolves retain path from `agent.yaml` config
+- [ ] Add `.st-retain/` to template project `.gitignore`
+
+### Configuration
+
+- [ ] `plc-project.yaml`: `engine.retain.checkpoint_cycles` (default 1000)
+- [ ] `plc-project.yaml`: `engine.retain.path` (override retain directory)
+- [ ] `agent.yaml`: `storage.retain_dir` (default `/var/lib/st-plc/retain`)
+- [ ] JSON schema updates for both config files
+
+### Remaining
+
+- [ ] DAP: show retain/persistent badge in Variables panel
+- [ ] Monitor panel: indicate retain/persistent variables visually
+- [ ] Documentation: `docs/src/language/retain-persistent.md`
+- [ ] E2E test: QEMU target — deploy, run, stop service, restart, verify values preserved
+
+---
+
 ## Cross-Cutting Concerns
 
 - [x] Testing: 714+ tests across 10+ crates
