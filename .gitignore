@@ -1,5 +1,6 @@
 # Rust
 /target/
+/target/container/
 **/*.rs.bk
 
 # Node / VSCode extension

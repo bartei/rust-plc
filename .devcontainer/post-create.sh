@@ -5,7 +5,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "==> Building st-cli (LSP server)..."
-# Retry cargo build — container networking may not be ready on first attempt.
+# Build to a container-specific target dir to avoid glibc mismatch when the
+# host's target/ is shared. The host may have built with a newer glibc.
+export CARGO_TARGET_DIR="$(pwd)/target/container"
 for attempt in 1 2 3; do
     if cargo build -p st-cli 2>&1; then
         break
@@ -15,8 +17,8 @@ for attempt in 1 2 3; do
 done
 
 echo "==> Adding st-cli to PATH..."
-sudo ln -sf "$(pwd)/target/debug/st-cli" /usr/local/bin/st-cli
-echo "    Linked target/debug/st-cli -> /usr/local/bin/st-cli"
+sudo ln -sf "$(pwd)/target/container/debug/st-cli" /usr/local/bin/st-cli
+echo "    Linked target/container/debug/st-cli -> /usr/local/bin/st-cli"
 
 echo "==> Installing VSCode extension dependencies..."
 cd editors/vscode
@@ -41,7 +43,7 @@ else
 fi
 
 echo "==> Verifying st-cli works..."
-./target/debug/st-cli check playground/01_hello.st 2>&1
+./target/container/debug/st-cli check playground/01_hello.st 2>&1
 
 echo ""
 echo "============================================================"

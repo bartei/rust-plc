@@ -287,6 +287,7 @@ function resolveStCliPath(context: vscode.ExtensionContext): string {
   // 2. /usr/local/bin/st-cli (devcontainer post-create symlink)
   // 3. Fall through with the original name (PATH lookup by LanguageClient)
   const candidates = [
+    path.resolve(context.extensionPath, "..", "..", "target", "container", "debug", "st-cli"),
     path.resolve(context.extensionPath, "..", "..", "target", "debug", "st-cli"),
     "/usr/local/bin/st-cli",
   ];
