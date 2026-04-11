@@ -1,6 +1,6 @@
 # Bytecode VM
 
-The runtime virtual machine lives in `crates/st-runtime`. It has two
+The runtime virtual machine lives in `crates/st-engine`. It has two
 main components: the **VM** (`vm.rs`) that executes bytecode, and the
 **Engine** (`engine.rs`) that drives the PLC scan-cycle loop.
 

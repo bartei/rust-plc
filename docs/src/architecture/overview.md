@@ -23,7 +23,7 @@ extension that wires the Language Server Protocol into VSCode.
                                                                   |
   +-----------+                                                   v
   | st-monitor| <-------------------------------------------+-----------+
-  | WS live   |                                             | st-runtime|
+  | WS live   |                                             | st-engine |
   | dashboard |                                             | VM engine |
   +-----------+                                             +-----------+
 
@@ -39,7 +39,7 @@ extension that wires the Language Server Protocol into VSCode.
 | **st-semantics** | `crates/st-semantics` | Two-pass semantic analyzer. Pass 1 registers top-level names in the global scope; Pass 2 analyzes bodies. Includes the hierarchical scope model (`scope.rs`), semantic type system (`types.rs` -- `Ty` enum with widening/coercion rules), and diagnostics. Recognizes compiler intrinsics (type conversions, trig/math functions, SYSTEM_TIME). |
 | **st-ir** | `crates/st-ir` | Intermediate representation: `Module`, `Function`, `Instruction` enum (48 variants), `Value` enum, `MemoryLayout`, `VarSlot`, and `SourceLocation`. Register-based design with `u16` register indices and `u32` label indices. Serializable with serde. |
 | **st-compiler** | `crates/st-compiler` | Compiles a typed AST (`SourceFile`) into an IR `Module`. Two internal passes: register all POUs, then compile bodies. Emits register-based instructions with source-map entries for debugger integration. Handles intrinsic function detection (30+ type conversions, 10 trig/math functions, SYSTEM_TIME). Also contains `builtin_stdlib()` for multi-file compilation and `analyze_change()` / `migrate_locals()` for online change. |
-| **st-runtime** | `crates/st-runtime` | Bytecode VM (`vm.rs`) with fetch-decode-execute loop and scan-cycle engine (`engine.rs`). Provides `CycleStats`, watchdog timeout, configurable max call depth and instruction limits. Supports force/unforce variable overrides and FB instance state persistence. |
+| **st-engine** | `crates/st-engine` | Bytecode VM (`vm.rs`) with fetch-decode-execute loop and scan-cycle engine (`engine.rs`). Provides `CycleStats`, watchdog timeout, configurable max call depth and instruction limits. Supports force/unforce variable overrides and FB instance state persistence. |
 | **st-lsp** | `crates/st-lsp` | Language Server Protocol implementation via `tower-lsp`. Per-document state with incremental re-parse on edits. Provides diagnostics, semantic tokens, completion, hover, and go-to-definition. |
 | **st-dap** | `crates/st-dap` | Debug Adapter Protocol server for online debugging: breakpoints, stepping, variable inspection, force/unforce via evaluate expressions (`force x = 42`, `unforce x`, `listForced`, `scanCycleInfo`), online change. |
 | **st-monitor** | `crates/st-monitor` | WebSocket-based live monitoring server. Streams variable values from the runtime to connected dashboards for real-time trend recording. Supports force/unforce and online change via JSON-RPC. |
@@ -80,7 +80,7 @@ The end-to-end pipeline for `st-cli run example.st`:
    `st_ir::Module` containing `Function`s (with instructions, label maps,
    memory layouts, and source maps) plus global variable storage. Intrinsic
    functions are emitted as single VM instructions.
-6. **Execute** -- `st_runtime::Engine::new()` instantiates a `Vm` from the
+6. **Execute** -- `st_engine::Engine::new()` instantiates a `Vm` from the
    module. `engine.run()` enters the scan-cycle loop, calling the named
    `PROGRAM` once per cycle and tracking `CycleStats`.
 
@@ -171,16 +171,16 @@ st-cli
   |     |     |-- st-syntax (ast types)
   |     |-- st-grammar (incremental re-parse)
   |-- st-dap
-  |     |-- st-runtime
+  |     |-- st-engine
   |     |-- st-compiler
   |     |-- st-ir
   |-- st-compiler
   |     |-- st-ir
   |     |-- st-syntax (ast types)
-  |-- st-runtime
+  |-- st-engine
   |     |-- st-ir
   |-- st-monitor
-  |     |-- st-runtime
+  |     |-- st-engine
   |     |-- st-ir
   |-- st-semantics
   |-- st-syntax

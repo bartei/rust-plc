@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.1](https://github.com/bartei/rust-plc/compare/st-runtime-v0.1.0...st-runtime-v0.1.1) - 2026-04-06
+## [0.1.1](https://github.com/bartei/rust-plc/compare/st-engine-v0.1.0...st-engine-v0.1.1) - 2026-04-06
 
 ### Added
 

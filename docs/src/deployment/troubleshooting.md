@@ -56,7 +56,7 @@ Error: SSH connection failed: Connection timed out
 
 **Check the systemd logs:**
 ```bash
-ssh plc@192.168.1.50 "sudo journalctl -u st-plc-runtime --no-pager -n 50"
+ssh plc@192.168.1.50 "sudo journalctl -u st-runtime --no-pager -n 50"
 ```
 
 Common causes:
@@ -161,19 +161,19 @@ st-cli bundle                 # Includes original variable names
 
 ```bash
 # Via SSH
-ssh plc@192.168.1.50 "sudo journalctl -u st-plc-runtime -f"
+ssh plc@192.168.1.50 "sudo journalctl -u st-runtime -f"
 
 # Most recent entries
-ssh plc@192.168.1.50 "sudo journalctl -u st-plc-runtime --no-pager -n 100"
+ssh plc@192.168.1.50 "sudo journalctl -u st-runtime --no-pager -n 100"
 
 # Errors only
-ssh plc@192.168.1.50 "sudo journalctl -u st-plc-runtime -p err --no-pager"
+ssh plc@192.168.1.50 "sudo journalctl -u st-runtime -p err --no-pager"
 ```
 
 ### Restart the agent
 
 ```bash
-ssh plc@192.168.1.50 "sudo systemctl restart st-plc-runtime"
+ssh plc@192.168.1.50 "sudo systemctl restart st-runtime"
 ```
 
 ### Check agent version

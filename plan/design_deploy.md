@@ -778,7 +778,7 @@ st-deploy/                        # Developer-side deployment logic
     └── target.rs                 # Target config parsing from plc-project.yaml
 
 st-target-agent/                  # Target-side daemon (standalone binary)
-├── Cargo.toml                    # depends on: st-runtime, st-dap, st-monitor,
+├── Cargo.toml                    # depends on: st-engine, st-dap, st-monitor,
 │                                 #   axum, tokio-tungstenite, tracing
 └── src/
     ├── main.rs                   # Entry point, CLI args, config loading
@@ -826,7 +826,7 @@ the `CC` environment variable.
 │ ├── Rust runtime (statically linked)                         │
 │ ├── musl libc (statically linked)                            │
 │ ├── tree-sitter C library (statically compiled)              │
-│ ├── st-runtime (VM engine)                                   │
+│ ├── st-engine (VM engine)                                    │
 │ ├── st-compiler + st-semantics + st-syntax (compilation)     │
 │ ├── st-deploy (bundler)                                      │
 │ ├── axum + tokio + hyper (HTTP server)                       │
@@ -839,20 +839,20 @@ the `CC` environment variable.
 
 | Target | musl Target Triple | Binary |
 |--------|-------------------|--------|
-| x86_64 Linux | `x86_64-unknown-linux-musl` | `st-plc-runtime-x86_64-linux` |
-| aarch64 Linux | `aarch64-unknown-linux-musl` | `st-plc-runtime-aarch64-linux` |
-| armv7 Linux | `armv7-unknown-linux-musleabihf` | `st-plc-runtime-armv7-linux` |
+| x86_64 Linux | `x86_64-unknown-linux-musl` | `st-runtime-x86_64-linux` |
+| aarch64 Linux | `aarch64-unknown-linux-musl` | `st-runtime-aarch64-linux` |
+| armv7 Linux | `armv7-unknown-linux-musleabihf` | `st-runtime-armv7-linux` |
 
-The binary is named `st-plc-runtime` (not `st-target-agent` + `st-cli`). It is a
+The binary is named `st-runtime` (not `st-target-agent` + `st-cli`). It is a
 **single binary** that bundles both the agent and the CLI tool. Subcommands:
 
 ```bash
-st-plc-runtime agent    # Run as agent daemon (what systemd starts)
-st-plc-runtime debug    # DAP debug server (what the agent spawns internally)
-st-plc-runtime run      # Direct execution (for quick testing)
-st-plc-runtime check    # Syntax/semantic check
-st-plc-runtime bundle   # Create deployment bundle
-st-plc-runtime version  # Show version info
+st-runtime agent    # Run as agent daemon (what systemd starts)
+st-runtime debug    # DAP debug server (what the agent spawns internally)
+st-runtime run      # Direct execution (for quick testing)
+st-runtime check    # Syntax/semantic check
+st-runtime bundle   # Create deployment bundle
+st-runtime version  # Show version info
 ```
 
 This eliminates the need to deploy two separate binaries (agent + st-cli) and
@@ -901,15 +901,15 @@ Connecting to plc@192.168.1.50...
   Target: Linux x86_64 (Debian 12)
   Kernel: 6.1.0-44-cloud-amd64
 
-Uploading st-plc-runtime (18.2 MB)...
+Uploading st-runtime (18.2 MB)...
   ████████████████████████████████████ 100%
 
 Installing...
-  Binary:  /opt/st-plc/st-plc-runtime
+  Binary:  /opt/st-plc/st-runtime
   Config:  /etc/st-plc/agent.yaml
   Data:    /var/lib/st-plc/
   Logs:    /var/log/st-plc/
-  Service: st-plc-runtime.service (systemd)
+  Service: st-runtime.service (systemd)
 
 Starting agent...
   ✓ Agent healthy on port 4840
@@ -938,13 +938,13 @@ uname -s -m  # → "Linux x86_64" or "Linux aarch64"
 sudo mkdir -p /opt/st-plc /etc/st-plc /var/lib/st-plc/programs /var/log/st-plc
 
 # 3. Upload binary (via SCP)
-scp st-plc-runtime-x86_64-linux plc@target:/opt/st-plc/st-plc-runtime
-sudo chmod +x /opt/st-plc/st-plc-runtime
+scp st-runtime-x86_64-linux plc@target:/opt/st-plc/st-runtime
+sudo chmod +x /opt/st-plc/st-runtime
 
 # 4. Write default config
 cat > /etc/st-plc/agent.yaml << 'EOF'
 agent:
-  name: st-plc-runtime
+  name: st-runtime
 network:
   bind: 0.0.0.0
   port: 4840
@@ -958,7 +958,7 @@ storage:
 EOF
 
 # 5. Install systemd service
-cat > /etc/systemd/system/st-plc-runtime.service << 'EOF'
+cat > /etc/systemd/system/st-runtime.service << 'EOF'
 [Unit]
 Description=ST PLC Runtime Agent
 After=network-online.target
@@ -967,7 +967,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-ExecStart=/opt/st-plc/st-plc-runtime agent --config /etc/st-plc/agent.yaml
+ExecStart=/opt/st-plc/st-runtime agent --config /etc/st-plc/agent.yaml
 Restart=on-failure
 RestartSec=3
 WatchdogSec=30
@@ -980,8 +980,8 @@ EOF
 
 # 6. Enable and start
 sudo systemctl daemon-reload
-sudo systemctl enable st-plc-runtime
-sudo systemctl start st-plc-runtime
+sudo systemctl enable st-runtime
+sudo systemctl start st-runtime
 ```
 
 ### Upgrade
@@ -1011,8 +1011,8 @@ If an upgrade fails (agent doesn't start), the installer automatically
 restores the previous binary from a backup:
 
 ```bash
-/opt/st-plc/st-plc-runtime          # current version
-/opt/st-plc/st-plc-runtime.backup   # previous version (kept during upgrade)
+/opt/st-plc/st-runtime          # current version
+/opt/st-plc/st-runtime.backup   # previous version (kept during upgrade)
 ```
 
 ---

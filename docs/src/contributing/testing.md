@@ -33,11 +33,11 @@ cargo test --workspace
 | **st-lsp** | `tests/lsp_integration.rs` | 13 | Subprocess LSP lifecycle (init, open, diagnostics, shutdown) |
 | **st-lsp** | `tests/unit_tests.rs` | 41 | In-process tests for completion, semantic tokens, document sync |
 | **st-compiler** | `tests/compile_tests.rs` | 35 | AST-to-IR compilation for all statement/expression types |
-| **st-runtime** | `tests/vm_tests.rs` | 42 | VM execution: arithmetic, control flow, calls, limits, cycles, intrinsics |
-| **st-runtime** | `tests/stdlib_tests.rs` | 16 | Standard library integration: counters, timers, edge detection, math |
-| **st-runtime** | `tests/online_change_tests.rs` | 10 | Engine-level online change: apply, preserve state, reject incompatible |
-| **st-runtime** | `src/online_change.rs` (inline) | 11 | analyze_change compatibility, migrate_locals state preservation |
-| **st-runtime** | `src/debug.rs` (inline) | 9 | Debug-mode VM helpers |
+| **st-engine** | `tests/vm_tests.rs` | 42 | VM execution: arithmetic, control flow, calls, limits, cycles, intrinsics |
+| **st-engine** | `tests/stdlib_tests.rs` | 16 | Standard library integration: counters, timers, edge detection, math |
+| **st-engine** | `tests/online_change_tests.rs` | 10 | Engine-level online change: apply, preserve state, reject incompatible |
+| **st-engine** | `src/online_change.rs` (inline) | 11 | analyze_change compatibility, migrate_locals state preservation |
+| **st-engine** | `src/debug.rs` (inline) | 9 | Debug-mode VM helpers |
 | **st-dap** | `tests/dap_integration.rs` | 26 | DAP protocol: breakpoints, stepping, continue across cycles, variables, evaluate, force/unforce |
 | **st-monitor** | `tests/monitor_tests.rs` | 4 | WebSocket protocol: connect, subscribe, variable streaming, force/unforce |
 
@@ -115,7 +115,7 @@ Compiler tests in `tests/compile_tests.rs` parse ST source, compile it to a
 - Proper local/global variable slot allocation.
 - Source map entries present for sourced instructions.
 
-### Runtime/VM Tests (st-runtime)
+### Runtime/VM Tests (st-engine)
 
 VM tests in `tests/vm_tests.rs` compile and execute ST programs, then inspect
 the VM state:
@@ -136,7 +136,7 @@ calls, safety limits (stack overflow, execution limit), division by zero,
 scan cycle execution through the Engine, and intrinsic functions (trig, math,
 conversions, SYSTEM_TIME).
 
-### Standard Library Tests (st-runtime)
+### Standard Library Tests (st-engine)
 
 The `tests/stdlib_tests.rs` file tests the standard library function blocks
 end-to-end: counters (CTU, CTD, CTUD) counting on rising edges, timers
@@ -169,10 +169,10 @@ cargo test -p st-lsp --test lsp_integration
 cargo test -p st-compiler
 
 # VM tests
-cargo test -p st-runtime
+cargo test -p st-engine
 
 # Standard library tests
-cargo test -p st-runtime --test stdlib_tests
+cargo test -p st-engine --test stdlib_tests
 
 # DAP debugger integration tests
 cargo test -p st-dap
@@ -181,7 +181,7 @@ cargo test -p st-dap
 cargo test -p st-monitor
 
 # Online change tests (engine-level)
-cargo test -p st-runtime --test online_change_tests
+cargo test -p st-engine --test online_change_tests
 ```
 
 ## Code Coverage
@@ -216,8 +216,8 @@ achieving higher:
 | st-semantics (scope.rs) | ~96% |
 | st-ir | ~90% |
 | st-compiler | ~88% |
-| st-runtime (vm.rs) | ~91% |
-| st-runtime (engine.rs) | ~85% |
+| st-engine (vm.rs) | ~91% |
+| st-engine (engine.rs) | ~85% |
 | st-lsp | ~78% |
 | st-cli | ~65% |
 | st-dap | ~82% |

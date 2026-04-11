@@ -27,7 +27,7 @@
 |-------|------|---------|
 | `st-deploy` | Library | Bundle creation, SSH transport, installer, target config |
 | `st-target-agent` | Library + Binary | Agent HTTP API, runtime manager, DAP proxy, watchdog |
-| `st-plc-runtime` | Binary | Unified static binary for target (agent + debug + run + check) |
+| `st-runtime` | Binary | Unified static binary for target (agent + debug + run + check) |
 
 **Test counts:**
 
@@ -35,7 +35,7 @@
 |-------|-------|
 | st-deploy unit + E2E | 73 (27 unit + 22 bundle E2E + 19 mode E2E + 5 SSH) |
 | st-target-agent unit + integration | 59 (18 unit + 18 API + 3 DAP + 20 QEMU) |
-| st-plc-runtime QEMU installer | 26 (all live against Debian 12 QEMU/KVM) |
+| st-runtime QEMU installer | 26 (all live against Debian 12 QEMU/KVM) |
 | VS Code remote debug | 10 (gated by ST_E2E_REMOTE=1) |
 | **Total deployment tests** | **168** |
 
@@ -357,18 +357,18 @@ Quality-of-life features for managing multiple targets.
 The target preparation must be a single command: `st-cli target install user@host`.
 No manual SCP, no library dependencies, no config editing, no systemd wrangling.
 
-### Unified static binary (`st-plc-runtime`)
+### Unified static binary (`st-runtime`)
 
 Merge `st-target-agent` + `st-cli` into a single binary with subcommands. Built
 as a fully static ELF (musl libc) with zero runtime dependencies on the target.
 
-- [x] Create `crates/st-plc-runtime/` — unified binary crate with subcommands:
-  - [x] `st-plc-runtime agent` — run as daemon (systemd starts this)
-  - [x] `st-plc-runtime debug <path>` — DAP debug server (agent spawns this internally)
-  - [x] `st-plc-runtime run <path>` — direct execution
-  - [x] `st-plc-runtime check <path>` — syntax/semantic check
-  - [x] `st-plc-runtime version` — version info
-- [x] Delegates to existing crate logic (st-dap, st-runtime, st-semantics, etc.)
+- [x] Create `crates/st-runtime/` — unified binary crate with subcommands:
+  - [x] `st-runtime agent` — run as daemon (systemd starts this)
+  - [x] `st-runtime debug <path>` — DAP debug server (agent spawns this internally)
+  - [x] `st-runtime run <path>` — direct execution
+  - [x] `st-runtime check <path>` — syntax/semantic check
+  - [x] `st-runtime version` — version info
+- [x] Delegates to existing crate logic (st-dap, st-engine, st-semantics, etc.)
 - [x] DAP proxy spawns self (`std::env::current_exe()`) instead of separate `st-cli`
 - [ ] Unit test: all subcommands parse and dispatch correctly — *TODO*
 
@@ -391,11 +391,11 @@ Everything else is automated over SSH.
   - [x] SSH connection (key-based auth via system `ssh` binary)
   - [x] OS + arch detection via `ssh user@host 'uname -s -m'`
   - [x] Select matching static binary (from local build output)
-  - [x] Upload binary via SCP to `/opt/st-plc/st-plc-runtime`
+  - [x] Upload binary via SCP to `/opt/st-plc/st-runtime`
   - [x] Create directories: `/opt/st-plc/`, `/etc/st-plc/`, `/var/lib/st-plc/programs/`, `/var/log/st-plc/`
   - [x] Write default `/etc/st-plc/agent.yaml`
-  - [x] Generate systemd unit file `/etc/systemd/system/st-plc-runtime.service`
-  - [x] `systemctl daemon-reload && systemctl enable --now st-plc-runtime`
+  - [x] Generate systemd unit file `/etc/systemd/system/st-runtime.service`
+  - [x] `systemctl daemon-reload && systemctl enable --now st-runtime`
   - [x] Wait for agent health check (polls `curl localhost:4840/api/v1/health` up to 15 times)
   - [x] Report success with connection details + plc-project.yaml snippet
 - [x] `st-cli target install user@host --key <path>` — explicit SSH key
@@ -408,7 +408,7 @@ Everything else is automated over SSH.
 ### Upgrade command
 
 - [x] `st-cli target install user@host --upgrade` — in-place upgrade:
-  - [x] Backup current binary to `/opt/st-plc/st-plc-runtime.backup`
+  - [x] Backup current binary to `/opt/st-plc/st-runtime.backup`
   - [x] Stop the service
   - [x] Upload new binary
   - [x] Start the service
@@ -438,7 +438,7 @@ Everything else is automated over SSH.
 
 ### E2E tests: one-command installer against QEMU
 
-26 tests in `crates/st-plc-runtime/tests/e2e_installer.rs`, gated by `ST_E2E_QEMU=1`.
+26 tests in `crates/st-runtime/tests/e2e_installer.rs`, gated by `ST_E2E_QEMU=1`.
 All verified live against Debian 12 QEMU/KVM VMs. Full suite: ~12 minutes.
 
 **Prerequisite tests (verify static binary works):**
@@ -451,10 +451,10 @@ All verified live against Debian 12 QEMU/KVM VMs. Full suite: ~12 minutes.
 **Fresh install tests (x86_64) — all passing:**
 
 - [x] Test: `st-cli target install plc@vm` on fresh Debian 12 VM succeeds
-- [x] Test: after install, `/opt/st-plc/st-plc-runtime` exists and is executable
+- [x] Test: after install, `/opt/st-plc/st-runtime` exists and is executable
 - [x] Test: after install, `/etc/st-plc/agent.yaml` exists with correct defaults
-- [x] Test: after install, `systemctl is-active st-plc-runtime` returns "active"
-- [x] Test: after install, `systemctl is-enabled st-plc-runtime` returns "enabled"
+- [x] Test: after install, `systemctl is-active st-runtime` returns "active"
+- [x] Test: after install, `systemctl is-enabled st-runtime` returns "enabled"
 - [x] Test: after install, health check returns `{"healthy":true}`
 - [x] Test: after install, target-info returns correct OS/arch/version
 - [x] Test: after install, can upload a bundle and start the runtime (cycles advancing)
@@ -568,10 +568,10 @@ exercise the exact same code paths as a production deployment to a physical devi
 ### E2E: Agent install via SSH — superseded by Phase 15g
 
 > These tests are now covered by Phase 15g's 26 QEMU installer tests
-> (`crates/st-plc-runtime/tests/e2e_installer.rs`).
+> (`crates/st-runtime/tests/e2e_installer.rs`).
 
 - [x] Test: `st-cli target install` installs static binary on fresh VM via SCP
-- [x] Test: agent binary exists and is executable (`/opt/st-plc/st-plc-runtime`)
+- [x] Test: agent binary exists and is executable (`/opt/st-plc/st-runtime`)
 - [x] Test: systemd unit file created and enabled
 - [x] Test: agent service starts and is reachable (health check 200)
 - [x] Test: target-info returns correct OS/arch from the VM

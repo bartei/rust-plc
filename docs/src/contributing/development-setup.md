@@ -37,7 +37,7 @@ cargo test -p st-grammar
 cargo test -p st-semantics
 
 # Run a single test by name
-cargo test -p st-runtime test_arithmetic
+cargo test -p st-engine test_arithmetic
 ```
 
 ## Project Structure
@@ -78,7 +78,7 @@ rust-plc/
       src/lib.rs              compile() public API
       tests/
         compile_tests.rs      Compilation tests
-    st-runtime/               Bytecode VM + scan-cycle engine
+    st-engine/                Bytecode VM + scan-cycle engine
       src/vm.rs               Vm, CallFrame, fetch-decode-execute loop
       src/engine.rs           Engine, CycleStats, watchdog
       src/lib.rs              Public re-exports

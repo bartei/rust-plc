@@ -56,7 +56,7 @@ These are two different operations:
 | Operation | What changes | Command | Downtime |
 |-----------|-------------|---------|----------|
 | **Program update** | Your ST code | Upload new `.st-bundle` | Seconds (stop + start) |
-| **Runtime upgrade** | The `st-plc-runtime` binary | `st-cli target install --upgrade` | Seconds (service restart) |
+| **Runtime upgrade** | The `st-runtime` binary | `st-cli target install --upgrade` | Seconds (service restart) |
 
 **Program update** — change your PLC logic, rebuild the bundle, upload. The runtime binary stays the same.
 

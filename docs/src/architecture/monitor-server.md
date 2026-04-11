@@ -9,7 +9,7 @@ JSON-RPC protocol.
 
 ```
   ┌──────────────┐        ┌───────────────┐        ┌──────────────┐
-  │ VSCode       │  WS    │ st-monitor    │        │ st-runtime   │
+  │ VSCode       │  WS    │ st-monitor    │        │ st-engine    │
   │ MonitorPanel │◄──────►│ WebSocket     │◄──────►│ Engine       │
   │ (webview)    │        │ Server        │        │ (scan loop)  │
   └──────────────┘        └───────────────┘        └──────────────┘

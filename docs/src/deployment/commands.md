@@ -90,7 +90,7 @@ st-cli target install user@host [options]
 | `--key <path>` | SSH private key | Auto-detected |
 | `--port <port>` | SSH port | 22 |
 | `--agent-port <port>` | Agent HTTP port on target | 4840 |
-| `--name <name>` | Agent name | `st-plc-runtime` |
+| `--name <name>` | Agent name | `st-runtime` |
 | `--upgrade` | Upgrade existing installation | Fresh install |
 
 **What it does:**

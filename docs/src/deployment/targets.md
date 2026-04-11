@@ -4,7 +4,7 @@ A **target** is a remote Linux device that runs the PLC runtime. The runtime is 
 
 ## The Runtime Binary
 
-The `st-plc-runtime` binary is a self-contained executable that includes:
+The `st-runtime` binary is a self-contained executable that includes:
 
 - **Agent** — HTTP API server for deployment and lifecycle management
 - **Debugger** — DAP (Debug Adapter Protocol) server for remote debugging from VS Code
@@ -14,14 +14,14 @@ The `st-plc-runtime` binary is a self-contained executable that includes:
 It is built as a **fully static ELF binary** using musl libc. No shared libraries, no package dependencies, no runtime requirements beyond a Linux kernel.
 
 ```
-$ file st-plc-runtime
-st-plc-runtime: ELF 64-bit LSB pie executable, x86-64, static-pie linked, stripped
+$ file st-runtime
+st-runtime: ELF 64-bit LSB pie executable, x86-64, static-pie linked, stripped
 
-$ ldd st-plc-runtime
+$ ldd st-runtime
     statically linked
 
-$ ls -lh st-plc-runtime
--rwxr-xr-x 1 user user 4.0M st-plc-runtime
+$ ls -lh st-runtime
+-rwxr-xr-x 1 user user 4.0M st-runtime
 ```
 
 ### Building the Static Binary
@@ -33,7 +33,7 @@ $ ls -lh st-plc-runtime
 
 This uses `nix-shell` with the musl cross-compiler toolchain. The output is at:
 ```
-target/x86_64-unknown-linux-musl/release-static/st-plc-runtime
+target/x86_64-unknown-linux-musl/release-static/st-runtime
 ```
 
 ## Installing on a Target
@@ -59,7 +59,7 @@ This single command:
 | `--key <path>` | SSH private key file | Auto-detected from `~/.ssh/` |
 | `--port <port>` | SSH port | 22 |
 | `--agent-port <port>` | Agent HTTP API port | 4840 |
-| `--name <name>` | Agent name (shown in health endpoint) | `st-plc-runtime` |
+| `--name <name>` | Agent name (shown in health endpoint) | `st-runtime` |
 | `--upgrade` | Upgrade existing installation | Fresh install |
 
 ### Upgrading
@@ -150,7 +150,7 @@ Deployment targets (plc-project.yaml):
 
 ## Systemd Service
 
-The installer creates a systemd service unit at `/etc/systemd/system/st-plc-runtime.service`:
+The installer creates a systemd service unit at `/etc/systemd/system/st-runtime.service`:
 
 ```ini
 [Unit]
@@ -160,7 +160,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/opt/st-plc/st-plc-runtime agent --config /etc/st-plc/agent.yaml
+ExecStart=/opt/st-plc/st-runtime agent --config /etc/st-plc/agent.yaml
 Restart=on-failure
 RestartSec=3
 WatchdogSec=30
@@ -188,19 +188,19 @@ From the target device (via SSH):
 
 ```bash
 # Check status
-sudo systemctl status st-plc-runtime
+sudo systemctl status st-runtime
 
 # View logs
-sudo journalctl -u st-plc-runtime -f
+sudo journalctl -u st-runtime -f
 
 # Restart
-sudo systemctl restart st-plc-runtime
+sudo systemctl restart st-runtime
 
 # Stop
-sudo systemctl stop st-plc-runtime
+sudo systemctl stop st-runtime
 
 # Disable auto-start
-sudo systemctl disable st-plc-runtime
+sudo systemctl disable st-runtime
 ```
 
 ## Agent Configuration
@@ -242,13 +242,13 @@ The agent logs to **systemd's journald** on Linux targets. No log files to manag
 
 ```bash
 # View agent logs
-sudo journalctl -u st-plc-runtime -f
+sudo journalctl -u st-runtime -f
 
 # Last 50 entries
-sudo journalctl -u st-plc-runtime --no-pager -n 50
+sudo journalctl -u st-runtime --no-pager -n 50
 
 # Errors only
-sudo journalctl -u st-plc-runtime -p err
+sudo journalctl -u st-runtime -p err
 ```
 
 The log level can be set in `agent.yaml` (`logging.level`) and changed at runtime without restarting:
@@ -303,7 +303,7 @@ After installation, the target has:
 
 ```
 /opt/st-plc/
-  st-plc-runtime              # The runtime binary (4 MB static ELF)
+  st-runtime              # The runtime binary (4 MB static ELF)
 
 /etc/st-plc/
   agent.yaml                  # Agent configuration
@@ -315,5 +315,5 @@ After installation, the target has:
 /var/log/st-plc/              # Agent logs
 
 /etc/systemd/system/
-  st-plc-runtime.service      # Systemd service unit
+  st-runtime.service      # Systemd service unit
 ```

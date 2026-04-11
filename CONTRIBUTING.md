@@ -148,12 +148,12 @@ This project maintains 510+ tests across 10 crates. New contributions must inclu
 | AST/Syntax | Lowering tests | `crates/st-syntax/tests/` |
 | Semantics | Diagnostic tests | `crates/st-semantics/tests/` |
 | Compiler | Bytecode tests | `crates/st-compiler/tests/` |
-| Runtime | VM execution tests | `crates/st-runtime/tests/` |
+| Runtime | VM execution tests | `crates/st-engine/tests/` |
 | LSP | Protocol integration tests | `crates/st-lsp/tests/` |
 | DAP | Debug protocol tests | `crates/st-dap/tests/` |
 | Monitor | WebSocket tests | `crates/st-monitor/tests/` |
 | Project | Discovery tests | `crates/st-syntax/src/project.rs` |
-| Stdlib | End-to-end stdlib tests | `crates/st-runtime/tests/stdlib_tests.rs` |
+| Stdlib | End-to-end stdlib tests | `crates/st-engine/tests/stdlib_tests.rs` |
 
 ### Writing a Good Test
 

@@ -120,7 +120,7 @@ rust-plc/
 │   ├── st-semantics/   Type checking, symbol tables, diagnostics
 │   ├── st-ir/          Bytecode instruction set (50+ instructions)
 │   ├── st-compiler/    AST → bytecode compiler
-│   ├── st-runtime/     VM, scan cycle engine, online change, debug hooks
+│   ├── st-engine/      VM, scan cycle engine, online change, debug hooks
 │   ├── st-lsp/         Language Server Protocol (16 features)
 │   ├── st-dap/         Debug Adapter Protocol
 │   ├── st-monitor/     WebSocket monitor server
