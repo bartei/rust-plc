@@ -14,6 +14,10 @@ for attempt in 1 2 3; do
     sleep 5
 done
 
+echo "==> Adding st-cli to PATH..."
+sudo ln -sf "$(pwd)/target/debug/st-cli" /usr/local/bin/st-cli
+echo "    Linked target/debug/st-cli -> /usr/local/bin/st-cli"
+
 echo "==> Installing VSCode extension dependencies..."
 cd editors/vscode
 npm install 2>&1
