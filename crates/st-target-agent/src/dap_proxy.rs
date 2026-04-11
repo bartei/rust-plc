@@ -58,19 +58,6 @@ pub async fn run_dap_proxy_with_listener(
 
         info!("DAP proxy: connection from {peer}");
 
-        // Check if we have a program and it's debuggable
-        // Stop the running program before starting a debug session —
-        // the debugger spawns its own VM and the two can't coexist.
-        {
-            let status = app_state.runtime_manager.state().status;
-            if status == crate::runtime_manager::RuntimeStatus::Running {
-                info!("DAP proxy: stopping running program for debug session");
-                let _ = app_state.runtime_manager.stop().await;
-                // Brief wait for the runtime thread to actually stop
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
-        }
-
         let source_path = {
             let store = app_state.program_store.read().unwrap();
             match store.current_program() {
@@ -98,14 +85,35 @@ pub async fn run_dap_proxy_with_listener(
             continue;
         }
 
-        let cli_path = st_cli_path.clone();
-        // Handle connection in a background task
-        tokio::spawn(async move {
-            if let Err(e) = handle_dap_connection(stream, &cli_path, &source_path).await {
-                error!("DAP proxy session error: {e}");
-            }
-            info!("DAP proxy: session ended for {peer}");
-        });
+        // Route based on engine state:
+        // - Running/DebugPaused → attach to running engine (no subprocess)
+        // - Idle → spawn subprocess for offline debugging
+        let status = app_state.runtime_manager.state().status;
+        if status == crate::runtime_manager::RuntimeStatus::Running
+            || status == crate::runtime_manager::RuntimeStatus::DebugPaused
+        {
+            info!("DAP proxy: attaching to running engine (no subprocess)");
+            let state_clone = Arc::clone(&app_state);
+            let src = source_path.clone();
+            // Convert tokio TcpStream to std TcpStream for the blocking handler
+            let std_stream = stream.into_std().unwrap();
+            // Spawn on a blocking thread (handler uses std::sync::mpsc blocking recv)
+            tokio::task::spawn_blocking(move || {
+                crate::dap_attach_handler::handle_dap_attach(
+                    std_stream, state_clone, &src,
+                );
+                info!("DAP proxy: attach session ended for {peer}");
+            });
+        } else {
+            let cli_path = st_cli_path.clone();
+            // Offline debug: spawn subprocess
+            tokio::spawn(async move {
+                if let Err(e) = handle_dap_connection(stream, &cli_path, &source_path).await {
+                    error!("DAP proxy session error: {e}");
+                }
+                info!("DAP proxy: session ended for {peer}");
+            });
+        }
     }
 }
 
