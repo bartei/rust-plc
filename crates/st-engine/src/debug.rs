@@ -418,6 +418,68 @@ fn compute_line_offsets(source: &str) -> Vec<usize> {
     offsets
 }
 
+// =============================================================================
+// Debug attach protocol — commands and responses for remote debug sessions
+// that attach to an already-running engine via channels.
+// =============================================================================
+
+/// Scope kind for variable queries.
+#[derive(Debug, Clone, Copy)]
+pub enum DebugScopeKind {
+    Locals,
+    Globals,
+}
+
+/// Commands sent from a debug session to the running engine.
+#[derive(Debug)]
+pub enum DebugCommand {
+    /// Set breakpoints in a source file (replaces all previous breakpoints).
+    SetBreakpoints {
+        source_path: String,
+        source: String,
+        lines: Vec<u32>,
+    },
+    /// Clear all breakpoints.
+    ClearBreakpoints,
+    /// Resume execution until next breakpoint.
+    Continue,
+    /// Step into the next statement.
+    StepIn,
+    /// Step over the current statement.
+    StepOver,
+    /// Step out of the current function.
+    StepOut,
+    /// Pause execution at the next opportunity.
+    Pause,
+    /// Request variable values for a scope.
+    GetVariables { scope: DebugScopeKind },
+    /// Request the call stack.
+    GetStackTrace,
+    /// Evaluate an expression (variable lookup, force/unforce).
+    Evaluate { expression: String },
+    /// Disconnect the debug session (engine resumes normal cycling).
+    Disconnect,
+}
+
+/// Responses/events sent from the engine back to the debug session.
+#[derive(Debug)]
+pub enum DebugResponse {
+    /// Execution stopped (breakpoint hit, step completed, pause request).
+    Stopped { reason: PauseReason },
+    /// Variable values for a requested scope.
+    Variables { vars: Vec<VariableInfo> },
+    /// Call stack frames.
+    StackTrace { frames: Vec<FrameInfo> },
+    /// Result of an evaluate request.
+    EvaluateResult { value: String, ty: String },
+    /// Execution resumed after a step/continue command.
+    Resumed,
+    /// Debug session detached, engine resumed normal cycling.
+    Detached,
+    /// Breakpoints set — reports which lines were verified.
+    BreakpointsSet { verified: Vec<bool> },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

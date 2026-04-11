@@ -63,6 +63,15 @@ pub enum RuntimeCommand {
     Start(Box<StartParams>),
     Stop,
     Shutdown,
+    /// Attach a debug session to the running engine.
+    DebugAttach {
+        /// Channel for the engine to send events/responses to the debug session.
+        event_tx: std::sync::mpsc::Sender<st_engine::DebugResponse>,
+        /// Channel for the debug session to send commands to the engine.
+        cmd_rx: std::sync::mpsc::Receiver<st_engine::DebugCommand>,
+    },
+    /// Detach the debug session (resume normal cycling).
+    DebugDetach,
 }
 
 pub struct StartParams {
@@ -154,6 +163,53 @@ impl RuntimeManager {
         let _ = self.cmd_tx.send(RuntimeCommand::Shutdown).await;
     }
 
+    /// Attach a debug session to the running engine.
+    ///
+    /// Returns channels for bidirectional communication:
+    /// - `cmd_tx`: send DebugCommands to the engine
+    /// - `event_rx`: receive DebugResponses from the engine
+    ///
+    /// The engine keeps running normally until a breakpoint hits or Pause
+    /// is sent. The debug session is automatically detached if the command
+    /// channel is dropped.
+    pub async fn debug_attach(
+        &self,
+    ) -> Result<
+        (
+            std::sync::mpsc::Sender<st_engine::DebugCommand>,
+            std::sync::mpsc::Receiver<st_engine::DebugResponse>,
+        ),
+        ApiError,
+    > {
+        let current_status = self.state.read().unwrap().status;
+        if current_status != RuntimeStatus::Running
+            && current_status != RuntimeStatus::DebugPaused
+        {
+            return Err(ApiError::not_running());
+        }
+
+        // Create std::sync::mpsc channels (used by the runtime thread which
+        // is a plain OS thread, not a tokio task).
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
+
+        self.cmd_tx
+            .send(RuntimeCommand::DebugAttach { event_tx, cmd_rx })
+            .await
+            .map_err(|_| ApiError::internal("Runtime thread not responding"))?;
+
+        Ok((cmd_tx, event_rx))
+    }
+
+    /// Detach the debug session (resume normal cycling).
+    pub async fn debug_detach(&self) -> Result<(), ApiError> {
+        self.cmd_tx
+            .send(RuntimeCommand::DebugDetach)
+            .await
+            .map_err(|_| ApiError::internal("Runtime thread not responding"))?;
+        Ok(())
+    }
+
     /// Get the command sender (for watchdog restart).
     pub fn cmd_sender(&self) -> tokio::sync::mpsc::Sender<RuntimeCommand> {
         self.cmd_tx.clone()
@@ -231,12 +287,33 @@ fn runtime_thread(
                     }
                 }
             }
+            RuntimeCommand::DebugAttach { .. } | RuntimeCommand::DebugDetach => {
+                // Debug commands while idle — ignore (no engine to attach to)
+            }
         }
     }
 }
 
 enum StopReason {
     Commanded,
+    Shutdown,
+}
+
+/// Active debug session state (held by the runtime thread).
+struct DebugSession {
+    event_tx: std::sync::mpsc::Sender<st_engine::DebugResponse>,
+    cmd_rx: std::sync::mpsc::Receiver<st_engine::DebugCommand>,
+}
+
+/// What to do after handling debug commands.
+enum DebugAction {
+    /// Resume VM execution (continue, step completed).
+    Resume,
+    /// Detach debug session, resume normal cycling.
+    Detach,
+    /// Stop command received while debugging.
+    Stop,
+    /// Shutdown command received while debugging.
     Shutdown,
 }
 
@@ -247,6 +324,8 @@ fn run_cycle_loop(
     cmd_rx: &mut tokio::sync::mpsc::Receiver<RuntimeCommand>,
     cycle_time: Option<Duration>,
 ) -> Result<StopReason, String> {
+    let mut debug_session: Option<DebugSession> = None;
+
     loop {
         // Execute one scan cycle
         match engine.run_one_cycle() {
@@ -264,13 +343,41 @@ fn run_cycle_loop(
             }
             Err(st_engine::VmError::Halt) => {
                 // Debug breakpoint/pause hit — NOT a fatal error.
-                // The VM is paused mid-cycle. For now (without a debug
-                // session attached via Phase C), clear the pause state
-                // and resume. Phase C will add debug command handling here.
-                engine.vm_mut().debug_mut().resume(
-                    st_engine::debug::StepMode::Continue,
-                    0,
-                );
+                if debug_session.is_some() {
+                    // Notify the debugger that we stopped
+                    let reason = engine.vm().debug_state().pause_reason;
+                    if let Some(ref session) = debug_session {
+                        let _ = session.event_tx.send(
+                            st_engine::DebugResponse::Stopped { reason },
+                        );
+                    }
+
+                    state.write().unwrap().status = RuntimeStatus::DebugPaused;
+
+                    // Serve debug commands until resume/detach/stop
+                    match handle_debug_commands(engine, &mut debug_session, cmd_rx) {
+                        DebugAction::Resume => {
+                            state.write().unwrap().status = RuntimeStatus::Running;
+                            continue;
+                        }
+                        DebugAction::Detach => {
+                            debug_session = None;
+                            engine.vm_mut().debug_mut().clear_breakpoints();
+                            engine.vm_mut().debug_mut().resume(
+                                st_engine::debug::StepMode::Continue, 0,
+                            );
+                            state.write().unwrap().status = RuntimeStatus::Running;
+                            continue;
+                        }
+                        DebugAction::Stop => return Ok(StopReason::Commanded),
+                        DebugAction::Shutdown => return Ok(StopReason::Shutdown),
+                    }
+                } else {
+                    // No debug session — clear pause and resume
+                    engine.vm_mut().debug_mut().resume(
+                        st_engine::debug::StepMode::Continue, 0,
+                    );
+                }
             }
             Err(e) => {
                 // True runtime error (division by zero, stack overflow, etc.)
@@ -282,17 +389,221 @@ fn run_cycle_loop(
         match cmd_rx.try_recv() {
             Ok(RuntimeCommand::Stop) => return Ok(StopReason::Commanded),
             Ok(RuntimeCommand::Shutdown) => return Ok(StopReason::Shutdown),
+            Ok(RuntimeCommand::DebugAttach { event_tx, cmd_rx: dbg_rx }) => {
+                tracing::info!("Debug session attached to running engine");
+                debug_session = Some(DebugSession {
+                    event_tx,
+                    cmd_rx: dbg_rx,
+                });
+                // Engine keeps cycling — breakpoints will trigger Halt
+            }
+            Ok(RuntimeCommand::DebugDetach) => {
+                if let Some(session) = debug_session.take() {
+                    let _ = session.event_tx.send(st_engine::DebugResponse::Detached);
+                }
+                engine.vm_mut().debug_mut().clear_breakpoints();
+                engine.vm_mut().debug_mut().resume(
+                    st_engine::debug::StepMode::Continue, 0,
+                );
+                tracing::info!("Debug session detached");
+            }
             Ok(RuntimeCommand::Start { .. }) => {
                 // Ignore start while already running
             }
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                // No command, continue cycling
-            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                 return Ok(StopReason::Shutdown);
             }
         }
+
+        // Also check for debug commands between cycles (non-blocking)
+        // — handles Pause requests and breakpoint updates while running.
+        if debug_session.is_some() {
+            let mut should_disconnect = false;
+            if let Some(ref session) = debug_session {
+                while let Ok(cmd) = session.cmd_rx.try_recv() {
+                    match cmd {
+                        st_engine::DebugCommand::Pause => {
+                            engine.vm_mut().debug_mut().pause();
+                        }
+                        st_engine::DebugCommand::SetBreakpoints {
+                            source_path: _,
+                            source,
+                            lines,
+                        } => {
+                            let module = engine.vm().module().clone();
+                            engine.vm_mut().debug_mut().clear_breakpoints();
+                            let results = engine.vm_mut().debug_mut().set_line_breakpoints(
+                                &module, &source, &lines, 0,
+                            );
+                            let verified = results.iter().map(|r| r.is_some()).collect();
+                            let _ = session.event_tx.send(
+                                st_engine::DebugResponse::BreakpointsSet { verified },
+                            );
+                        }
+                        st_engine::DebugCommand::Disconnect => {
+                            let _ = session.event_tx.send(
+                                st_engine::DebugResponse::Detached,
+                            );
+                            should_disconnect = true;
+                            break;
+                        }
+                        _ => {} // Other commands only valid when paused
+                    }
+                }
+            }
+            if should_disconnect {
+                debug_session = None;
+                engine.vm_mut().debug_mut().clear_breakpoints();
+                engine.vm_mut().debug_mut().resume(
+                    st_engine::debug::StepMode::Continue, 0,
+                );
+                tracing::info!("Debug session disconnected");
+            }
+        }
     }
+}
+
+/// Serve debug commands while the VM is paused at a breakpoint.
+/// Blocks until the debugger sends Continue, Step, Disconnect, or the
+/// channel closes. Returns what the cycle loop should do next.
+fn handle_debug_commands(
+    engine: &mut st_engine::Engine,
+    debug_session: &mut Option<DebugSession>,
+    runtime_cmd_rx: &mut tokio::sync::mpsc::Receiver<RuntimeCommand>,
+) -> DebugAction {
+    let Some(session) = debug_session.as_ref() else {
+        return DebugAction::Detach;
+    };
+
+    // Debug pause timeout: 30 minutes. Prevents a forgotten debugger from
+    // halting a production system indefinitely.
+    let timeout = Duration::from_secs(30 * 60);
+
+    loop {
+        // Check for runtime commands (Stop/Shutdown) between debug commands
+        match runtime_cmd_rx.try_recv() {
+            Ok(RuntimeCommand::Stop) => return DebugAction::Stop,
+            Ok(RuntimeCommand::Shutdown) => return DebugAction::Shutdown,
+            Ok(RuntimeCommand::DebugDetach) => return DebugAction::Detach,
+            _ => {}
+        }
+
+        match session.cmd_rx.recv_timeout(timeout) {
+            Ok(cmd) => match cmd {
+                st_engine::DebugCommand::Continue => {
+                    let depth = engine.vm().call_depth();
+                    engine.vm_mut().debug_mut().resume(
+                        st_engine::debug::StepMode::Continue, depth,
+                    );
+                    let _ = session.event_tx.send(st_engine::DebugResponse::Resumed);
+                    return DebugAction::Resume;
+                }
+                st_engine::DebugCommand::StepIn => {
+                    let depth = engine.vm().call_depth();
+                    let offset = engine.vm().stack_frames().first()
+                        .map(|f| f.source_offset).unwrap_or(0);
+                    engine.vm_mut().debug_mut().resume_with_source(
+                        st_engine::debug::StepMode::StepIn, depth, offset,
+                    );
+                    return DebugAction::Resume;
+                }
+                st_engine::DebugCommand::StepOver => {
+                    let depth = engine.vm().call_depth();
+                    let offset = engine.vm().stack_frames().first()
+                        .map(|f| f.source_offset).unwrap_or(0);
+                    engine.vm_mut().debug_mut().resume_with_source(
+                        st_engine::debug::StepMode::StepOver, depth, offset,
+                    );
+                    return DebugAction::Resume;
+                }
+                st_engine::DebugCommand::StepOut => {
+                    let depth = engine.vm().call_depth();
+                    engine.vm_mut().debug_mut().resume(
+                        st_engine::debug::StepMode::StepOut, depth,
+                    );
+                    return DebugAction::Resume;
+                }
+                st_engine::DebugCommand::GetVariables { scope } => {
+                    let vars = match scope {
+                        st_engine::DebugScopeKind::Locals => {
+                            engine.vm().current_locals_with_fb_fields()
+                        }
+                        st_engine::DebugScopeKind::Globals => {
+                            engine.vm().global_variables()
+                        }
+                    };
+                    let _ = session.event_tx.send(
+                        st_engine::DebugResponse::Variables { vars },
+                    );
+                }
+                st_engine::DebugCommand::GetStackTrace => {
+                    let frames = engine.vm().stack_frames();
+                    let _ = session.event_tx.send(
+                        st_engine::DebugResponse::StackTrace { frames },
+                    );
+                }
+                st_engine::DebugCommand::Evaluate { expression } => {
+                    // Simple variable lookup
+                    let (value, ty) = evaluate_expression(engine, &expression);
+                    let _ = session.event_tx.send(
+                        st_engine::DebugResponse::EvaluateResult { value, ty },
+                    );
+                }
+                st_engine::DebugCommand::SetBreakpoints { source_path: _, source, lines } => {
+                    let module = engine.vm().module().clone();
+                    engine.vm_mut().debug_mut().clear_breakpoints();
+                    let results = engine.vm_mut().debug_mut().set_line_breakpoints(
+                        &module, &source, &lines, 0,
+                    );
+                    let verified = results.iter().map(|r| r.is_some()).collect();
+                    let _ = session.event_tx.send(
+                        st_engine::DebugResponse::BreakpointsSet { verified },
+                    );
+                }
+                st_engine::DebugCommand::ClearBreakpoints => {
+                    engine.vm_mut().debug_mut().clear_breakpoints();
+                }
+                st_engine::DebugCommand::Pause => {
+                    // Already paused — no-op
+                }
+                st_engine::DebugCommand::Disconnect => {
+                    return DebugAction::Detach;
+                }
+            },
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                tracing::warn!(
+                    "Debug session timeout (30 min) — auto-resuming engine"
+                );
+                return DebugAction::Detach;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                tracing::info!("Debug session channel closed — resuming engine");
+                return DebugAction::Detach;
+            }
+        }
+    }
+}
+
+/// Simple expression evaluation: variable lookup by name.
+fn evaluate_expression(engine: &st_engine::Engine, expr: &str) -> (String, String) {
+    // Try locals first
+    let locals = engine.vm().current_locals();
+    if let Some(v) = locals.iter().find(|v| v.name.eq_ignore_ascii_case(expr)) {
+        return (v.value.clone(), v.ty.clone());
+    }
+    // Try globals
+    let globals = engine.vm().global_variables();
+    if let Some(v) = globals.iter().find(|v| v.name.eq_ignore_ascii_case(expr)) {
+        return (v.value.clone(), v.ty.clone());
+    }
+    // Try dotted FB/struct field path
+    if expr.contains('.') {
+        if let Some(v) = engine.vm().resolve_fb_field(expr) {
+            return (v.value, v.ty);
+        }
+    }
+    ("<unknown>".to_string(), String::new())
 }
 
 /// Update shared cycle stats from the engine (factored out for readability).

@@ -10,6 +10,7 @@ pub mod online_change;
 pub mod retain_store;
 pub mod vm;
 
+pub use debug::{DebugCommand, DebugResponse, DebugScopeKind};
 pub use engine::{Engine, EngineConfig, CycleStats};
 pub use retain_store::RetainConfig;
 pub use vm::{Vm, VmConfig, VmError};
