@@ -267,6 +267,34 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.debug.registerDebugAdapterDescriptorFactory("st", debugAdapterFactory)
   );
 
+  // Dynamic debug configurations from plc-project.yaml targets — appear
+  // in the debug dropdown without needing a launch.json.
+  context.subscriptions.push(
+    vscode.debug.registerDebugConfigurationProvider("st", {
+      provideDebugConfigurations(): vscode.DebugConfiguration[] {
+        const configs: vscode.DebugConfiguration[] = [
+          {
+            type: "st",
+            request: "launch",
+            name: "Debug Current File",
+            program: "${file}",
+            stopOnEntry: true,
+          },
+        ];
+        for (const t of getTargetsFromConfig()) {
+          configs.push({
+            type: "st",
+            request: "attach",
+            name: `Debug on ${t.name} (${t.host})`,
+            target: t.name,
+            stopOnEntry: true,
+          });
+        }
+        return configs;
+      },
+    })
+  );
+
   // ── Cycle-time status bar (Tier 2 cycle-time feedback) ───────────
   cycleStatusBar = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right,
