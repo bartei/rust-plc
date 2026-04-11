@@ -23,6 +23,7 @@ enum Input {
     EngineDisconnected,
 }
 
+
 /// Handle a DAP attach session on a TCP stream.
 ///
 /// Spawns a reader thread for TCP input and an event thread for engine
@@ -112,6 +113,7 @@ pub fn handle_dap_attach(
                     &mut seq_counter,
                     &mut is_paused,
                     &source_files,
+                    &input_rx,
                 );
                 let command = msg["command"].as_str().unwrap_or("");
                 if command == "disconnect" {
@@ -149,6 +151,7 @@ fn handle_dap_request(
     seq: &mut i64,
     is_paused: &mut bool,
     source_files: &[(String, String)],
+    input_rx: &std::sync::mpsc::Receiver<Input>,
 ) {
     let req_seq = msg["seq"].as_i64().unwrap_or(0);
     let command = msg["command"].as_str().unwrap_or("");
@@ -252,18 +255,37 @@ fn handle_dap_request(
         }
 
         "stackTrace" => {
-            let _ = cmd_tx.send(st_engine::DebugCommand::GetStackTrace);
-            // Response arrives via EngineEvent — but VS Code expects an
-            // immediate response. Use a short blocking wait here since
-            // the engine is paused and will respond immediately.
-            // If not paused, return empty.
             if *is_paused {
-                // Give the engine thread time to respond
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                let _ = cmd_tx.send(st_engine::DebugCommand::GetStackTrace);
+                let frames = wait_for_engine_response(input_rx, seq, is_paused, writer,
+                    |resp| matches!(resp, st_engine::DebugResponse::StackTrace { .. }),
+                );
+                if let Some(st_engine::DebugResponse::StackTrace { frames }) = frames {
+                    let stack_frames: Vec<serde_json::Value> = frames.iter().enumerate()
+                        .map(|(i, f)| {
+                            let (line, spath) = resolve_frame_location(f, source_files);
+                            serde_json::json!({
+                                "id": i,
+                                "name": f.func_name,
+                                "source": { "name": std::path::Path::new(&spath).file_name().unwrap_or_default().to_string_lossy(), "path": spath },
+                                "line": line,
+                                "column": 1,
+                            })
+                        })
+                        .collect();
+                    send_dap_response(writer, req_seq, "stackTrace", serde_json::json!({
+                        "stackFrames": stack_frames,
+                    }));
+                } else {
+                    send_dap_response(writer, req_seq, "stackTrace", serde_json::json!({
+                        "stackFrames": [],
+                    }));
+                }
+            } else {
+                send_dap_response(writer, req_seq, "stackTrace", serde_json::json!({
+                    "stackFrames": [],
+                }));
             }
-            send_dap_response(writer, req_seq, "stackTrace", serde_json::json!({
-                "stackFrames": [],
-            }));
         }
 
         "scopes" => {
@@ -277,29 +299,67 @@ fn handle_dap_request(
 
         "variables" => {
             let var_ref = msg["arguments"]["variablesReference"].as_i64().unwrap_or(0);
-            let scope = if var_ref == 1001 {
-                st_engine::DebugScopeKind::Globals
-            } else {
-                st_engine::DebugScopeKind::Locals
-            };
-            let _ = cmd_tx.send(st_engine::DebugCommand::GetVariables { scope });
             if *is_paused {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                let scope = if var_ref == 1001 {
+                    st_engine::DebugScopeKind::Globals
+                } else {
+                    st_engine::DebugScopeKind::Locals
+                };
+                let _ = cmd_tx.send(st_engine::DebugCommand::GetVariables { scope });
+                let resp = wait_for_engine_response(input_rx, seq, is_paused, writer,
+                    |r| matches!(r, st_engine::DebugResponse::Variables { .. }),
+                );
+                if let Some(st_engine::DebugResponse::Variables { vars }) = resp {
+                    let variables: Vec<serde_json::Value> = vars.iter()
+                        .map(|v| serde_json::json!({
+                            "name": v.name,
+                            "value": v.value,
+                            "type": v.ty,
+                            "variablesReference": 0,
+                        }))
+                        .collect();
+                    send_dap_response(writer, req_seq, "variables", serde_json::json!({
+                        "variables": variables,
+                    }));
+                } else {
+                    send_dap_response(writer, req_seq, "variables", serde_json::json!({
+                        "variables": [],
+                    }));
+                }
+            } else {
+                send_dap_response(writer, req_seq, "variables", serde_json::json!({
+                    "variables": [],
+                }));
             }
-            send_dap_response(writer, req_seq, "variables", serde_json::json!({
-                "variables": [],
-            }));
         }
 
         "evaluate" => {
             let expr = msg["arguments"]["expression"].as_str().unwrap_or("");
-            let _ = cmd_tx.send(st_engine::DebugCommand::Evaluate {
-                expression: expr.to_string(),
-            });
-            send_dap_response(writer, req_seq, "evaluate", serde_json::json!({
-                "result": "<running>",
-                "variablesReference": 0,
-            }));
+            if *is_paused {
+                let _ = cmd_tx.send(st_engine::DebugCommand::Evaluate {
+                    expression: expr.to_string(),
+                });
+                let resp = wait_for_engine_response(input_rx, seq, is_paused, writer,
+                    |r| matches!(r, st_engine::DebugResponse::EvaluateResult { .. }),
+                );
+                if let Some(st_engine::DebugResponse::EvaluateResult { value, ty }) = resp {
+                    send_dap_response(writer, req_seq, "evaluate", serde_json::json!({
+                        "result": value,
+                        "type": ty,
+                        "variablesReference": 0,
+                    }));
+                } else {
+                    send_dap_response(writer, req_seq, "evaluate", serde_json::json!({
+                        "result": "<timeout>",
+                        "variablesReference": 0,
+                    }));
+                }
+            } else {
+                send_dap_response(writer, req_seq, "evaluate", serde_json::json!({
+                    "result": "<running>",
+                    "variablesReference": 0,
+                }));
+            }
         }
 
         "disconnect" => {
@@ -426,6 +486,73 @@ fn send_dap_event(stream: &std::net::TcpStream, seq: &mut i64, event: &str, body
         "event": event,
         "body": body,
     }));
+}
+
+/// Wait for a specific engine response, draining other events from the input
+/// channel. Times out after 2 seconds. Any Stopped/Detached events that arrive
+/// while waiting are forwarded to VS Code immediately.
+fn wait_for_engine_response(
+    input_rx: &std::sync::mpsc::Receiver<Input>,
+    seq: &mut i64,
+    is_paused: &mut bool,
+    writer: &std::net::TcpStream,
+    predicate: fn(&st_engine::DebugResponse) -> bool,
+) -> Option<st_engine::DebugResponse> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        match input_rx.recv_timeout(remaining) {
+            Ok(Input::EngineEvent(resp)) => {
+                if predicate(&resp) {
+                    return Some(resp);
+                }
+                // Forward other engine events (e.g., Stopped) while waiting
+                handle_engine_event(resp, writer, seq, is_paused);
+            }
+            Ok(Input::DapMessage(_)) => {
+                // Ignore DAP messages while waiting for engine response
+                // (they'll be processed on the next main loop iteration)
+            }
+            Ok(Input::DapDisconnected) | Ok(Input::EngineDisconnected) => {
+                return None;
+            }
+            Err(_) => return None, // Timeout
+        }
+    }
+}
+
+/// Resolve a stack frame's source offset to a line number and file path.
+fn resolve_frame_location(
+    frame: &st_engine::debug::FrameInfo,
+    source_files: &[(String, String)],
+) -> (u32, String) {
+    for (path, content) in source_files {
+        let upper = content.to_uppercase();
+        for keyword in ["PROGRAM ", "FUNCTION_BLOCK ", "FUNCTION ", "CLASS "] {
+            if let Some(idx) = upper.find(keyword) {
+                let after = idx + keyword.len();
+                let name_end = content[after..].find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .unwrap_or(content.len() - after);
+                let name = &content[after..after + name_end];
+                if name.eq_ignore_ascii_case(&frame.func_name)
+                    || frame.func_name.to_uppercase().starts_with(&name.to_uppercase())
+                {
+                    let offset = frame.source_offset.min(content.len());
+                    let line = content[..offset].matches('\n').count() as u32 + 1;
+                    return (line, path.clone());
+                }
+            }
+        }
+    }
+    if let Some((path, content)) = source_files.first() {
+        let offset = frame.source_offset.min(content.len());
+        let line = content[..offset].matches('\n').count() as u32 + 1;
+        return (line, path.clone());
+    }
+    (1, String::new())
 }
 
 fn send_dap_error(stream: &std::net::TcpStream, req_seq: i64, message: &str) {

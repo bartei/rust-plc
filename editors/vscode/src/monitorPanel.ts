@@ -207,7 +207,7 @@ export class MonitorPanel {
       );
       if (resp.ok) {
         const body = await resp.json() as any;
-        const status = body.runtime_status?.toLowerCase() || "idle";
+        const status = (body.status || body.runtime_status || "idle").toLowerCase();
         if (status === "running") {
           this.updateTargetStatus("running", host);
         } else {

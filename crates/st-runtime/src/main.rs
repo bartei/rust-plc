@@ -155,6 +155,28 @@ async fn run_agent(config_path: PathBuf) {
 
     tracing::info!("Agent ready, listening on {bind_addr}");
 
+    // Auto-start the deployed program if configured
+    if state.config.runtime.auto_start {
+        let auto_state = state.clone();
+        tokio::spawn(async move {
+            // Brief delay to let the server fully initialize
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let has_program = {
+                let store = auto_state.program_store.read().unwrap();
+                store.current_program().is_some()
+            }; // lock released here
+            if has_program {
+                tracing::info!("Auto-starting deployed program...");
+                match auto_start_program(&auto_state).await {
+                    Ok(()) => tracing::info!("Auto-start: program running"),
+                    Err(e) => tracing::warn!("Auto-start failed: {e}"),
+                }
+            } else {
+                tracing::info!("No program deployed — skipping auto-start");
+            }
+        });
+    }
+
     let shutdown_state = state.clone();
     let shutdown_signal = async move {
         tokio::signal::ctrl_c()
@@ -171,6 +193,26 @@ async fn run_agent(config_path: PathBuf) {
             eprintln!("Server error: {e}");
             std::process::exit(1);
         });
+}
+
+/// Auto-start the deployed program (mirrors the /api/v1/program/start logic).
+async fn auto_start_program(
+    state: &std::sync::Arc<st_target_agent::server::AppState>,
+) -> Result<(), String> {
+    let (module, program_name) = {
+        let store = state.program_store.read().unwrap();
+        store.load_module().map_err(|e| format!("{e}"))?
+    };
+    let program_meta = {
+        let store = state.program_store.read().unwrap();
+        store.current_program().cloned()
+            .ok_or_else(|| "No program deployed".to_string())?
+    };
+    let cycle_time = Some(std::time::Duration::from_millis(10));
+    state.runtime_manager
+        .start(module, program_name, cycle_time, program_meta)
+        .await
+        .map_err(|e| format!("{e}"))
 }
 
 /// Run the DAP debug server on stdin/stdout.
