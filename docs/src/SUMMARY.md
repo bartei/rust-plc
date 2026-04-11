@@ -28,6 +28,17 @@
 - [Commands](./cli/commands.md)
 - [Project Configuration](./cli/project-configuration.md)
 
+# Deployment & Remote Management
+
+- [Deployment Quick Start](./deployment/quickstart.md)
+- [Bundle Modes & IP Protection](./deployment/bundles.md)
+- [Target Management](./deployment/targets.md)
+- [Updating Programs](./deployment/updating.md)
+- [Security Configuration](./deployment/security.md)
+- [CI/CD Pipeline](./deployment/ci-cd.md)
+- [Deployment Commands](./deployment/commands.md)
+- [Troubleshooting](./deployment/troubleshooting.md)
+
 # Architecture
 
 - [Overview](./architecture/overview.md)

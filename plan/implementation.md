@@ -5,6 +5,8 @@
 > - [implementation_comm.md](implementation_comm.md) — communication layer progress
 > - [design_comm.md](design_comm.md) — communication layer design
 > - [implementation_native.md](implementation_native.md) — LLVM native compilation + hardware targets
+> - [implementation_deploy.md](implementation_deploy.md) — remote deployment & online management
+> - [design_deploy.md](design_deploy.md) — remote deployment design
 
 ---
 

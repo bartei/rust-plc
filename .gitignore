@@ -28,3 +28,9 @@ docs/book/
 
 # Auto-generated communication I/O map (regenerated from plc-project.yaml)
 _io_map.st
+
+# QEMU E2E test artifacts (large VM images, SSH keys, logs)
+tests/e2e-deploy/vm/images/
+
+# Bundle artifacts
+*.st-bundle

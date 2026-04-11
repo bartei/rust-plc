@@ -95,6 +95,26 @@
                 "default": true
               }
             }
+          },
+          "attach": {
+            "required": ["host", "port"],
+            "properties": {
+              "host": {
+                "type": "string",
+                "description": "Hostname or IP of the target agent",
+                "default": "127.0.0.1"
+              },
+              "port": {
+                "type": "number",
+                "description": "DAP proxy port on the target agent (default: 4841)",
+                "default": 4841
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Stop on the first statement",
+                "default": true
+              }
+            }
           }
         },
         "initialConfigurations": [
@@ -115,6 +135,18 @@
               "request": "launch",
               "name": "Debug ${1:program}",
               "program": "^\"\\${file}\"",
+              "stopOnEntry": true
+            }
+          },
+          {
+            "label": "ST: Attach to Remote Target",
+            "description": "Debug a program on a remote target agent",
+            "body": {
+              "type": "st",
+              "request": "attach",
+              "name": "Debug on ${1:target}",
+              "host": "${2:192.168.1.50}",
+              "port": 4841,
               "stopOnEntry": true
             }
           }
@@ -150,6 +182,31 @@
         "title": "ST: Scan Cycle Info",
         "category": "Structured Text",
         "icon": "$(pulse)"
+      },
+      {
+        "command": "structured-text.targetInstall",
+        "title": "ST: Install PLC Runtime on Target",
+        "category": "Structured Text"
+      },
+      {
+        "command": "structured-text.targetUpload",
+        "title": "ST: Upload PLC Program to Target",
+        "category": "Structured Text"
+      },
+      {
+        "command": "structured-text.targetOnlineUpdate",
+        "title": "ST: Online Update PLC Program",
+        "category": "Structured Text"
+      },
+      {
+        "command": "structured-text.targetRun",
+        "title": "ST: Start PLC Program on Target",
+        "category": "Structured Text"
+      },
+      {
+        "command": "structured-text.targetStop",
+        "title": "ST: Stop PLC Program on Target",
+        "category": "Structured Text"
       }
     ],
     "menus": {
@@ -191,7 +248,10 @@
     "test": "node ./out/test/runTest.js",
     "test:unit": "node ./test/monitor-tree.test.js",
     "test:ui": "cd test/ui && npx playwright test",
-    "test:ui:headed": "cd test/ui && npx playwright test --headed"
+    "test:ui:headed": "cd test/ui && npx playwright test --headed",
+    "test:remote": "ST_E2E_REMOTE=1 node ./out/test/runRemoteTest.js",
+    "test:remote:headed": "ST_E2E_REMOTE=1 ST_HEADED=1 node ./out/test/runRemoteTest.js",
+    "test:remote:qemu": "ST_E2E_REMOTE=qemu node ./out/test/runRemoteTest.js"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"

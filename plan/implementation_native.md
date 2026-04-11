@@ -2,6 +2,7 @@
 
 > **Parent plan:** [implementation.md](implementation.md) — core platform, Phases 0-12.
 > **See also:** [implementation_comm.md](implementation_comm.md) — communication layer (Phase 13).
+> **See also:** [implementation_deploy.md](implementation_deploy.md) — remote deployment (Phase 15).
 
 ## Phase 14 (Future): Native Compilation & Hardware Target Platform System
 

@@ -3,6 +3,7 @@
 > **Progress tracker:** [implementation.md](implementation.md) — checklist and status.
 > **See also:** [design_comm.md](design_comm.md) — communication layer design.
 > **See also:** [implementation_native.md](implementation_native.md) — LLVM native compilation + hardware targets.
+> **See also:** [design_deploy.md](design_deploy.md) — remote deployment & online management.
 
 ## Project Overview
 
@@ -32,6 +33,7 @@ Phase 11 (CLI) — can start after Phase 7, grows with each phase
 Phase 12 (OOP) — after Phase 7
 Communication layer — after Phase 7, see design_comm.md
 Native compilation — after Phase 6, see implementation_native.md
+Remote deployment — after Phase 8+9+10+11, see design_deploy.md
 ```
 
 ### Phase Summary
@@ -51,6 +53,9 @@ Native compilation — after Phase 6, see implementation_native.md
 | **10** | WebSocket monitor server + VSCode panel |
 | **11** | CLI tool (check, run, serve, debug, compile, fmt, --json) |
 | **12** | IEC 61131-3 OOP extensions (CLASS, METHOD, INTERFACE, PROPERTY) |
+| **13** | Communication layer (device profiles, simulated + real I/O) — [design_comm.md](design_comm.md) |
+| **14** | Native compilation + hardware targets (LLVM, ESP32, STM32, RPi) — [implementation_native.md](implementation_native.md) |
+| **15** | Remote deployment & online management (agent, SSH, remote debug/monitor) — [design_deploy.md](design_deploy.md) |
 
 ---
 

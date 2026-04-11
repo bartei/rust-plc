@@ -1,7 +1,7 @@
 mod comm_setup;
 
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 
 /// Parse source with the standard library included.
@@ -34,6 +34,8 @@ fn print_usage() {
     eprintln!("  run [path] [-n N] Compile and execute (N cycles, default 1)");
     eprintln!("  compile <path> -o <output>  Compile to bytecode file");
     eprintln!("  fmt [path]        Format source file(s) in place");
+    eprintln!("  bundle [path]     Create a .st-bundle for deployment");
+    eprintln!("  target list [path]  List configured deployment targets");
     eprintln!("  comm-gen [path]   Regenerate _io_map.st from plc-project.yaml + profiles");
     eprintln!("  debug <file>      Start DAP debug server (stdin/stdout)");
     eprintln!("  help              Show this help message");
@@ -81,6 +83,12 @@ fn main() {
         }
         "fmt" => {
             run_fmt_cmd(&args);
+        }
+        "bundle" => {
+            run_bundle_cmd(&args);
+        }
+        "target" => {
+            run_target_cmd(&args);
         }
         "comm-gen" => {
             let target = args.get(2).map(|s| s.as_str()).map(Path::new);
@@ -642,6 +650,351 @@ fn resolve_project_root(target: Option<&Path>) -> std::path::PathBuf {
         }
     }
     cur
+}
+
+fn run_bundle_cmd(args: &[String]) {
+    let mut path_arg: Option<&str> = None;
+    let mut output: Option<&str> = None;
+    let mut mode = st_deploy::BundleMode::Development;
+    let mut inspect_path: Option<&str> = None;
+
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "inspect" if i == 2 => {
+                inspect_path = args.get(3).map(|s| s.as_str());
+                break;
+            }
+            "--release" => mode = st_deploy::BundleMode::Release,
+            "--release-debug" => mode = st_deploy::BundleMode::ReleaseDebug,
+            "-o" | "--output" if i + 1 < args.len() => {
+                output = Some(&args[i + 1]);
+                i += 1;
+            }
+            _ if path_arg.is_none() => path_arg = Some(&args[i]),
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // Handle `bundle inspect <path>`
+    if let Some(bundle_path) = inspect_path {
+        match st_deploy::bundle::inspect_bundle(Path::new(bundle_path)) {
+            Ok(info) => {
+                eprintln!("Bundle: {bundle_path}");
+                eprintln!("  Name:     {}", info.manifest.name);
+                eprintln!("  Version:  {}", info.manifest.version);
+                eprintln!("  Mode:     {}", info.manifest.mode);
+                eprintln!("  Compiled: {}", info.manifest.compiled_at);
+                eprintln!("  Compiler: {}", info.manifest.compiler_version);
+                if let Some(ref ep) = info.manifest.entry_point {
+                    eprintln!("  Entry:    {ep}");
+                }
+                eprintln!("  Checksum: {} ({})",
+                    &info.manifest.bytecode_checksum[..16],
+                    if info.checksum_valid { "valid" } else { "INVALID" },
+                );
+                eprintln!("  Size:     {} bytes", info.archive_size);
+                eprintln!();
+                eprintln!("Files:");
+                for (path, size) in &info.files {
+                    eprintln!("  {:>8}  {path}", format_size(*size));
+                }
+            }
+            Err(e) => {
+                eprintln!("Error inspecting bundle: {e}");
+                process::exit(1);
+            }
+        }
+        return;
+    }
+
+    // Ensure no `inspect` without path
+    if args.get(2).map(|s| s.as_str()) == Some("inspect") {
+        eprintln!("Usage: st-cli bundle inspect <bundle-path>");
+        process::exit(1);
+    }
+
+    // Build bundle
+    let target = path_arg.map(Path::new);
+    let root = resolve_project_root(target);
+
+    // Regenerate I/O map before bundling
+    if let Err(e) = comm_setup::load_for_project(&root) {
+        eprintln!("Comm config error: {e}");
+        process::exit(1);
+    }
+
+    let options = st_deploy::bundle::BundleOptions {
+        mode,
+        output: output.map(PathBuf::from),
+    };
+
+    eprintln!("Compiling project in {}...", root.display());
+    let bundle = match st_deploy::bundle::create_bundle(&root, &options) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("Bundle error: {e}");
+            process::exit(1);
+        }
+    };
+
+    let out_path = options.output.unwrap_or_else(|| {
+        root.join(format!("{}.st-bundle", bundle.manifest.name))
+    });
+
+    match st_deploy::bundle::write_bundle(&bundle, &out_path) {
+        Ok(size) => {
+            eprintln!(
+                "Created {} ({}, {}, {} bytes)",
+                out_path.display(),
+                bundle.manifest.mode,
+                bundle.manifest.version,
+                size,
+            );
+        }
+        Err(e) => {
+            eprintln!("Error writing bundle: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+fn run_target_cmd(args: &[String]) {
+    let subcmd = args.get(2).map(|s| s.as_str()).unwrap_or("help");
+
+    match subcmd {
+        "list" => {
+            let path_arg = args.get(3).map(|s| s.as_str()).map(Path::new);
+            let root = resolve_project_root(path_arg);
+            let yaml_path = root.join("plc-project.yaml");
+            let yml_path = root.join("plc-project.yml");
+
+            let yaml_file = if yaml_path.exists() {
+                yaml_path
+            } else if yml_path.exists() {
+                yml_path
+            } else {
+                eprintln!("No plc-project.yaml found in {}", root.display());
+                process::exit(1);
+            };
+
+            let yaml_text = match std::fs::read_to_string(&yaml_file) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Cannot read {}: {e}", yaml_file.display());
+                    process::exit(1);
+                }
+            };
+
+            match st_deploy::TargetConfig::from_project_yaml(&yaml_text) {
+                Ok(config) => {
+                    if config.targets.is_empty() {
+                        eprintln!("No targets configured in {}", yaml_file.display());
+                        return;
+                    }
+                    eprintln!("Deployment targets ({}):", yaml_file.display());
+                    for t in &config.targets {
+                        let default_marker = if config.default_target.as_deref() == Some(&t.name) {
+                            " (default)"
+                        } else {
+                            ""
+                        };
+                        eprintln!(
+                            "  {:<20} {}@{}:{} ({}/{}){default_marker}",
+                            t.name, t.user, t.host, t.agent_port, t.os, t.arch,
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error parsing targets: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+        "install" => {
+            run_target_install(&args[3..]);
+        }
+        "uninstall" => {
+            run_target_uninstall(&args[3..]);
+        }
+        _ => {
+            eprintln!("Usage: st-cli target <subcommand>");
+            eprintln!();
+            eprintln!("Subcommands:");
+            eprintln!("  list [path]       List configured deployment targets");
+            eprintln!("  install user@host Install PLC runtime on a target device");
+            eprintln!("  uninstall user@host Remove PLC runtime from a target");
+            process::exit(if subcmd == "help" { 0 } else { 1 });
+        }
+    }
+}
+
+fn run_target_install(args: &[String]) {
+    if args.is_empty() {
+        eprintln!("Usage: st-cli target install user@host [options]");
+        eprintln!();
+        eprintln!("Options:");
+        eprintln!("  --key <path>        SSH private key");
+        eprintln!("  --port <port>       SSH port (default: 22)");
+        eprintln!("  --agent-port <port> Agent HTTP port (default: 4840)");
+        eprintln!("  --name <name>       Agent name");
+        eprintln!("  --upgrade           Upgrade existing installation");
+        process::exit(1);
+    }
+
+    let user_at_host = &args[0];
+    let mut target = match st_deploy::SshTarget::parse(user_at_host) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    };
+
+    let mut options = st_deploy::InstallOptions::default();
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--key" if i + 1 < args.len() => {
+                target = target.with_key(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--port" if i + 1 < args.len() => {
+                target = target.with_port(args[i + 1].parse().unwrap_or(22));
+                i += 2;
+            }
+            "--agent-port" if i + 1 < args.len() => {
+                options.agent_port = args[i + 1].parse().unwrap_or(4840);
+                i += 2;
+            }
+            "--name" if i + 1 < args.len() => {
+                options.agent_name = args[i + 1].clone();
+                i += 2;
+            }
+            "--upgrade" => {
+                options.upgrade = true;
+                i += 1;
+            }
+            other => {
+                eprintln!("Unknown option: {other}");
+                process::exit(1);
+            }
+        }
+    }
+
+    // Find the static binary for the target architecture
+    // First detect the target's arch, then find the binary
+    eprintln!("Connecting to {}@{}...", target.user, target.host);
+
+    // Test connection first to get a good error before detecting platform
+    if let Err(e) = target.test_connection() {
+        eprintln!("Error: {e}");
+        process::exit(1);
+    }
+
+    let (_os, arch) = match target.detect_platform() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Error detecting target platform: {e}");
+            process::exit(1);
+        }
+    };
+
+    let binary_path = match st_deploy::installer::find_static_binary(&arch) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    };
+
+    eprintln!("  Binary: {} ({})", binary_path.display(), arch);
+
+    let mut progress = |msg: &str| eprintln!("  {msg}");
+
+    match st_deploy::installer::install(&target, &binary_path, &options, &mut progress) {
+        Ok(result) => {
+            eprintln!();
+            eprintln!("Target {}@{} is ready.", target.user, target.host);
+            eprintln!("  OS:     {} {}", result.os, result.arch);
+            eprintln!("  Agent:  port {}", result.agent_port);
+            eprintln!("  DAP:    port {}", result.dap_port);
+            eprintln!("  Version: {}", result.version);
+            eprintln!();
+            eprintln!("Add to your plc-project.yaml:");
+            eprintln!("  targets:");
+            eprintln!("    - name: my-plc");
+            eprintln!("      host: {}", target.host);
+            eprintln!("      user: {}", target.user);
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+fn run_target_uninstall(args: &[String]) {
+    if args.is_empty() {
+        eprintln!("Usage: st-cli target uninstall user@host [--purge]");
+        process::exit(1);
+    }
+
+    let user_at_host = &args[0];
+    let mut target = match st_deploy::SshTarget::parse(user_at_host) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    };
+
+    let mut purge = false;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--purge" => {
+                purge = true;
+                i += 1;
+            }
+            "--key" if i + 1 < args.len() => {
+                target = target.with_key(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--port" if i + 1 < args.len() => {
+                target = target.with_port(args[i + 1].parse().unwrap_or(22));
+                i += 2;
+            }
+            other => {
+                eprintln!("Unknown option: {other}");
+                process::exit(1);
+            }
+        }
+    }
+
+    let mut progress = |msg: &str| eprintln!("  {msg}");
+
+    match st_deploy::installer::uninstall(&target, purge, &mut progress) {
+        Ok(()) => {
+            eprintln!("PLC runtime uninstalled from {}@{}", target.user, target.host);
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
 }
 
 fn byte_offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {

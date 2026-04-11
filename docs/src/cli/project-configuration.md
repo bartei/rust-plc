@@ -35,6 +35,8 @@ The full set of top-level keys is documented in
 | `engine`      | object  | Scan cycle engine settings — see below.                                |
 | `links`       | array   | Communication links (TCP, serial, simulated).                          |
 | `devices`     | array   | Communication devices on those links.                                  |
+| `targets`     | array   | Deployment targets — see [Target Management](../deployment/targets.md).|
+| `default_target` | string | Default target for `--target` flag when omitted.                    |
 
 ## Scan cycle: `engine.cycle_time`
 

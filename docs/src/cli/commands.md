@@ -300,6 +300,48 @@ This is typically invoked by the VSCode extension when you press F5, not called 
   (sleeps in interruptible 10ms chunks between cycles)
 - 4 VSCode debug toolbar buttons: Force, Unforce, List Forced, Cycle Info
 
+## `st-cli bundle`
+
+Create a `.st-bundle` archive for deployment to remote targets. See [Bundle Modes & IP Protection](../deployment/bundles.md) for details.
+
+```bash
+st-cli bundle [path] [--release | --release-debug] [-o <output>]
+```
+
+## `st-cli bundle inspect`
+
+Show metadata and file listing of a bundle.
+
+```bash
+st-cli bundle inspect <bundle-path>
+```
+
+## `st-cli target list`
+
+Show deployment targets configured in `plc-project.yaml`.
+
+```bash
+st-cli target list [path]
+```
+
+## `st-cli target install`
+
+Install the PLC runtime on a remote Linux target. See [Target Management](../deployment/targets.md) for the full reference.
+
+```bash
+st-cli target install user@host [--key <path>] [--port <n>] [--upgrade]
+```
+
+## `st-cli target uninstall`
+
+Remove the PLC runtime from a remote target.
+
+```bash
+st-cli target uninstall user@host [--purge]
+```
+
+> For detailed deployment command documentation, see [Deployment Commands](../deployment/commands.md).
+
 ## `st-cli help`
 
 Show usage information.
@@ -316,15 +358,11 @@ Commands:
   run [path] [-n N] Compile and execute (N cycles, default 1)
   compile <path> -o <output>  Compile to bytecode file
   fmt [path]        Format source file(s) in place
+  bundle [path]     Create a .st-bundle for deployment
+  target list       List configured deployment targets
+  target install    Install PLC runtime on a target device
+  target uninstall  Remove PLC runtime from a target
+  comm-gen [path]   Regenerate _io_map.st from plc-project.yaml
   debug <file>      Start DAP debug server (stdin/stdout)
   help              Show this help message
-
-Flags:
-  --json            Output diagnostics as JSON (for CI integration)
-
-Path modes:
-  (no path)         Use current directory as project root
-  file.st           Single file mode
-  directory/        Project mode (autodiscover .st files)
-  plc-project.yaml  Explicit project file
 ```

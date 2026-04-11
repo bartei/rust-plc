@@ -1,0 +1,38 @@
+[package]
+name = "st-target-agent"
+description = "PLC runtime agent for remote deployment, lifecycle management, and monitoring"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "st-target-agent"
+path = "src/main.rs"
+
+[dependencies]
+st-ir.workspace = true
+st-runtime = { path = "../st-runtime" }
+st-deploy = { path = "../st-deploy" }
+st-comm-api = { path = "../st-comm-api" }
+
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+
+axum = { version = "0.8", features = ["multipart"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+tempfile = "3"
+st-syntax = { path = "../st-syntax" }
+st-semantics = { path = "../st-semantics" }
+st-compiler = { path = "../st-compiler" }
