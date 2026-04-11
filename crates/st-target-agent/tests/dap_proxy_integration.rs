@@ -122,6 +122,7 @@ fn send_dap_request(stream: &mut TcpStream, seq: i64, command: &str, args: serde
     stream.flush().unwrap();
 }
 
+#[allow(dead_code)]
 fn read_dap_message(reader: &mut BufReader<&TcpStream>) -> serde_json::Value {
     // Read Content-Length header
     let mut content_length: usize = 0;

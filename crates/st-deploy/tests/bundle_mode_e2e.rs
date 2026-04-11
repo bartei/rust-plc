@@ -13,7 +13,7 @@ use st_deploy::bundle::{
 };
 use st_deploy::debug_info::DebugMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Variable names that appear in the ST source — used to verify stripping.
 const PROPRIETARY_NAMES: &[&str] = &[
@@ -66,7 +66,7 @@ fn create_ip_test_project() -> (tempfile::TempDir, PathBuf) {
 }
 
 /// Create a bundle, write to disk, extract — simulating the full sender→receiver path.
-fn bundle_roundtrip(root: &PathBuf, mode: BundleMode) -> (st_deploy::ProgramBundle, PathBuf) {
+fn bundle_roundtrip(root: &Path, mode: BundleMode) -> (st_deploy::ProgramBundle, PathBuf) {
     let options = BundleOptions {
         mode,
         ..Default::default()

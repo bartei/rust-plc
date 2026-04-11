@@ -80,7 +80,7 @@ async fn test_health_endpoint() {
 
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["healthy"], true);
-    assert!(body["version"].as_str().unwrap().len() > 0);
+    assert!(!body["version"].as_str().unwrap().is_empty());
 }
 
 #[tokio::test]

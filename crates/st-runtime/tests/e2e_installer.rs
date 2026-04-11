@@ -21,7 +21,7 @@
 //!
 //! Tests run sequentially (`--test-threads=1`) because they share the QEMU VM.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, Read, Write};
 #[allow(unused_imports)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -407,7 +407,7 @@ fn test_after_install_target_info() {
     let info: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(info["os"], "linux");
     assert_eq!(info["arch"], "x86_64");
-    assert!(info["agent_version"].as_str().unwrap().len() > 0);
+    assert!(!info["agent_version"].as_str().unwrap().is_empty());
 }
 
 #[test]

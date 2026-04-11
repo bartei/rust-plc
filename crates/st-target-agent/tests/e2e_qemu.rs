@@ -820,7 +820,7 @@ fn e2e_x86_64_remote_debug_ssh_tunnel() {
 
     // Create SSH tunnel: local:14841 → remote:4841 (DAP proxy)
     let tunnel_local_port = 14841u16;
-    let tunnel = Command::new("ssh")
+    let mut tunnel = Command::new("ssh")
         .args([
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
@@ -833,6 +833,8 @@ fn e2e_x86_64_remote_debug_ssh_tunnel() {
         ])
         .spawn()
         .expect("Failed to create SSH tunnel");
+    // The -f flag makes ssh fork into background and the parent exits quickly.
+    let _ = tunnel.wait();
 
     // Wait for tunnel to establish
     std::thread::sleep(Duration::from_secs(2));
@@ -870,7 +872,7 @@ fn e2e_x86_64_remote_debug_ssh_tunnel() {
         "threadId": 1, "startFrame": 0, "levels": 10
     }));
     let st = read_dap_until(&mut reader, |m| m["type"] == "response" && m["command"] == "stackTrace", 5000);
-    assert!(st["body"]["stackFrames"].as_array().unwrap().len() > 0, "Stack trace via SSH tunnel should work");
+    assert!(!st["body"]["stackFrames"].as_array().unwrap().is_empty(), "Stack trace via SSH tunnel should work");
 
     // Disconnect
     send_dap(&mut writer, 5, "disconnect", serde_json::json!({ "terminateDebuggee": true }));
