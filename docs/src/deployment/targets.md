@@ -115,8 +115,8 @@ targets:
   - name: test-bench
     host: 10.0.0.100
     user: admin
-    auth: password
-    os: windows
+    auth: agent       # Direct API connection (no SSH, requires TLS)
+    os: linux
 
 default_target: line1-plc
 ```
@@ -128,7 +128,7 @@ default_target: line1-plc
 | `name` | string | Yes | — | Unique identifier for `--target` flag |
 | `host` | string | Yes | — | Hostname or IP address |
 | `user` | string | No | `plc` | SSH username |
-| `auth` | string | No | `key` | Authentication: `key`, `password`, or `agent` |
+| `auth` | string | No | `key` | Authentication: `key` (SSH key) or `agent` (direct API) |
 | `os` | string | No | `linux` | Target OS |
 | `arch` | string | No | `x86_64` | CPU architecture |
 | `agent_port` | integer | No | 4840 | Agent HTTP API port |

@@ -9,11 +9,9 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthMode {
-    /// SSH key authentication (default). Uses the developer's SSH agent or key file.
+    /// SSH key authentication (default, required). Uses the developer's SSH agent or key file.
     #[default]
     Key,
-    /// SSH password authentication. Password is prompted at deploy time.
-    Password,
     /// Direct agent API connection (no SSH). Requires TLS + token auth on the agent.
     Agent,
 }
@@ -160,8 +158,8 @@ targets:
   - name: test-bench
     host: 10.0.0.100
     user: admin
-    auth: password
-    os: windows
+    auth: agent
+    os: linux
     arch: x86_64
 default_target: line1-plc
 "#;
@@ -181,8 +179,8 @@ default_target: line1-plc
 
         let t2 = &config.targets[1];
         assert_eq!(t2.name, "test-bench");
-        assert_eq!(t2.auth, AuthMode::Password);
-        assert_eq!(t2.os, "windows");
+        assert_eq!(t2.auth, AuthMode::Agent);
+        assert_eq!(t2.os, "linux");
     }
 
     #[test]

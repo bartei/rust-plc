@@ -573,7 +573,7 @@ targets:
   - name: test-bench
     host: 10.0.0.100
     user: admin
-    auth: password                # password auth (for Windows targets)
+    auth: agent                   # direct API (no SSH, requires TLS)
     os: windows
     arch: x86_64
     agent_port: 4840
@@ -583,10 +583,9 @@ default_target: line1-plc
 ```
 
 **Authentication modes:**
-- `key` — SSH key authentication (default, most secure). Uses the developer's SSH agent
-  or key file.
-- `password` — SSH password authentication. Password is prompted at deploy time (never
-  stored in YAML).
+- `key` — SSH key authentication (default, required). Uses the developer's SSH agent
+  or key file. Password authentication is intentionally not supported — SSH keys
+  are more secure, more convenient, and work with automation.
 - `agent` — direct agent API connection (no SSH). Requires TLS + token auth on the agent.
   Connection goes directly to `host:agent_port`.
 

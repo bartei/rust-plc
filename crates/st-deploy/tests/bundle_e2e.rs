@@ -355,8 +355,8 @@ targets:
   - name: test-bench
     host: 10.0.0.100
     user: admin
-    auth: password
-    os: windows
+    auth: agent
+    os: linux
 
 default_target: line1
 
@@ -380,8 +380,8 @@ links:
     assert_eq!(t2.arch, "aarch64");
 
     let tw = config.resolve_target(Some("test-bench")).unwrap();
-    assert_eq!(tw.os, "windows");
-    assert_eq!(tw.auth, st_deploy::target::AuthMode::Password);
+    assert_eq!(tw.os, "linux");
+    assert_eq!(tw.auth, st_deploy::target::AuthMode::Agent);
 }
 
 #[test]

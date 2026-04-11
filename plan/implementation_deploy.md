@@ -191,9 +191,8 @@ and the REST API.
 - [x] Key-based authentication (SSH agent, explicit key file)
 - [x] SCP file upload (binary, bundles)
 - [x] Connection timeout (30s) and error handling
-- [ ] Password authentication (interactive prompt) — *deferred*
-- [ ] SSH tunnel creation (`-L localport:localhost:remoteport`) — *deferred*
-- [ ] Tunnel lifecycle management — *deferred*
+- ~~Password authentication~~ — **removed**: insecure, SSH keys are mandatory
+- ~~SSH tunnel management in CLI~~ — **removed**: users manage tunnels themselves via `ssh -L` (documented in security guide). Respects the user's SSH config, jump hosts, and ProxyCommand.
 
 ### Agent bootstrap — superseded by `st-cli target install`
 
@@ -245,9 +244,8 @@ Enable remote debugging and monitoring through the agent.
 - [x] `StDebugAdapterFactory` returns `DebugAdapterServer(port, host)` for attach mode
 - [x] `package.json` updated with `attach` configuration attributes and snippet
 - [ ] Resolve target connection from `plc-project.yaml` — *deferred, uses explicit host/port*
-- [ ] Establish SSH tunnel if needed (key/password auth) — *deferred to Phase 15c*
 - [ ] `sourceFileMap` auto-configuration for path remapping
-- [ ] Tear down tunnel on session end
+- ~~SSH tunnel in extension~~ — **removed**: users manage tunnels themselves via `ssh -L`
 
 ### VS Code extension: remote monitor
 
