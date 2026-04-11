@@ -293,6 +293,11 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand("structured-text.openMonitor", () => {
       MonitorPanel.createOrShow(context.extensionUri);
+      // Push targets from plc-project.yaml into the panel dropdown.
+      if (MonitorPanel.currentPanel) {
+        const targets = getTargetsFromConfig();
+        MonitorPanel.currentPanel.setTargets(targets);
+      }
       // If we already cached a catalog from an earlier launch event, push
       // it into the panel immediately so the autocomplete is populated.
       if (MonitorPanel.currentPanel && plcVarCatalog.length > 0) {
@@ -368,8 +373,7 @@ export function activate(context: vscode.ExtensionContext) {
     }),
 
     vscode.commands.registerCommand("structured-text.targetUpload", async () => {
-      const targets = getTargetsFromConfig();
-      const host = await pickOrInputTarget(targets, "Upload PLC Program");
+      const host = await resolveActiveTarget("Upload PLC Program");
       if (!host) return;
       const terminal = vscode.window.createTerminal("PLC Upload");
       terminal.show();
@@ -377,8 +381,7 @@ export function activate(context: vscode.ExtensionContext) {
     }),
 
     vscode.commands.registerCommand("structured-text.targetOnlineUpdate", async () => {
-      const targets = getTargetsFromConfig();
-      const host = await pickOrInputTarget(targets, "Online Update");
+      const host = await resolveActiveTarget("Online Update");
       if (!host) return;
       // Build, stop, upload, start — with online change prompt if needed
       const terminal = vscode.window.createTerminal("PLC Online Update");
@@ -393,8 +396,7 @@ export function activate(context: vscode.ExtensionContext) {
     }),
 
     vscode.commands.registerCommand("structured-text.targetRun", async () => {
-      const targets = getTargetsFromConfig();
-      const host = await pickOrInputTarget(targets, "Start PLC Program");
+      const host = await resolveActiveTarget("Start PLC Program");
       if (!host) return;
       try {
         const resp = await fetch(`http://${host}:4840/api/v1/program/start`, { method: "POST" });
@@ -413,8 +415,7 @@ export function activate(context: vscode.ExtensionContext) {
     }),
 
     vscode.commands.registerCommand("structured-text.targetStop", async () => {
-      const targets = getTargetsFromConfig();
-      const host = await pickOrInputTarget(targets, "Stop PLC Program");
+      const host = await resolveActiveTarget("Stop PLC Program");
       if (!host) return;
       try {
         const resp = await fetch(`http://${host}:4840/api/v1/program/stop`, { method: "POST" });
@@ -515,6 +516,19 @@ function resolveTarget(targetName: string): { host: string; dapPort: number } | 
   const t = targets.find(t => t.name === targetName);
   if (!t) return undefined;
   return { host: t.host, dapPort: t.agentPort + 1 };
+}
+
+/**
+ * Resolve the active target: use the Monitor panel's dropdown selection if
+ * available, otherwise fall back to the quick-pick / input box flow.
+ */
+async function resolveActiveTarget(title: string): Promise<string | undefined> {
+  const { MonitorPanel } = require("./monitorPanel");
+  if (MonitorPanel.currentPanel?.selectedTargetHost) {
+    return MonitorPanel.currentPanel.selectedTargetHost;
+  }
+  const targets = getTargetsFromConfig();
+  return pickOrInputTarget(targets, title);
 }
 
 /**

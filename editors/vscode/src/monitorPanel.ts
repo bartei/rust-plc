@@ -165,6 +165,14 @@ export class MonitorPanel {
       case "tb:stop":
         vscode.commands.executeCommand("structured-text.targetStop");
         break;
+      case "tb:selectTarget":
+        if (msg.host) {
+          this.selectedTargetHost = msg.host;
+          this.selectedTargetPort = msg.agentPort || 4840;
+        } else {
+          this.selectedTargetHost = undefined;
+        }
+        break;
     }
   }
 
@@ -176,6 +184,18 @@ export class MonitorPanel {
       targetName: targetName || "",
     });
   }
+
+  /** Populate the target dropdown from plc-project.yaml targets. */
+  public setTargets(targets: Array<{ name: string; host: string; agentPort: number }>) {
+    this.panel.webview.postMessage({
+      command: "setTargets",
+      targets,
+    });
+  }
+
+  /** The currently selected target host (set by the webview dropdown). */
+  public selectedTargetHost: string | undefined;
+  public selectedTargetPort: number = 4840;
 
   /// Send a synthetic evaluate request to the active DAP session — used
   /// for force / unforce / addWatch / removeWatch / clearWatch.
@@ -444,6 +464,17 @@ export class MonitorPanel {
       gap: 6px;
       color: var(--vscode-descriptionForeground);
     }
+    #tb-target-select {
+      font-size: 11px;
+      font-family: var(--vscode-font-family);
+      background: var(--vscode-dropdown-background);
+      color: var(--vscode-dropdown-foreground);
+      border: 1px solid var(--vscode-dropdown-border);
+      border-radius: 2px;
+      padding: 2px 4px;
+      cursor: pointer;
+      max-width: 180px;
+    }
     .tb-status .tb-dot {
       display: inline-block;
       width: 8px;
@@ -484,7 +515,10 @@ export class MonitorPanel {
     </div>
     <div class="tb-status" id="tb-status">
       <span class="tb-dot offline" id="tb-dot"></span>
-      <span id="tb-status-text">No target</span>
+      <select id="tb-target-select" onchange="onTargetChange(this)" title="Select deployment target">
+        <option value="">-- No target --</option>
+      </select>
+      <span id="tb-status-text"></span>
     </div>
   </div>
 
@@ -924,6 +958,35 @@ export class MonitorPanel {
       vscode.postMessage({ command: "tb:stop" });
     }
 
+    /** Handle target dropdown change. */
+    function onTargetChange(select) {
+      const opt = select.options[select.selectedIndex];
+      const host = opt.dataset.host || "";
+      const port = parseInt(opt.dataset.port || "4840", 10);
+      vscode.postMessage({ command: "tb:selectTarget", host, agentPort: port });
+      // Reset status when switching targets
+      updateToolbarStatus("offline", host ? opt.textContent : "");
+    }
+
+    /** Populate the target dropdown from extension data. */
+    function populateTargets(targets) {
+      const select = document.getElementById("tb-target-select");
+      if (!select) return;
+      // Preserve current selection if possible
+      const current = select.value;
+      select.innerHTML = '<option value="">-- No target --</option>';
+      for (const t of targets) {
+        const opt = document.createElement("option");
+        opt.value = t.host;
+        opt.textContent = t.name + " (" + t.host + ":" + t.agentPort + ")";
+        opt.dataset.host = t.host;
+        opt.dataset.port = String(t.agentPort);
+        select.appendChild(opt);
+      }
+      // Restore selection
+      if (current) { select.value = current; }
+    }
+
     /** Update the status indicator in the toolbar. */
     function updateToolbarStatus(status, targetName) {
       const dot = document.getElementById("tb-dot");
@@ -1045,6 +1108,8 @@ export class MonitorPanel {
         renderWatchTable();
       } else if (msg.command === "updateTargetStatus") {
         updateToolbarStatus(msg.status, msg.targetName);
+      } else if (msg.command === "setTargets") {
+        populateTargets(msg.targets || []);
       }
     });
 
