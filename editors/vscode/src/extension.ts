@@ -267,8 +267,10 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.debug.registerDebugAdapterDescriptorFactory("st", debugAdapterFactory)
   );
 
-  // Dynamic debug configurations from plc-project.yaml targets — appear
-  // in the debug dropdown without needing a launch.json.
+  // Dynamic debug configuration provider:
+  // - provideDebugConfigurations: populates launch.json when created
+  // - resolveDebugConfiguration: intercepts F5 with no launch.json and
+  //   shows a quick-pick (local file vs remote targets)
   context.subscriptions.push(
     vscode.debug.registerDebugConfigurationProvider("st", {
       provideDebugConfigurations(): vscode.DebugConfiguration[] {
@@ -291,6 +293,52 @@ export function activate(context: vscode.ExtensionContext) {
           });
         }
         return configs;
+      },
+      async resolveDebugConfiguration(
+        _folder,
+        config
+      ): Promise<vscode.DebugConfiguration | undefined> {
+        // If the user already has a full config (from launch.json), pass through
+        if (config.request) {
+          return config;
+        }
+        // No launch.json or empty config — show a quick-pick
+        const targets = getTargetsFromConfig();
+        const items: Array<{ label: string; description: string; config: vscode.DebugConfiguration }> = [
+          {
+            label: "$(file) Debug Current File",
+            description: "Launch locally",
+            config: {
+              type: "st",
+              request: "launch",
+              name: "Debug Current File",
+              program: "${file}",
+              stopOnEntry: true,
+            },
+          },
+        ];
+        for (const t of targets) {
+          items.push({
+            label: `$(remote) ${t.name}`,
+            description: `${t.host}:${t.agentPort + 1}`,
+            config: {
+              type: "st",
+              request: "attach",
+              name: `Debug on ${t.name}`,
+              target: t.name,
+              stopOnEntry: true,
+            },
+          });
+        }
+        if (items.length === 1) {
+          // No targets configured — just launch locally
+          return items[0].config;
+        }
+        const pick = await vscode.window.showQuickPick(items, {
+          placeHolder: "Select debug target",
+          title: "Debug Structured Text",
+        });
+        return pick?.config;
       },
     })
   );
