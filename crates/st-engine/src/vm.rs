@@ -247,8 +247,35 @@ impl Vm {
                 self.globals[slot as usize] = narrowed;
             }
         } else {
-            // Not a global — fall back to the name-keyed map only.
-            self.forced_variables.insert(name.to_uppercase(), value);
+            // Store in the forced map. If it's a PROGRAM local (e.g.
+            // "Main.counter"), also write to retained_locals immediately
+            // so the value takes effect on the very next cycle.
+            let upper = name.to_uppercase();
+            self.forced_variables.insert(upper.clone(), value.clone());
+
+            // Try to find the PROGRAM local by dotted name
+            if let Some(dot) = name.find('.') {
+                let prog_name = &name[..dot];
+                let local_name = &name[dot + 1..];
+                for (func_idx, func) in self.module.functions.iter().enumerate() {
+                    if func.kind != st_ir::PouKind::Program {
+                        continue;
+                    }
+                    if !func.name.eq_ignore_ascii_case(prog_name) {
+                        continue;
+                    }
+                    let fi = func_idx as u16;
+                    if let Some(locals) = self.retained_locals.get_mut(&fi) {
+                        for (i, slot) in func.locals.slots.iter().enumerate() {
+                            if slot.name.eq_ignore_ascii_case(local_name) && i < locals.len() {
+                                locals[i] = narrow_value(value, slot.int_width);
+                                return;
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
         }
     }
 
@@ -265,6 +292,31 @@ impl Vm {
     /// Get all currently forced variables.
     pub fn forced_variables(&self) -> &std::collections::HashMap<String, Value> {
         &self.forced_variables
+    }
+
+    /// Apply forced values to retained PROGRAM locals. Called by the engine
+    /// after each scan cycle so that forced PROGRAM-local variables take
+    /// effect on the next cycle start (the forced value is loaded from
+    /// `retained_locals` into the call frame). Globals are enforced
+    /// separately via `forced_global_slots` in `set_global_by_slot`.
+    pub fn enforce_retained_locals(&mut self) {
+        if self.forced_variables.is_empty() {
+            return;
+        }
+        for (func_idx, locals) in &mut self.retained_locals {
+            let func = &self.module.functions[*func_idx as usize];
+            if func.kind != st_ir::PouKind::Program {
+                continue;
+            }
+            for (i, slot) in func.locals.slots.iter().enumerate() {
+                let full_name = format!("{}.{}", func.name, slot.name).to_uppercase();
+                if let Some(forced_value) = self.forced_variables.get(&full_name) {
+                    if i < locals.len() {
+                        locals[i] = narrow_value(forced_value.clone(), slot.int_width);
+                    }
+                }
+            }
+        }
     }
 
     /// Set the cumulative elapsed time (called by engine before each scan cycle).

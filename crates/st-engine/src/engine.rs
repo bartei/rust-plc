@@ -238,6 +238,10 @@ impl Engine {
             // 2. Execute the user's program
             self.vm.scan_cycle(&self.program_name)?;
 
+            // 2b. Apply forced values to PROGRAM locals (retained_locals).
+            // Globals are enforced via forced_global_slots in set_global_by_slot.
+            self.vm.enforce_retained_locals();
+
             // 3. Write VM globals out to device outputs
             self.comm.write_outputs(&self.vm);
         }
@@ -294,6 +298,15 @@ impl Engine {
     /// Get the current cycle statistics.
     pub fn stats(&self) -> &CycleStats {
         &self.stats
+    }
+
+    /// Reset min/max/jitter stats (keeps cycle_count and totals).
+    pub fn reset_stats(&mut self) {
+        self.stats.min_cycle_time = Duration::MAX;
+        self.stats.max_cycle_time = Duration::ZERO;
+        self.stats.min_cycle_period = Duration::MAX;
+        self.stats.max_cycle_period = Duration::ZERO;
+        self.stats.jitter_max = Duration::ZERO;
     }
 
     /// Get a reference to the VM for variable inspection.

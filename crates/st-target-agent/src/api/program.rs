@@ -65,12 +65,25 @@ pub async fn start(State(state): State<Arc<AppState>>) -> Result<Json<serde_json
         })?
     };
 
-    // Parse cycle_time from the bundle's project YAML if available
-    let cycle_time = state.config.runtime.watchdog_ms.map(|ms| {
-        std::time::Duration::from_millis(ms)
-    });
-    // Use a default 10ms cycle time if not configured
-    let cycle_time = cycle_time.or(Some(std::time::Duration::from_millis(10)));
+    // Parse cycle_time from the bundle's plc-project.yaml, default 10ms.
+    let cycle_time = {
+        let yaml_path = state.program_store.read().unwrap().project_yaml_path();
+        let from_project = std::fs::read_to_string(&yaml_path)
+            .ok()
+            .and_then(|yaml| {
+                let cfg =
+                    st_comm_api::config::EngineProjectConfig::from_project_yaml(&yaml).ok()?;
+                tracing::info!("cycle_time from plc-project.yaml: {:?}", cfg.cycle_time);
+                cfg.cycle_time
+            });
+        if from_project.is_none() {
+            tracing::info!(
+                "No cycle_time in plc-project.yaml (path={}), using default 10ms",
+                yaml_path.display()
+            );
+        }
+        Some(from_project.unwrap_or(std::time::Duration::from_millis(10)))
+    };
 
     state
         .runtime_manager

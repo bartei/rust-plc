@@ -3,7 +3,7 @@
 use crate::config::RuntimeConfig;
 use crate::error::ApiError;
 use crate::program_store::ProgramMetadata;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -28,6 +28,38 @@ pub struct CycleStatsSnapshot {
     pub min_cycle_time_us: u64,
     pub max_cycle_time_us: u64,
     pub avg_cycle_time_us: u64,
+    pub target_cycle_us: u64,
+    pub last_period_us: u64,
+    pub min_period_us: u64,
+    pub max_period_us: u64,
+    pub jitter_max_us: u64,
+}
+
+// ── Monitor types (HTTP variable monitoring) ────────────────────────
+
+/// A variable in the monitorable catalog (schema only, no values).
+#[derive(Debug, Clone, Serialize)]
+pub struct CatalogEntry {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: String,
+}
+
+/// A watched variable's current value.
+#[derive(Debug, Clone, Serialize)]
+pub struct VariableValue {
+    pub name: String,
+    pub value: String,
+    #[serde(rename = "type")]
+    pub ty: String,
+    pub forced: bool,
+}
+
+/// Body for POST /api/v1/variables/force.
+#[derive(Debug, Deserialize)]
+pub struct ForceRequest {
+    pub name: String,
+    pub value: String,
 }
 
 /// Shared runtime state visible to the HTTP API.
@@ -43,6 +75,14 @@ pub struct RuntimeState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
     pub restart_count: u32,
+
+    // ── Monitor snapshot (written by engine thread, read by WS/HTTP) ──
+    /// Variable catalog (names + types). Set once when the engine starts.
+    #[serde(skip)]
+    pub variable_catalog: Vec<CatalogEntry>,
+    /// ALL monitorable variable values. Updated every cycle.
+    #[serde(skip)]
+    pub all_variables: Vec<VariableValue>,
 }
 
 impl Default for RuntimeState {
@@ -54,6 +94,8 @@ impl Default for RuntimeState {
             error: None,
             started_at: None,
             restart_count: 0,
+            variable_catalog: Vec::new(),
+            all_variables: Vec::new(),
         }
     }
 }
@@ -72,6 +114,19 @@ pub enum RuntimeCommand {
     },
     /// Detach the debug session (resume normal cycling).
     DebugDetach,
+    /// Force a variable to a constant value (HTTP monitor API).
+    ForceVariable {
+        name: String,
+        value: String,
+        reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+    },
+    /// Remove a force override from a variable (HTTP monitor API).
+    UnforceVariable {
+        name: String,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    /// Reset cycle min/max/jitter statistics.
+    ResetStats,
 }
 
 pub struct StartParams {
@@ -85,6 +140,9 @@ pub struct StartParams {
 pub struct RuntimeManager {
     state: Arc<RwLock<RuntimeState>>,
     cmd_tx: tokio::sync::mpsc::Sender<RuntimeCommand>,
+    /// Broadcast channel — engine thread sends `()` after every cycle so
+    /// WebSocket clients wake up and push variable updates.
+    cycle_notify: tokio::sync::broadcast::Sender<()>,
     _config: RuntimeConfig,
 }
 
@@ -92,17 +150,20 @@ impl RuntimeManager {
     /// Create a new RuntimeManager and spawn the runtime thread.
     pub fn new(config: RuntimeConfig) -> Self {
         let state = Arc::new(RwLock::new(RuntimeState::default()));
+        let (cycle_notify, _) = tokio::sync::broadcast::channel(64);
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(16);
 
         let thread_state = Arc::clone(&state);
+        let thread_notify = cycle_notify.clone();
         std::thread::Builder::new()
             .name("plc-runtime".to_string())
-            .spawn(move || runtime_thread(thread_state, cmd_rx))
+            .spawn(move || runtime_thread(thread_state, thread_notify, cmd_rx))
             .expect("Failed to spawn runtime thread");
 
         RuntimeManager {
             state,
             cmd_tx,
+            cycle_notify,
             _config: config,
         }
     }
@@ -112,9 +173,53 @@ impl RuntimeManager {
         self.state.read().unwrap().clone()
     }
 
-    /// Get a reference to the shared state lock (for watchdog).
-    pub fn shared_state(&self) -> Arc<RwLock<RuntimeState>> {
-        Arc::clone(&self.state)
+    // ── Monitor API methods ─────────────────────────────────────────
+
+    /// Get the variable catalog (names + types). Empty if engine not running.
+    pub fn variable_catalog(&self) -> Vec<CatalogEntry> {
+        self.state.read().unwrap().variable_catalog.clone()
+    }
+
+    /// Get all current variable values. Used by HTTP GET /api/v1/variables.
+    pub fn all_variables(&self) -> Vec<VariableValue> {
+        self.state.read().unwrap().all_variables.clone()
+    }
+
+    /// Subscribe to cycle notifications (for WebSocket push tasks).
+    pub fn subscribe_cycles(&self) -> tokio::sync::broadcast::Receiver<()> {
+        self.cycle_notify.subscribe()
+    }
+
+    /// Reset cycle min/max/jitter statistics.
+    pub async fn reset_stats(&self) -> Result<(), ApiError> {
+        self.cmd_tx
+            .send(RuntimeCommand::ResetStats)
+            .await
+            .map_err(|_| ApiError::internal("Runtime thread not responding"))
+    }
+
+    /// Force a variable to a constant value. Returns the formatted result.
+    pub async fn force_variable(&self, name: String, value: String) -> Result<String, ApiError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .send(RuntimeCommand::ForceVariable { name, value, reply: tx })
+            .await
+            .map_err(|_| ApiError::internal("Runtime thread not responding"))?;
+        rx.await
+            .map_err(|_| ApiError::internal("Runtime thread dropped reply"))?
+            .map_err(ApiError::internal)
+    }
+
+    /// Remove a force override from a variable.
+    pub async fn unforce_variable(&self, name: String) -> Result<(), ApiError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .send(RuntimeCommand::UnforceVariable { name, reply: tx })
+            .await
+            .map_err(|_| ApiError::internal("Runtime thread not responding"))?;
+        rx.await
+            .map_err(|_| ApiError::internal("Runtime thread dropped reply"))?
+            .map_err(ApiError::internal)
     }
 
     /// Start the runtime with the given module.
@@ -203,24 +308,12 @@ impl RuntimeManager {
         Ok((cmd_tx, event_rx))
     }
 
-    /// Detach the debug session (resume normal cycling).
-    pub async fn debug_detach(&self) -> Result<(), ApiError> {
-        self.cmd_tx
-            .send(RuntimeCommand::DebugDetach)
-            .await
-            .map_err(|_| ApiError::internal("Runtime thread not responding"))?;
-        Ok(())
-    }
-
-    /// Get the command sender (for watchdog restart).
-    pub fn cmd_sender(&self) -> tokio::sync::mpsc::Sender<RuntimeCommand> {
-        self.cmd_tx.clone()
-    }
 }
 
 /// The runtime thread loop. Owns the Engine and executes scan cycles.
 fn runtime_thread(
     state: Arc<RwLock<RuntimeState>>,
+    cycle_notify: tokio::sync::broadcast::Sender<()>,
     mut cmd_rx: tokio::sync::mpsc::Receiver<RuntimeCommand>,
 ) {
     while let Some(cmd) = cmd_rx.blocking_recv() {
@@ -231,6 +324,11 @@ fn runtime_thread(
             }
             RuntimeCommand::Start(params) => {
                 let StartParams { module, program_name, cycle_time, program_meta } = *params;
+                tracing::info!(
+                    "Engine starting: program={}, cycle_time={:?}",
+                    program_name,
+                    cycle_time
+                );
                 // Update state to Starting
                 {
                     let mut s = state.write().unwrap();
@@ -257,14 +355,31 @@ fn runtime_thread(
                 let mut engine =
                     st_engine::Engine::new(module, program_name, engine_config);
 
-                // Set state to Running
+                // Populate variable catalog in shared state (set once).
                 {
+                    let catalog: Vec<CatalogEntry> = engine
+                        .vm()
+                        .monitorable_catalog()
+                        .into_iter()
+                        .map(|(name, ty)| CatalogEntry { name, ty })
+                        .collect();
+                    tracing::info!(
+                        "Engine catalog populated: {} monitorable variables",
+                        catalog.len()
+                    );
+                    if !catalog.is_empty() {
+                        let sample: Vec<&str> = catalog.iter().take(5).map(|c| c.name.as_str()).collect();
+                        tracing::debug!("Catalog sample: {sample:?}");
+                    }
                     let mut s = state.write().unwrap();
+                    s.variable_catalog = catalog;
                     s.status = RuntimeStatus::Running;
                 }
 
                 // Scan cycle loop
-                let run_result = run_cycle_loop(&mut engine, &state, &mut cmd_rx, cycle_time);
+                let run_result = run_cycle_loop(
+                    &mut engine, &state, &cycle_notify, &mut cmd_rx, cycle_time,
+                );
 
                 // Save retained variables before dropping the engine
                 if let Err(e) = engine.save_retain() {
@@ -274,6 +389,8 @@ fn runtime_thread(
                 // Update state based on result
                 {
                     let mut s = state.write().unwrap();
+                    s.variable_catalog.clear();
+                    s.all_variables.clear();
                     match run_result {
                         Ok(StopReason::Commanded) => {
                             s.status = RuntimeStatus::Idle;
@@ -292,6 +409,13 @@ fn runtime_thread(
             RuntimeCommand::DebugAttach { .. } | RuntimeCommand::DebugDetach => {
                 // Debug commands while idle — ignore (no engine to attach to)
             }
+            RuntimeCommand::ForceVariable { reply, .. } => {
+                let _ = reply.send(Err("Runtime is not running".to_string()));
+            }
+            RuntimeCommand::UnforceVariable { reply, .. } => {
+                let _ = reply.send(Err("Runtime is not running".to_string()));
+            }
+            RuntimeCommand::ResetStats => {} // Idle, nothing to reset
         }
     }
 }
@@ -323,17 +447,25 @@ enum DebugAction {
 fn run_cycle_loop(
     engine: &mut st_engine::Engine,
     state: &Arc<RwLock<RuntimeState>>,
+    cycle_notify: &tokio::sync::broadcast::Sender<()>,
     cmd_rx: &mut tokio::sync::mpsc::Receiver<RuntimeCommand>,
     cycle_time: Option<Duration>,
 ) -> Result<StopReason, String> {
     let mut debug_session: Option<DebugSession> = None;
+    let mut snapshot_cycle: u64 = 0;
+    let target_cycle_us = cycle_time.map(|d| d.as_micros() as u64).unwrap_or(0);
 
     loop {
         // Execute one scan cycle
         match engine.run_one_cycle() {
             Ok(cycle_elapsed) => {
-                // Normal cycle completed — update stats and sleep
-                update_cycle_stats(engine, state);
+                // Normal cycle completed — update stats + variable snapshot
+                update_cycle_stats(engine, state, target_cycle_us);
+                snapshot_all_variables(engine, state, &mut snapshot_cycle);
+                // Only broadcast when WS clients are listening
+                if cycle_notify.receiver_count() > 0 {
+                    let _ = cycle_notify.send(());
+                }
 
                 if let Some(target) = cycle_time {
                     if let Some(remaining) = target.checked_sub(cycle_elapsed) {
@@ -420,6 +552,23 @@ fn run_cycle_loop(
             Ok(RuntimeCommand::Start { .. }) => {
                 // Ignore start while already running
             }
+            Ok(RuntimeCommand::ForceVariable { name, value, reply }) => {
+                tracing::info!("Engine: force {name} = {value}");
+                let result = handle_force(engine, &name, &value);
+                if let Err(ref e) = result {
+                    tracing::warn!("Engine: force failed — {e}");
+                }
+                let _ = reply.send(result);
+            }
+            Ok(RuntimeCommand::UnforceVariable { name, reply }) => {
+                tracing::info!("Engine: unforce {name}");
+                engine.vm_mut().unforce_variable(&name);
+                let _ = reply.send(Ok(()));
+            }
+            Ok(RuntimeCommand::ResetStats) => {
+                tracing::info!("Engine: resetting cycle stats");
+                engine.reset_stats();
+            }
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                 return Ok(StopReason::Shutdown);
@@ -492,11 +641,19 @@ fn handle_debug_commands(
     let timeout = Duration::from_secs(30 * 60);
 
     loop {
-        // Check for runtime commands (Stop/Shutdown) between debug commands
+        // Check for runtime commands (Stop/Shutdown/Force) between debug commands
         match runtime_cmd_rx.try_recv() {
             Ok(RuntimeCommand::Stop) => return DebugAction::Stop,
             Ok(RuntimeCommand::Shutdown) => return DebugAction::Shutdown,
             Ok(RuntimeCommand::DebugDetach) => return DebugAction::Detach,
+            Ok(RuntimeCommand::ForceVariable { name, value, reply }) => {
+                let result = handle_force(engine, &name, &value);
+                let _ = reply.send(result);
+            }
+            Ok(RuntimeCommand::UnforceVariable { name, reply }) => {
+                engine.vm_mut().unforce_variable(&name);
+                let _ = reply.send(Ok(()));
+            }
             _ => {}
         }
 
@@ -618,7 +775,11 @@ fn evaluate_expression(engine: &st_engine::Engine, expr: &str) -> (String, Strin
 }
 
 /// Update shared cycle stats from the engine (factored out for readability).
-fn update_cycle_stats(engine: &st_engine::Engine, state: &Arc<RwLock<RuntimeState>>) {
+fn update_cycle_stats(
+    engine: &st_engine::Engine,
+    state: &Arc<RwLock<RuntimeState>>,
+    target_cycle_us: u64,
+) {
     let stats = engine.stats();
     let mut s = state.write().unwrap();
     s.cycle_stats = Some(CycleStatsSnapshot {
@@ -627,7 +788,97 @@ fn update_cycle_stats(engine: &st_engine::Engine, state: &Arc<RwLock<RuntimeStat
         min_cycle_time_us: stats.min_cycle_time.as_micros() as u64,
         max_cycle_time_us: stats.max_cycle_time.as_micros() as u64,
         avg_cycle_time_us: stats.avg_cycle_time().as_micros() as u64,
+        target_cycle_us,
+        last_period_us: stats.last_cycle_period.as_micros() as u64,
+        min_period_us: if stats.min_cycle_period == Duration::MAX {
+            0
+        } else {
+            stats.min_cycle_period.as_micros() as u64
+        },
+        max_period_us: stats.max_cycle_period.as_micros() as u64,
+        jitter_max_us: stats.jitter_max.as_micros() as u64,
     });
+}
+
+/// Snapshot ALL monitorable variable values from the engine into shared state.
+/// WebSocket clients filter this per their subscription sets.
+fn snapshot_all_variables(
+    engine: &st_engine::Engine,
+    state: &Arc<RwLock<RuntimeState>>,
+    cycle_count: &mut u64,
+) {
+    let forced = engine.vm().forced_variables();
+    let all_vars = engine.vm().monitorable_variables();
+
+    let snapshot: Vec<VariableValue> = all_vars
+        .into_iter()
+        .map(|v| {
+            let is_forced = forced.contains_key(&v.name.to_uppercase());
+            VariableValue {
+                name: v.name,
+                value: v.value,
+                ty: v.ty,
+                forced: is_forced,
+            }
+        })
+        .collect();
+
+    // Log once at startup, then every 10000 cycles
+    *cycle_count += 1;
+    if *cycle_count == 1 {
+        tracing::info!(
+            "First variable snapshot: {} variables",
+            snapshot.len()
+        );
+        if !snapshot.is_empty() {
+            let sample: Vec<String> = snapshot
+                .iter()
+                .take(5)
+                .map(|v| format!("{}={}", v.name, v.value))
+                .collect();
+            tracing::debug!("Snapshot sample: {sample:?}");
+        }
+    } else if *cycle_count % 10_000 == 0 {
+        tracing::debug!(
+            "Variable snapshot #{}: {} vars, {} forced",
+            cycle_count,
+            snapshot.len(),
+            forced.len()
+        );
+    }
+
+    state.write().unwrap().all_variables = snapshot;
+}
+
+/// Parse a value string and force a variable. Returns a description on success.
+fn handle_force(
+    engine: &mut st_engine::Engine,
+    name: &str,
+    value_str: &str,
+) -> Result<String, String> {
+    let value = parse_value_string(value_str);
+    engine.vm_mut().force_variable(name, value.clone());
+    Ok(format!(
+        "Forced {} = {}",
+        name,
+        st_engine::debug::format_value(&value)
+    ))
+}
+
+/// Parse a user-provided value string into a `Value`.
+/// Same logic as the DAP force handler: bool → int → float → string.
+fn parse_value_string(s: &str) -> st_ir::Value {
+    if s.eq_ignore_ascii_case("true") {
+        st_ir::Value::Bool(true)
+    } else if s.eq_ignore_ascii_case("false") {
+        st_ir::Value::Bool(false)
+    } else if let Ok(i) = s.parse::<i64>() {
+        st_ir::Value::Int(i)
+    } else if let Ok(f) = s.parse::<f64>() {
+        st_ir::Value::Real(f)
+    } else {
+        st_ir::Value::String(s.to_string())
+    }
 }
 
 #[cfg(test)]

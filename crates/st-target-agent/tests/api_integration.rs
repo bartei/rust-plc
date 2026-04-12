@@ -572,3 +572,910 @@ async fn test_log_level_without_handle() {
         .unwrap();
     assert_eq!(resp.status(), 500);
 }
+
+// ─── Variable Monitoring API ───────────────────────────────────────────
+
+/// A program with multiple variable types for richer monitoring tests.
+fn multi_var_program() -> Vec<u8> {
+    make_bundle(
+        "MonitorTest",
+        concat!(
+            "PROGRAM Main\n",
+            "VAR\n",
+            "    counter : INT := 0;\n",
+            "    flag : BOOL := FALSE;\n",
+            "    temperature : REAL := 21.5;\n",
+            "END_VAR\n",
+            "    counter := counter + 1;\n",
+            "    IF counter > 10 THEN flag := TRUE; END_IF;\n",
+            "END_PROGRAM\n",
+        ),
+    )
+}
+
+/// Helper: upload, start, and wait for the engine to be running.
+async fn upload_and_start(client: &Client, base: &str, bundle: &[u8]) {
+    upload_bundle(client, base, bundle).await;
+    client
+        .post(format!("{base}/api/v1/program/start"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+}
+
+#[tokio::test]
+async fn test_catalog_empty_when_idle() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/v1/variables/catalog"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let vars = body["variables"].as_array().unwrap();
+    assert!(vars.is_empty(), "Catalog should be empty when idle");
+}
+
+#[tokio::test]
+async fn test_catalog_populated_when_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &multi_var_program()).await;
+
+    let resp = client
+        .get(format!("{base}/api/v1/variables/catalog"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let vars = body["variables"].as_array().unwrap();
+    assert!(
+        vars.len() >= 3,
+        "Catalog should have at least 3 variables (counter, flag, temperature), got {}",
+        vars.len()
+    );
+
+    // Each entry should have name + type
+    let names: Vec<&str> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("Main.counter")),
+        "Catalog should contain Main.counter, got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("Main.flag")),
+        "Catalog should contain Main.flag, got: {names:?}"
+    );
+
+    // Verify type field is present
+    let counter_entry = vars
+        .iter()
+        .find(|v| {
+            v["name"]
+                .as_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case("Main.counter"))
+        })
+        .unwrap();
+    assert_eq!(counter_entry["type"], "INT");
+
+    // Cleanup
+    client
+        .post(format!("{base}/api/v1/program/stop"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_catalog_clears_after_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &simple_program()).await;
+
+    // Catalog populated while running
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/v1/variables/catalog"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!body["variables"].as_array().unwrap().is_empty());
+
+    // Stop
+    client
+        .post(format!("{base}/api/v1/program/stop"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Catalog should be empty again
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/v1/variables/catalog"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        body["variables"].as_array().unwrap().is_empty(),
+        "Catalog should clear after stop"
+    );
+}
+
+#[tokio::test]
+async fn test_watch_variables_returns_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &multi_var_program()).await;
+
+    // First poll sets the watch list — values may be empty on the very first
+    // call because the engine hasn't picked up the watch list yet.
+    client
+        .get(format!(
+            "{base}/api/v1/variables?watch=Main.counter,Main.flag"
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    // Wait for the engine to produce at least one snapshot.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Second poll should have values
+    let resp = client
+        .get(format!(
+            "{base}/api/v1/variables?watch=Main.counter,Main.flag"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let vars = body["variables"].as_array().unwrap();
+    assert_eq!(vars.len(), 2, "Should return exactly 2 watched variables");
+
+    // Check structure: each has name, value, type, forced
+    let counter = vars
+        .iter()
+        .find(|v| {
+            v["name"]
+                .as_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case("Main.counter"))
+        })
+        .expect("Should find Main.counter in watched values");
+    assert!(counter["value"].as_str().is_some());
+    assert_eq!(counter["type"], "INT");
+    assert_eq!(counter["forced"], false);
+
+    let flag = vars
+        .iter()
+        .find(|v| {
+            v["name"]
+                .as_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case("Main.flag"))
+        })
+        .expect("Should find Main.flag in watched values");
+    assert!(flag["value"].as_str().is_some());
+    assert_eq!(flag["type"], "BOOL");
+
+    // Cleanup
+    client
+        .post(format!("{base}/api/v1/program/stop"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_watch_empty_returns_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &simple_program()).await;
+
+    // Empty watch parameter → returns all variables
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/v1/variables?watch="))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let vars = body["variables"].as_array().unwrap();
+    assert!(
+        vars.len() >= 1,
+        "Empty watch should return all variables (got {})",
+        vars.len()
+    );
+
+    // No watch parameter at all → also returns all variables
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/v1/variables"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let vars = body["variables"].as_array().unwrap();
+    assert!(
+        vars.len() >= 1,
+        "No watch param should return all variables (got {})",
+        vars.len()
+    );
+
+    // Cleanup
+    client
+        .post(format!("{base}/api/v1/program/stop"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_force_variable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &multi_var_program()).await;
+
+    // Force counter to 999
+    let resp = client
+        .post(format!("{base}/api/v1/variables/force"))
+        .json(&serde_json::json!({ "name": "Main.counter", "value": "999" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let result = body["result"].as_str().unwrap();
+    assert!(
+        result.contains("999"),
+        "Force result should confirm value: {result}"
+    );
+
+    // Verify it takes effect: watch the variable and check forced flag
+    // Set watch list first
+    client
+        .get(format!("{base}/api/v1/variables?watch=Main.counter"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/v1/variables?watch=Main.counter"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let vars = body["variables"].as_array().unwrap();
+    assert_eq!(vars.len(), 1);
+    let counter = &vars[0];
+    assert_eq!(counter["value"], "999", "Forced value should be 999");
+    assert_eq!(counter["forced"], true, "Variable should be marked as forced");
+
+    // Cleanup
+    client
+        .post(format!("{base}/api/v1/program/stop"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_unforce_variable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &multi_var_program()).await;
+
+    // Force then unforce
+    client
+        .post(format!("{base}/api/v1/variables/force"))
+        .json(&serde_json::json!({ "name": "Main.counter", "value": "42" }))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .delete(format!("{base}/api/v1/variables/force/Main.counter"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["ok"], true);
+
+    // Verify the forced flag clears
+    client
+        .get(format!("{base}/api/v1/variables?watch=Main.counter"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/v1/variables?watch=Main.counter"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let vars = body["variables"].as_array().unwrap();
+    assert_eq!(vars.len(), 1);
+    assert_eq!(
+        vars[0]["forced"], false,
+        "Variable should no longer be forced after unforce"
+    );
+
+    // Cleanup
+    client
+        .post(format!("{base}/api/v1/program/stop"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_force_when_not_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/api/v1/variables/force"))
+        .json(&serde_json::json!({ "name": "x", "value": "1" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409, "Force should fail when not running");
+}
+
+#[tokio::test]
+async fn test_unforce_when_not_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    let resp = client
+        .delete(format!("{base}/api/v1/variables/force/x"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409, "Unforce should fail when not running");
+}
+
+#[tokio::test]
+async fn test_force_bool_variable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &multi_var_program()).await;
+
+    // Force boolean
+    let resp = client
+        .post(format!("{base}/api/v1/variables/force"))
+        .json(&serde_json::json!({ "name": "Main.flag", "value": "true" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let result = body["result"].as_str().unwrap();
+    assert!(
+        result.contains("TRUE"),
+        "Force result should confirm TRUE: {result}"
+    );
+
+    // Cleanup
+    client
+        .post(format!("{base}/api/v1/program/stop"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_watch_nonexistent_variable_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &simple_program()).await;
+
+    // Watch a variable that doesn't exist
+    client
+        .get(format!(
+            "{base}/api/v1/variables?watch=Main.nonexistent"
+        ))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let body: serde_json::Value = client
+        .get(format!(
+            "{base}/api/v1/variables?watch=Main.nonexistent"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let vars = body["variables"].as_array().unwrap();
+    assert!(
+        vars.is_empty(),
+        "Nonexistent variable should not appear in results"
+    );
+
+    // Cleanup
+    client
+        .post(format!("{base}/api/v1/program/stop"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_monitor_full_lifecycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    // 1. Catalog empty when idle
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/v1/variables/catalog"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(body["variables"].as_array().unwrap().is_empty());
+
+    // 2. Upload and start
+    upload_and_start(&client, &base, &multi_var_program()).await;
+
+    // 3. Catalog populated
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/v1/variables/catalog"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let catalog = body["variables"].as_array().unwrap();
+    assert!(catalog.len() >= 3);
+
+    // 4. Set watch and poll
+    client
+        .get(format!(
+            "{base}/api/v1/variables?watch=Main.counter,Main.flag,Main.temperature"
+        ))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let body: serde_json::Value = client
+        .get(format!(
+            "{base}/api/v1/variables?watch=Main.counter,Main.flag,Main.temperature"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let vars = body["variables"].as_array().unwrap();
+    assert_eq!(vars.len(), 3, "Should return all 3 watched variables");
+
+    // 5. Force a variable
+    let resp = client
+        .post(format!("{base}/api/v1/variables/force"))
+        .json(&serde_json::json!({ "name": "Main.counter", "value": "42" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // 6. Verify force took effect
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/v1/variables?watch=Main.counter"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let counter = &body["variables"].as_array().unwrap()[0];
+    assert_eq!(counter["value"], "42");
+    assert_eq!(counter["forced"], true);
+
+    // 7. Unforce
+    client
+        .delete(format!("{base}/api/v1/variables/force/Main.counter"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/v1/variables?watch=Main.counter"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let counter = &body["variables"].as_array().unwrap()[0];
+    assert_eq!(counter["forced"], false);
+    // Counter should be advancing again (not stuck at 42)
+    let val: i64 = counter["value"].as_str().unwrap().parse().unwrap();
+    assert!(val > 0, "Counter should be advancing after unforce");
+
+    // 8. Stop — catalog clears
+    client
+        .post(format!("{base}/api/v1/program/stop"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/v1/variables/catalog"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(body["variables"].as_array().unwrap().is_empty());
+}
+
+// ─── WebSocket Monitor ─────────────────────────────────────────────────
+
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite;
+
+/// Connect a WebSocket client to the agent's monitor endpoint.
+async fn ws_connect(
+    base: &str,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+{
+    let ws_url = base.replace("http://", "ws://") + "/api/v1/monitor/ws";
+    let (ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    ws
+}
+
+/// Send a JSON request and wait for the next non-push response.
+/// Pushed variableUpdate messages are silently skipped.
+async fn ws_request(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    request: serde_json::Value,
+) -> serde_json::Value {
+    ws.send(tungstenite::Message::Text(
+        serde_json::to_string(&request).unwrap(),
+    ))
+    .await
+    .unwrap();
+    // Read messages until we get a non-push response
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("WebSocket response timeout")
+            .expect("WebSocket closed")
+            .expect("WebSocket error");
+        if let tungstenite::Message::Text(text) = msg {
+            let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+            // Skip pushed variableUpdate messages (they're interleaved)
+            if val.get("type").and_then(|t| t.as_str()) == Some("variableUpdate") {
+                continue;
+            }
+            return val;
+        }
+    }
+}
+
+/// Receive the next pushed message (with timeout).
+async fn ws_recv(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> serde_json::Value {
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("WebSocket push timeout")
+            .expect("WebSocket closed")
+            .expect("WebSocket error");
+        if let tungstenite::Message::Text(text) = msg {
+            return serde_json::from_str(&text).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_ws_get_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &multi_var_program()).await;
+
+    let mut ws = ws_connect(&base).await;
+    let resp = ws_request(
+        &mut ws,
+        serde_json::json!({ "method": "getCatalog" }),
+    )
+    .await;
+
+    assert_eq!(resp["type"], "catalog");
+    let vars = resp["variables"].as_array().unwrap();
+    assert!(
+        vars.len() >= 3,
+        "Catalog should have >= 3 variables, got {}",
+        vars.len()
+    );
+
+    // Verify structure
+    let names: Vec<&str> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("Main.counter")),
+        "Should contain Main.counter: {names:?}"
+    );
+
+    // Cleanup
+    ws.close(None).await.ok();
+    client.post(format!("{base}/api/v1/program/stop")).send().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_ws_subscribe_and_receive_pushes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &multi_var_program()).await;
+
+    let mut ws = ws_connect(&base).await;
+
+    // Subscribe to counter
+    let resp = ws_request(
+        &mut ws,
+        serde_json::json!({
+            "method": "subscribe",
+            "params": { "variables": ["Main.counter"], "interval_ms": 0 }
+        }),
+    )
+    .await;
+    assert_eq!(resp["type"], "response");
+    assert_eq!(resp["success"], true);
+
+    // Should receive a variableUpdate push within ~100ms
+    let push = ws_recv(&mut ws).await;
+    assert_eq!(push["type"], "variableUpdate");
+    let vars = push["variables"].as_array().unwrap();
+    assert_eq!(vars.len(), 1);
+    assert!(
+        vars[0]["name"]
+            .as_str()
+            .unwrap()
+            .eq_ignore_ascii_case("Main.counter"),
+        "Pushed variable should be Main.counter"
+    );
+    assert!(vars[0]["value"].as_str().is_some());
+    assert_eq!(vars[0]["forced"], false);
+
+    // Cleanup
+    ws.close(None).await.ok();
+    client.post(format!("{base}/api/v1/program/stop")).send().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_ws_force_and_unforce() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &multi_var_program()).await;
+
+    let mut ws = ws_connect(&base).await;
+
+    // Subscribe to counter
+    ws_request(
+        &mut ws,
+        serde_json::json!({
+            "method": "subscribe",
+            "params": { "variables": ["Main.counter"], "interval_ms": 0 }
+        }),
+    )
+    .await;
+
+    // Force counter to 999
+    let resp = ws_request(
+        &mut ws,
+        serde_json::json!({
+            "method": "force",
+            "params": { "variable": "Main.counter", "value": 999 }
+        }),
+    )
+    .await;
+    assert_eq!(resp["type"], "response");
+    assert_eq!(resp["success"], true);
+
+    // Wait for a push with the forced value (check up to 10 pushes)
+    let mut found_forced = false;
+    for _ in 0..10 {
+        let push = ws_recv(&mut ws).await;
+        if push["type"] == "variableUpdate" {
+            let vars = push["variables"].as_array().unwrap();
+            if let Some(counter) = vars.iter().find(|v| v["value"] == "999") {
+                assert_eq!(counter["forced"], true, "Should be marked as forced");
+                found_forced = true;
+                break;
+            }
+        }
+    }
+    assert!(found_forced, "Should have received forced value 999 in a push");
+
+    // Unforce
+    let resp = ws_request(
+        &mut ws,
+        serde_json::json!({
+            "method": "unforce",
+            "params": { "variable": "Main.counter" }
+        }),
+    )
+    .await;
+    assert_eq!(resp["success"], true);
+
+    // Cleanup
+    ws.close(None).await.ok();
+    client.post(format!("{base}/api/v1/program/stop")).send().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_ws_get_cycle_info() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &multi_var_program()).await;
+
+    let mut ws = ws_connect(&base).await;
+    let resp = ws_request(
+        &mut ws,
+        serde_json::json!({ "method": "getCycleInfo" }),
+    )
+    .await;
+
+    assert_eq!(resp["type"], "cycleInfo");
+    assert!(
+        resp["cycle_count"].as_u64().unwrap() > 0,
+        "Cycle count should be > 0"
+    );
+    assert!(resp["last_cycle_us"].as_u64().is_some());
+
+    // Cleanup
+    ws.close(None).await.ok();
+    client.post(format!("{base}/api/v1/program/stop")).send().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_ws_unsubscribe_stops_pushes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &multi_var_program()).await;
+
+    let mut ws = ws_connect(&base).await;
+
+    // Subscribe
+    ws_request(
+        &mut ws,
+        serde_json::json!({
+            "method": "subscribe",
+            "params": { "variables": ["Main.counter"], "interval_ms": 0 }
+        }),
+    )
+    .await;
+
+    // Receive at least one push
+    let push = ws_recv(&mut ws).await;
+    assert_eq!(push["type"], "variableUpdate");
+
+    // Unsubscribe
+    ws_request(
+        &mut ws,
+        serde_json::json!({
+            "method": "unsubscribe",
+            "params": { "variables": ["Main.counter"] }
+        }),
+    )
+    .await;
+
+    // After unsubscribe, we should NOT receive further pushes.
+    // Wait 200ms — if we get a variableUpdate, that's a bug.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let timeout = tokio::time::timeout(Duration::from_millis(300), ws.next()).await;
+    match timeout {
+        Ok(Some(Ok(tungstenite::Message::Text(text)))) => {
+            let msg: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_ne!(
+                msg["type"], "variableUpdate",
+                "Should not receive pushes after unsubscribe"
+            );
+        }
+        _ => { /* timeout = good, no pushes */ }
+    }
+
+    // Cleanup
+    ws.close(None).await.ok();
+    client.post(format!("{base}/api/v1/program/stop")).send().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_ws_invalid_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+
+    let mut ws = ws_connect(&base).await;
+    ws.send(tungstenite::Message::Text("not json".to_string()))
+        .await
+        .unwrap();
+
+    let resp = ws_recv(&mut ws).await;
+    assert_eq!(resp["type"], "error");
+    assert!(resp["message"].as_str().unwrap().contains("Invalid request"));
+
+    ws.close(None).await.ok();
+}

@@ -27,6 +27,12 @@ pub enum MonitorRequest {
     /// Get scan cycle statistics.
     #[serde(rename = "getCycleInfo")]
     GetCycleInfo,
+    /// Get the variable catalog (names + types for autocomplete).
+    #[serde(rename = "getCatalog")]
+    GetCatalog,
+    /// Reset cycle statistics (min/max/jitter).
+    #[serde(rename = "resetStats")]
+    ResetStats,
     /// Trigger an online change with new source code.
     #[serde(rename = "onlineChange")]
     OnlineChange(OnlineChangeParams),
@@ -86,6 +92,9 @@ pub enum MonitorMessage {
     /// Scan cycle info.
     #[serde(rename = "cycleInfo")]
     CycleInfo(CycleInfoData),
+    /// Variable catalog (names + types).
+    #[serde(rename = "catalog")]
+    Catalog(CatalogData),
     /// Error.
     #[serde(rename = "error")]
     Error(ErrorData),
@@ -99,9 +108,26 @@ pub struct ResponseData {
     pub data: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VariableUpdateData {
     pub cycle: u64,
+    pub last_cycle_us: u64,
+    pub min_cycle_us: u64,
+    pub max_cycle_us: u64,
+    pub avg_cycle_us: u64,
+    /// Configured target cycle time (0 = free-running).
+    #[serde(default)]
+    pub target_cycle_us: u64,
+    /// Wall-clock interval between consecutive cycle starts.
+    #[serde(default)]
+    pub last_period_us: u64,
+    #[serde(default)]
+    pub min_period_us: u64,
+    #[serde(default)]
+    pub max_period_us: u64,
+    /// Maximum absolute deviation of period from target.
+    #[serde(default)]
+    pub jitter_max_us: u64,
     pub variables: Vec<VariableValue>,
 }
 
@@ -111,15 +137,39 @@ pub struct VariableValue {
     pub value: String,
     #[serde(rename = "type")]
     pub var_type: String,
+    #[serde(default)]
+    pub forced: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CycleInfoData {
     pub cycle_count: u64,
     pub last_cycle_us: u64,
     pub min_cycle_us: u64,
     pub max_cycle_us: u64,
     pub avg_cycle_us: u64,
+    #[serde(default)]
+    pub target_cycle_us: u64,
+    #[serde(default)]
+    pub last_period_us: u64,
+    #[serde(default)]
+    pub min_period_us: u64,
+    #[serde(default)]
+    pub max_period_us: u64,
+    #[serde(default)]
+    pub jitter_max_us: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogData {
+    pub variables: Vec<CatalogEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogEntry {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub var_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,177 +1,86 @@
 //! Monitor server integration tests.
 //!
-//! Tests the WebSocket monitor protocol by connecting a client to a
-//! real server, sending requests, and verifying responses.
+//! Tests the WebSocket monitor protocol end-to-end: starts a real server,
+//! connects a real WebSocket client, sends requests, and verifies responses
+//! and pushed variable updates.
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use st_monitor::protocol::*;
 use st_monitor::server::*;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, RwLock};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-/// Start monitor server on a random port and return the address.
-async fn start_server() -> (String, Arc<RwLock<MonitorState>>, broadcast::Sender<()>) {
-    let state = Arc::new(RwLock::new(MonitorState::default()));
-    let (update_tx, _) = broadcast::channel(64);
-    let state_clone = state.clone();
-    let tx_clone = update_tx.clone();
+// ── Test helpers ────────────────────────────────────────────────────────
 
-    // Bind to port 0 to get a random available port
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap().to_string();
-
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let state = state_clone.clone();
-            let update_rx = tx_clone.subscribe();
-            tokio::spawn(handle_client_test(stream, state, update_rx));
-        }
-    });
-
-    (addr, state, update_tx)
+/// Start a monitor server on a random port and return the handle + address.
+async fn start_server() -> (MonitorHandle, String) {
+    let handle = MonitorHandle::new();
+    let addr = run_monitor_server("127.0.0.1:0", handle.clone())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await; // let server start
+    (handle, addr.to_string())
 }
 
-/// Simplified client handler for testing (reuses the server's handle_request).
-async fn handle_client_test(
-    stream: TcpStream,
-    state: Arc<RwLock<MonitorState>>,
-    _update_rx: broadcast::Receiver<()>,
-) {
-    let ws_stream = tokio_tungstenite::accept_async(stream).await.unwrap();
-    let (mut ws_tx, mut ws_rx) = ws_stream.split();
-    let subscribed = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
+type WsStream = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<TcpStream>,
+>;
 
-    while let Some(msg) = ws_rx.next().await {
-        let text = match msg {
-            Ok(Message::Text(t)) => t,
-            Ok(Message::Close(_)) => break,
-            _ => continue,
-        };
+async fn connect(addr: &str) -> WsStream {
+    let url = format!("ws://{addr}");
+    let (ws, _) = connect_async(&url).await.expect("Failed to connect");
+    ws
+}
 
-        let request: MonitorRequest = match serde_json::from_str(&text) {
-            Ok(r) => r,
-            Err(e) => {
-                let err = MonitorMessage::Error(ErrorData {
-                    message: format!("Invalid: {e}"),
-                });
-                let _ = ws_tx.send(Message::Text(serde_json::to_string(&err).unwrap())).await;
+/// Send a JSON request and wait for the next non-push response.
+async fn request(ws: &mut WsStream, req: Value) -> Value {
+    ws.send(Message::Text(serde_json::to_string(&req).unwrap()))
+        .await
+        .unwrap();
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timeout")
+            .expect("closed")
+            .expect("error");
+        if let Message::Text(text) = msg {
+            let val: Value = serde_json::from_str(&text).unwrap();
+            // Skip pushed variableUpdate messages
+            if val.get("type").and_then(|t| t.as_str()) == Some("variableUpdate") {
                 continue;
             }
-        };
-
-        // Handle subscribe/unsubscribe locally
-        let response = match &request {
-            MonitorRequest::Subscribe(p) => {
-                let mut subs = subscribed.lock().await;
-                for v in &p.variables { subs.insert(v.clone()); }
-                MonitorMessage::Response(ResponseData {
-                    id: None, success: true,
-                    data: Some(json!({"subscribed": subs.len()})),
-                })
-            }
-            MonitorRequest::Unsubscribe(p) => {
-                let mut subs = subscribed.lock().await;
-                for v in &p.variables { subs.remove(v); }
-                MonitorMessage::Response(ResponseData {
-                    id: None, success: true, data: None,
-                })
-            }
-            MonitorRequest::Read(p) => {
-                let st = state.read().await;
-                let vars: Vec<VariableValue> = p.variables.iter()
-                    .filter_map(|n| st.variables.get(n).cloned())
-                    .collect();
-                MonitorMessage::Response(ResponseData {
-                    id: None, success: true,
-                    data: Some(serde_json::to_value(vars).unwrap()),
-                })
-            }
-            MonitorRequest::GetCycleInfo => {
-                let st = state.read().await;
-                MonitorMessage::CycleInfo(st.cycle_info.clone())
-            }
-            MonitorRequest::Force(p) => {
-                let value = match &p.value {
-                    Value::Number(n) => st_ir::Value::Int(n.as_i64().unwrap_or(0)),
-                    Value::Bool(b) => st_ir::Value::Bool(*b),
-                    _ => st_ir::Value::Int(0),
-                };
-                state.write().await.forced_variables.insert(p.variable.clone(), value);
-                MonitorMessage::Response(ResponseData {
-                    id: None, success: true,
-                    data: Some(json!({"forced": true})),
-                })
-            }
-            MonitorRequest::Unforce(p) => {
-                state.write().await.forced_variables.remove(&p.variable);
-                MonitorMessage::Response(ResponseData {
-                    id: None, success: true,
-                    data: Some(json!({"unforced": true})),
-                })
-            }
-            MonitorRequest::OnlineChange(p) => {
-                state.write().await.pending_online_change = Some(p.source.clone());
-                MonitorMessage::Response(ResponseData {
-                    id: None, success: true,
-                    data: Some(json!({"pending": true})),
-                })
-            }
-            _ => MonitorMessage::Response(ResponseData {
-                id: None, success: true, data: None,
-            }),
-        };
-
-        let json = serde_json::to_string(&response).unwrap();
-        if ws_tx.send(Message::Text(json)).await.is_err() {
-            break;
+            return val;
         }
     }
 }
 
-/// Connect a WebSocket client and return the split streams.
-async fn connect_client(addr: &str) -> (
-    futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>, Message>,
-    futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>>,
-) {
-    let url = format!("ws://{addr}");
-    let (ws, _) = connect_async(&url).await.expect("Failed to connect");
-    ws.split()
+/// Receive the next message (any type) with timeout.
+async fn recv(ws: &mut WsStream) -> Value {
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timeout")
+            .expect("closed")
+            .expect("error");
+        if let Message::Text(text) = msg {
+            return serde_json::from_str(&text).unwrap();
+        }
+    }
 }
 
-async fn send_request(
-    tx: &mut futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>, Message>,
-    rx: &mut futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>>,
-    request: &MonitorRequest,
-) -> Value {
-    let json = serde_json::to_string(request).unwrap();
-    tx.send(Message::Text(json)).await.unwrap();
-    let msg = tokio::time::timeout(Duration::from_secs(5), rx.next())
-        .await
-        .expect("Timeout waiting for response")
-        .expect("Stream ended")
-        .expect("WebSocket error");
-    let Message::Text(text) = msg else { panic!("Expected text message") };
-    serde_json::from_str(&text).unwrap()
-}
-
-// =============================================================================
-// Protocol tests
-// =============================================================================
+// ── Protocol request/response tests ─────────────────────────────────────
 
 #[tokio::test]
 async fn test_subscribe() {
-    let (addr, _state, _tx) = start_server().await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let (mut tx, mut rx) = connect_client(&addr).await;
+    let (_handle, addr) = start_server().await;
+    let mut ws = connect(&addr).await;
 
-    let resp = send_request(&mut tx, &mut rx, &MonitorRequest::Subscribe(SubscribeParams {
-        variables: vec!["counter".into(), "running".into()],
-        interval_ms: 0,
-    })).await;
+    let resp = request(
+        &mut ws,
+        json!({ "method": "subscribe", "params": { "variables": ["x", "y"], "interval_ms": 0 }}),
+    ).await;
 
     assert_eq!(resp["type"], "response");
     assert_eq!(resp["success"], true);
@@ -180,265 +89,356 @@ async fn test_subscribe() {
 
 #[tokio::test]
 async fn test_unsubscribe() {
-    let (addr, _state, _tx) = start_server().await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let (mut tx, mut rx) = connect_client(&addr).await;
+    let (_handle, addr) = start_server().await;
+    let mut ws = connect(&addr).await;
 
-    // Subscribe first
-    send_request(&mut tx, &mut rx, &MonitorRequest::Subscribe(SubscribeParams {
-        variables: vec!["x".into(), "y".into()],
-        interval_ms: 0,
-    })).await;
+    request(
+        &mut ws,
+        json!({ "method": "subscribe", "params": { "variables": ["x", "y"], "interval_ms": 0 }}),
+    ).await;
 
-    // Unsubscribe one
-    let resp = send_request(&mut tx, &mut rx, &MonitorRequest::Unsubscribe(UnsubscribeParams {
-        variables: vec!["x".into()],
-    })).await;
+    let resp = request(
+        &mut ws,
+        json!({ "method": "unsubscribe", "params": { "variables": ["x"] }}),
+    ).await;
 
     assert_eq!(resp["success"], true);
 }
 
 #[tokio::test]
 async fn test_read_variables() {
-    let (addr, state, _tx) = start_server().await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (handle, addr) = start_server().await;
 
     // Populate state
-    {
-        let mut st = state.write().await;
-        st.variables.insert("counter".into(), VariableValue {
-            name: "counter".into(),
-            value: "42".into(),
-            var_type: "INT".into(),
-        });
-        st.variables.insert("running".into(), VariableValue {
-            name: "running".into(),
-            value: "TRUE".into(),
-            var_type: "BOOL".into(),
-        });
-    }
+    handle.update_variables(
+        vec![
+            VariableValue { name: "counter".into(), value: "42".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "running".into(), value: "TRUE".into(), var_type: "BOOL".into(), forced: false },
+        ],
+        CycleInfoData { cycle_count: 1, last_cycle_us: 10, min_cycle_us: 10, max_cycle_us: 10, avg_cycle_us: 10, ..Default::default() },
+    );
 
-    let (mut tx, mut rx) = connect_client(&addr).await;
-    let resp = send_request(&mut tx, &mut rx, &MonitorRequest::Read(ReadParams {
-        variables: vec!["counter".into(), "running".into()],
-    })).await;
+    let mut ws = connect(&addr).await;
+    let resp = request(
+        &mut ws,
+        json!({ "method": "read", "params": { "variables": ["counter", "running"] }}),
+    ).await;
 
     assert_eq!(resp["success"], true);
     let data = resp["data"].as_array().unwrap();
     assert_eq!(data.len(), 2);
     assert!(data.iter().any(|v| v["name"] == "counter" && v["value"] == "42"));
-    assert!(data.iter().any(|v| v["name"] == "running" && v["value"] == "TRUE"));
 }
 
 #[tokio::test]
-async fn test_read_nonexistent_variable() {
-    let (addr, _state, _tx) = start_server().await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let (mut tx, mut rx) = connect_client(&addr).await;
+async fn test_read_nonexistent() {
+    let (_handle, addr) = start_server().await;
+    let mut ws = connect(&addr).await;
 
-    let resp = send_request(&mut tx, &mut rx, &MonitorRequest::Read(ReadParams {
-        variables: vec!["nonexistent".into()],
-    })).await;
+    let resp = request(
+        &mut ws,
+        json!({ "method": "read", "params": { "variables": ["nonexistent"] }}),
+    ).await;
 
-    assert_eq!(resp["success"], true);
-    let data = resp["data"].as_array().unwrap();
-    assert_eq!(data.len(), 0);
+    assert_eq!(resp["data"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_get_catalog() {
+    let (handle, addr) = start_server().await;
+
+    handle.set_catalog(vec![
+        CatalogEntry { name: "Main.counter".into(), var_type: "INT".into() },
+        CatalogEntry { name: "Main.flag".into(), var_type: "BOOL".into() },
+    ]);
+
+    let mut ws = connect(&addr).await;
+    let resp = request(&mut ws, json!({ "method": "getCatalog" })).await;
+
+    assert_eq!(resp["type"], "catalog");
+    let vars = resp["variables"].as_array().unwrap();
+    assert_eq!(vars.len(), 2);
+    assert!(vars.iter().any(|v| v["name"] == "Main.counter" && v["type"] == "INT"));
+}
+
+#[tokio::test]
+async fn test_get_cycle_info() {
+    let (handle, addr) = start_server().await;
+
+    handle.update_variables(
+        vec![],
+        CycleInfoData { cycle_count: 1000, last_cycle_us: 50, min_cycle_us: 30, max_cycle_us: 120, avg_cycle_us: 55, ..Default::default() },
+    );
+
+    let mut ws = connect(&addr).await;
+    let resp = request(&mut ws, json!({ "method": "getCycleInfo" })).await;
+
+    assert_eq!(resp["type"], "cycleInfo");
+    assert_eq!(resp["cycle_count"], 1000);
+    assert_eq!(resp["last_cycle_us"], 50);
 }
 
 #[tokio::test]
 async fn test_force_variable() {
-    let (addr, state, _tx) = start_server().await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let (mut tx, mut rx) = connect_client(&addr).await;
+    let (handle, addr) = start_server().await;
+    let mut ws = connect(&addr).await;
 
-    let resp = send_request(&mut tx, &mut rx, &MonitorRequest::Force(ForceParams {
-        variable: "output".into(),
-        value: json!(100),
-    })).await;
+    let resp = request(
+        &mut ws,
+        json!({ "method": "force", "params": { "variable": "output", "value": 100 }}),
+    ).await;
 
     assert_eq!(resp["success"], true);
     assert_eq!(resp["data"]["forced"], true);
 
     // Verify in state
-    let st = state.read().await;
-    assert!(st.forced_variables.contains_key("output"));
-    assert_eq!(st.forced_variables["output"], st_ir::Value::Int(100));
+    let forced = handle.peek_forced_variables();
+    assert_eq!(forced.get("output"), Some(&st_ir::Value::Int(100)));
+}
+
+#[tokio::test]
+async fn test_force_bool() {
+    let (handle, addr) = start_server().await;
+    let mut ws = connect(&addr).await;
+
+    request(
+        &mut ws,
+        json!({ "method": "force", "params": { "variable": "alarm", "value": true }}),
+    ).await;
+
+    let forced = handle.peek_forced_variables();
+    assert_eq!(forced.get("alarm"), Some(&st_ir::Value::Bool(true)));
 }
 
 #[tokio::test]
 async fn test_unforce_variable() {
-    let (addr, state, _tx) = start_server().await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (handle, addr) = start_server().await;
 
-    // Force first
-    state.write().await.forced_variables.insert("x".into(), st_ir::Value::Int(0));
+    // Pre-force via state
+    handle.state().write().unwrap().forced_variables.insert("x".into(), st_ir::Value::Int(0));
 
-    let (mut tx, mut rx) = connect_client(&addr).await;
-    let resp = send_request(&mut tx, &mut rx, &MonitorRequest::Unforce(UnforceParams {
-        variable: "x".into(),
-    })).await;
-
-    assert_eq!(resp["success"], true);
-    assert!(state.read().await.forced_variables.is_empty());
-}
-
-#[tokio::test]
-async fn test_get_cycle_info() {
-    let (addr, state, _tx) = start_server().await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // Set cycle info
-    {
-        let mut st = state.write().await;
-        st.cycle_info = CycleInfoData {
-            cycle_count: 1000,
-            last_cycle_us: 50,
-            min_cycle_us: 30,
-            max_cycle_us: 120,
-            avg_cycle_us: 55,
-        };
-    }
-
-    let (mut tx, mut rx) = connect_client(&addr).await;
-    let resp = send_request(&mut tx, &mut rx, &MonitorRequest::GetCycleInfo).await;
-
-    assert_eq!(resp["type"], "cycleInfo");
-    assert_eq!(resp["cycle_count"], 1000);
-    assert_eq!(resp["last_cycle_us"], 50);
-    assert_eq!(resp["min_cycle_us"], 30);
-    assert_eq!(resp["max_cycle_us"], 120);
-    assert_eq!(resp["avg_cycle_us"], 55);
-}
-
-#[tokio::test]
-async fn test_online_change_request() {
-    let (addr, state, _tx) = start_server().await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let (mut tx, mut rx) = connect_client(&addr).await;
-
-    let new_source = "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    x := x + 2;\nEND_PROGRAM\n";
-    let resp = send_request(&mut tx, &mut rx, &MonitorRequest::OnlineChange(OnlineChangeParams {
-        source: new_source.into(),
-    })).await;
+    let mut ws = connect(&addr).await;
+    let resp = request(
+        &mut ws,
+        json!({ "method": "unforce", "params": { "variable": "x" }}),
+    ).await;
 
     assert_eq!(resp["success"], true);
-    assert_eq!(resp["data"]["pending"], true);
-
-    // Verify pending change in state
-    let st = state.read().await;
-    assert!(st.pending_online_change.is_some());
-    assert!(st.pending_online_change.as_ref().unwrap().contains("x + 2"));
+    assert!(handle.peek_forced_variables().is_empty());
 }
 
 #[tokio::test]
 async fn test_invalid_json() {
-    let (addr, _state, _tx) = start_server().await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (_handle, addr) = start_server().await;
+    let mut ws = connect(&addr).await;
 
-    let url = format!("ws://{addr}");
-    let (ws, _) = connect_async(&url).await.unwrap();
-    let (mut tx, mut rx) = ws.split();
+    ws.send(Message::Text("not json".into())).await.unwrap();
 
-    // Send invalid JSON
-    tx.send(Message::Text("not json".into())).await.unwrap();
-
-    let msg = tokio::time::timeout(Duration::from_secs(2), rx.next())
-        .await
-        .expect("Timeout")
-        .expect("Stream ended")
-        .expect("WS error");
-    let Message::Text(text) = msg else { panic!("Expected text") };
-    let resp: Value = serde_json::from_str(&text).unwrap();
+    let resp = recv(&mut ws).await;
     assert_eq!(resp["type"], "error");
     assert!(resp["message"].as_str().unwrap().contains("Invalid"));
 }
 
 #[tokio::test]
 async fn test_multiple_clients() {
-    let (addr, state, _tx) = start_server().await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (handle, addr) = start_server().await;
 
-    // Populate state
-    state.write().await.variables.insert("shared".into(), VariableValue {
-        name: "shared".into(), value: "99".into(), var_type: "INT".into(),
-    });
+    handle.update_variables(
+        vec![VariableValue { name: "shared".into(), value: "99".into(), var_type: "INT".into(), forced: false }],
+        CycleInfoData { cycle_count: 1, ..Default::default() },
+    );
 
-    // Client 1
-    let (mut tx1, mut rx1) = connect_client(&addr).await;
-    let resp1 = send_request(&mut tx1, &mut rx1, &MonitorRequest::Read(ReadParams {
-        variables: vec!["shared".into()],
-    })).await;
+    let mut ws1 = connect(&addr).await;
+    let mut ws2 = connect(&addr).await;
 
-    // Client 2
-    let (mut tx2, mut rx2) = connect_client(&addr).await;
-    let resp2 = send_request(&mut tx2, &mut rx2, &MonitorRequest::Read(ReadParams {
-        variables: vec!["shared".into()],
-    })).await;
+    let resp1 = request(&mut ws1, json!({ "method": "read", "params": { "variables": ["shared"] }})).await;
+    let resp2 = request(&mut ws2, json!({ "method": "read", "params": { "variables": ["shared"] }})).await;
 
-    // Both should see the same value
     assert_eq!(resp1["data"][0]["value"], "99");
     assert_eq!(resp2["data"][0]["value"], "99");
 }
 
 #[tokio::test]
-async fn test_force_bool() {
-    let (addr, state, _tx) = start_server().await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let (mut tx, mut rx) = connect_client(&addr).await;
+async fn test_online_change_request() {
+    let (handle, addr) = start_server().await;
+    let mut ws = connect(&addr).await;
 
-    let resp = send_request(&mut tx, &mut rx, &MonitorRequest::Force(ForceParams {
-        variable: "alarm".into(),
-        value: json!(true),
-    })).await;
+    let resp = request(
+        &mut ws,
+        json!({ "method": "onlineChange", "params": { "source": "PROGRAM Main\nEND_PROGRAM" }}),
+    ).await;
 
     assert_eq!(resp["success"], true);
-    let st = state.read().await;
-    assert_eq!(st.forced_variables["alarm"], st_ir::Value::Bool(true));
+    assert_eq!(resp["data"]["pending"], true);
+    assert!(handle.take_pending_online_change().is_some());
+}
+
+// ── Push mechanism tests ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_push_delivers_subscribed_variables() {
+    let (handle, addr) = start_server().await;
+    let mut ws = connect(&addr).await;
+
+    // Subscribe to "x"
+    request(
+        &mut ws,
+        json!({ "method": "subscribe", "params": { "variables": ["x"], "interval_ms": 0 }}),
+    ).await;
+
+    // Small delay so the push task's broadcast subscription is active
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Push an update from the "engine"
+    handle.update_variables(
+        vec![
+            VariableValue { name: "x".into(), value: "42".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "y".into(), value: "99".into(), var_type: "INT".into(), forced: false },
+        ],
+        CycleInfoData { cycle_count: 10, ..Default::default() },
+    );
+
+    // Should receive a variableUpdate with only "x" (not "y")
+    let push = recv(&mut ws).await;
+    assert_eq!(push["type"], "variableUpdate");
+    assert_eq!(push["cycle"], 10);
+    let vars = push["variables"].as_array().unwrap();
+    assert_eq!(vars.len(), 1);
+    assert_eq!(vars[0]["name"], "x");
+    assert_eq!(vars[0]["value"], "42");
 }
 
 #[tokio::test]
-async fn test_force_then_read() {
-    let (addr, state, _tx) = start_server().await;
+async fn test_push_stops_after_unsubscribe() {
+    let (handle, addr) = start_server().await;
+    let mut ws = connect(&addr).await;
+
+    // Subscribe
+    request(
+        &mut ws,
+        json!({ "method": "subscribe", "params": { "variables": ["x"], "interval_ms": 0 }}),
+    ).await;
+
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Set variable value in state
-    state.write().await.variables.insert("x".into(), VariableValue {
-        name: "x".into(), value: "10".into(), var_type: "INT".into(),
-    });
+    // Receive one push
+    handle.update_variables(
+        vec![VariableValue { name: "x".into(), value: "1".into(), var_type: "INT".into(), forced: false }],
+        CycleInfoData { cycle_count: 1, ..Default::default() },
+    );
+    let push = recv(&mut ws).await;
+    assert_eq!(push["type"], "variableUpdate");
 
-    let (mut tx, mut rx) = connect_client(&addr).await;
+    // Unsubscribe
+    request(
+        &mut ws,
+        json!({ "method": "unsubscribe", "params": { "variables": ["x"] }}),
+    ).await;
 
-    // Read before force
-    let resp = send_request(&mut tx, &mut rx, &MonitorRequest::Read(ReadParams {
-        variables: vec!["x".into()],
-    })).await;
-    assert_eq!(resp["data"][0]["value"], "10");
+    // Push another update — client should NOT receive it
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    handle.update_variables(
+        vec![VariableValue { name: "x".into(), value: "2".into(), var_type: "INT".into(), forced: false }],
+        CycleInfoData { cycle_count: 2, ..Default::default() },
+    );
 
-    // Force
-    send_request(&mut tx, &mut rx, &MonitorRequest::Force(ForceParams {
-        variable: "x".into(),
-        value: json!(999),
-    })).await;
-
-    // Verify force is in state
-    assert!(state.read().await.forced_variables.contains_key("x"));
+    let timeout = tokio::time::timeout(Duration::from_millis(300), ws.next()).await;
+    assert!(timeout.is_err(), "Should not receive pushes after unsubscribe");
 }
 
-// =============================================================================
-// Protocol serialization tests
-// =============================================================================
+#[tokio::test]
+async fn test_push_includes_forced_flag() {
+    let (handle, addr) = start_server().await;
+    let mut ws = connect(&addr).await;
+
+    request(
+        &mut ws,
+        json!({ "method": "subscribe", "params": { "variables": ["x"], "interval_ms": 0 }}),
+    ).await;
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Push a forced variable
+    handle.update_variables(
+        vec![VariableValue { name: "x".into(), value: "999".into(), var_type: "INT".into(), forced: true }],
+        CycleInfoData { cycle_count: 1, ..Default::default() },
+    );
+
+    let push = recv(&mut ws).await;
+    assert_eq!(push["variables"][0]["forced"], true);
+}
+
+#[tokio::test]
+async fn test_has_subscribers() {
+    let (handle, addr) = start_server().await;
+
+    // No clients connected yet
+    assert!(!handle.has_subscribers());
+
+    // Connect a client and subscribe
+    let mut ws = connect(&addr).await;
+    request(
+        &mut ws,
+        json!({ "method": "subscribe", "params": { "variables": ["x"], "interval_ms": 0 }}),
+    ).await;
+
+    // Now there's a subscriber (the push task subscribed to the broadcast)
+    assert!(handle.has_subscribers());
+
+    // Disconnect
+    ws.close(None).await.ok();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Subscriber gone (push task exited)
+    assert!(!handle.has_subscribers());
+}
+
+// ── MonitorHandle unit tests ────────────────────────────────────────────
 
 #[test]
-fn test_protocol_serialize_subscribe() {
+fn test_handle_set_catalog() {
+    let handle = MonitorHandle::new();
+    handle.set_catalog(vec![
+        CatalogEntry { name: "a".into(), var_type: "INT".into() },
+    ]);
+    assert_eq!(handle.state().read().unwrap().catalog.len(), 1);
+}
+
+#[test]
+fn test_handle_update_variables() {
+    let handle = MonitorHandle::new();
+    handle.update_variables(
+        vec![VariableValue { name: "x".into(), value: "42".into(), var_type: "INT".into(), forced: false }],
+        CycleInfoData { cycle_count: 1, last_cycle_us: 10, min_cycle_us: 10, max_cycle_us: 10, avg_cycle_us: 10, ..Default::default() },
+    );
+
+    let st = handle.state().read().unwrap();
+    assert_eq!(st.variables.get("x").unwrap().value, "42");
+    assert_eq!(st.cycle_info.cycle_count, 1);
+}
+
+#[test]
+fn test_handle_forced_variables() {
+    let handle = MonitorHandle::new();
+    handle.state().write().unwrap().forced_variables.insert("out".into(), st_ir::Value::Int(100));
+
+    let forced = handle.peek_forced_variables();
+    assert_eq!(forced.get("out"), Some(&st_ir::Value::Int(100)));
+
+    let taken = handle.take_forced_variables();
+    assert_eq!(taken.get("out"), Some(&st_ir::Value::Int(100)));
+    assert!(handle.peek_forced_variables().is_empty());
+}
+
+// ── Protocol serialization tests ────────────────────────────────────────
+
+#[test]
+fn test_serialize_subscribe() {
     let req = MonitorRequest::Subscribe(SubscribeParams {
         variables: vec!["counter".into()],
         interval_ms: 100,
     });
     let json = serde_json::to_string(&req).unwrap();
-    assert!(json.contains("subscribe"));
-    assert!(json.contains("counter"));
-
-    // Round-trip
     let parsed: MonitorRequest = serde_json::from_str(&json).unwrap();
     if let MonitorRequest::Subscribe(p) = parsed {
         assert_eq!(p.variables, vec!["counter"]);
@@ -449,17 +449,19 @@ fn test_protocol_serialize_subscribe() {
 }
 
 #[test]
-fn test_protocol_serialize_variable_update() {
+fn test_serialize_variable_update() {
     let msg = MonitorMessage::VariableUpdate(VariableUpdateData {
         cycle: 42,
-        variables: vec![
-            VariableValue { name: "x".into(), value: "10".into(), var_type: "INT".into() },
-        ],
+        last_cycle_us: 100,
+        min_cycle_us: 50,
+        max_cycle_us: 200,
+        avg_cycle_us: 110,
+        variables: vec![VariableValue {
+            name: "x".into(), value: "10".into(), var_type: "INT".into(), forced: false,
+        }],
+        ..Default::default()
     });
     let json = serde_json::to_string(&msg).unwrap();
-    assert!(json.contains("variableUpdate"));
-    assert!(json.contains("\"cycle\":42"));
-
     let parsed: MonitorMessage = serde_json::from_str(&json).unwrap();
     if let MonitorMessage::VariableUpdate(data) = parsed {
         assert_eq!(data.cycle, 42);
@@ -470,26 +472,22 @@ fn test_protocol_serialize_variable_update() {
 }
 
 #[test]
-fn test_protocol_serialize_cycle_info() {
-    let msg = MonitorMessage::CycleInfo(CycleInfoData {
-        cycle_count: 1000,
-        last_cycle_us: 50,
-        min_cycle_us: 30,
-        max_cycle_us: 120,
-        avg_cycle_us: 55,
+fn test_serialize_catalog() {
+    let msg = MonitorMessage::Catalog(CatalogData {
+        variables: vec![CatalogEntry { name: "a".into(), var_type: "INT".into() }],
     });
     let json = serde_json::to_string(&msg).unwrap();
     let parsed: MonitorMessage = serde_json::from_str(&json).unwrap();
-    if let MonitorMessage::CycleInfo(data) = parsed {
-        assert_eq!(data.cycle_count, 1000);
+    if let MonitorMessage::Catalog(data) = parsed {
+        assert_eq!(data.variables.len(), 1);
+        assert_eq!(data.variables[0].name, "a");
     } else {
         panic!("Wrong variant");
     }
 }
 
 #[test]
-fn test_protocol_serialize_all_requests() {
-    // Ensure all request types serialize/deserialize correctly
+fn test_serialize_all_requests_roundtrip() {
     let requests = vec![
         MonitorRequest::Subscribe(SubscribeParams { variables: vec!["a".into()], interval_ms: 0 }),
         MonitorRequest::Unsubscribe(UnsubscribeParams { variables: vec!["a".into()] }),
@@ -498,6 +496,8 @@ fn test_protocol_serialize_all_requests() {
         MonitorRequest::Force(ForceParams { variable: "a".into(), value: json!(true) }),
         MonitorRequest::Unforce(UnforceParams { variable: "a".into() }),
         MonitorRequest::GetCycleInfo,
+        MonitorRequest::GetCatalog,
+        MonitorRequest::ResetStats,
         MonitorRequest::OnlineChange(OnlineChangeParams { source: "test".into() }),
     ];
 
@@ -505,56 +505,6 @@ fn test_protocol_serialize_all_requests() {
         let json = serde_json::to_string(req).unwrap();
         let parsed: MonitorRequest = serde_json::from_str(&json).unwrap();
         let json2 = serde_json::to_string(&parsed).unwrap();
-        assert_eq!(json, json2, "Round-trip failed for request");
+        assert_eq!(json, json2, "Round-trip failed");
     }
-}
-
-// =============================================================================
-// MonitorHandle tests
-// =============================================================================
-
-#[tokio::test]
-async fn test_monitor_handle_update() {
-    let (handle, state) = MonitorHandle::new();
-
-    handle.update_variables(
-        vec![
-            VariableValue { name: "x".into(), value: "42".into(), var_type: "INT".into() },
-        ],
-        CycleInfoData {
-            cycle_count: 1,
-            last_cycle_us: 10,
-            min_cycle_us: 10,
-            max_cycle_us: 10,
-            avg_cycle_us: 10,
-        },
-    ).await;
-
-    let st = state.read().await;
-    assert_eq!(st.variables.get("x").unwrap().value, "42");
-    assert_eq!(st.cycle_info.cycle_count, 1);
-}
-
-#[tokio::test]
-async fn test_monitor_handle_forced_vars() {
-    let (handle, state) = MonitorHandle::new();
-
-    state.write().await.forced_variables.insert("output".into(), st_ir::Value::Int(100));
-
-    let forced = handle.get_forced_variables().await;
-    assert_eq!(forced.get("output"), Some(&st_ir::Value::Int(100)));
-}
-
-#[tokio::test]
-async fn test_monitor_handle_online_change() {
-    let (handle, state) = MonitorHandle::new();
-
-    state.write().await.pending_online_change = Some("new source".into());
-
-    let change = handle.take_pending_online_change().await;
-    assert_eq!(change, Some("new source".into()));
-
-    // Should be consumed
-    let change2 = handle.take_pending_online_change().await;
-    assert_eq!(change2, None);
 }

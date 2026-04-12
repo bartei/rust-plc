@@ -86,20 +86,11 @@ function renderStatusBar(stats: PlcCycleStats) {
 }
 
 /**
- * DAP message tracker that sniffs `output` events with category `telemetry`
- * and an `output` field of `plc/cycleStats`. The structured payload lives in
- * the `data` field of the OutputEventBody.
+ * DAP message tracker: forwards cycle stats to the status bar, handles
+ * source path remapping for remote debug, and picks up the monitor WS
+ * port from the embedded DAP monitor server.
  */
-/// In-memory cache of the variable catalog from the most recent
-/// `plc/varCatalog` event. The MonitorPanel pulls from this when it opens.
-let plcVarCatalog: Array<{ name: string; type: string }> = [];
-
-export function getPlcVarCatalog(): Array<{ name: string; type: string }> {
-  return plcVarCatalog;
-}
-
 class PlcDapTracker implements vscode.DebugAdapterTracker {
-  private watchListSynced = false;
   private isRemote: boolean;
   private localRoot: string | undefined;
 
@@ -193,44 +184,20 @@ class PlcDapTracker implements vscode.DebugAdapterTracker {
     const { MonitorPanel } = require("./monitorPanel");
 
     if (sentinel === "plc/cycleStats") {
+      // Status bar only — the Monitor panel gets data via WebSocket now.
       const stats = data as PlcCycleStats;
       renderStatusBar(stats);
-      if (MonitorPanel.currentPanel) {
-        MonitorPanel.currentPanel.updateCycleInfo({
-          cycle_count: stats.cycle_count,
-          last_cycle_us: stats.last_us,
-          min_cycle_us: stats.min_us,
-          max_cycle_us: stats.max_us,
-          avg_cycle_us: stats.avg_us,
-          target_us: stats.target_us,
-          jitter_max_us: stats.jitter_max_us,
-          last_period_us: stats.last_period_us,
-        });
-        // Route watched variable snapshots to the monitor panel.
-        const vars = (data as any).variables;
-        if (Array.isArray(vars)) {
-          MonitorPanel.currentPanel.updateVariables(vars);
-        }
-        // If the DAP is sending telemetry but the variables array is empty
-        // and we have a persisted watch list, re-send it. This handles the
-        // case where sendWatchListToDap fired too early during catalog
-        // delivery (before the session was fully active).
-        if (!this.watchListSynced && (!Array.isArray(vars) || vars.length === 0)) {
-          MonitorPanel.currentPanel.resyncWatchList();
-          this.watchListSynced = true;
-        } else if (Array.isArray(vars) && vars.length > 0) {
-          this.watchListSynced = true;
-        }
-      }
       return;
     }
 
-    if (sentinel === "plc/varCatalog") {
-      const vars = (data as any).variables;
-      if (Array.isArray(vars)) {
-        plcVarCatalog = vars;
+    if (sentinel === "plc/monitorPort") {
+      // The DAP server started an embedded WS monitor on this port.
+      // Auto-connect the Monitor panel to ws://localhost:{port}.
+      const port = (data as any).port;
+      if (typeof port === "number" && port > 0) {
+        console.log(`[DAP-TRACKER] Monitor WS port received: ${port}`);
         if (MonitorPanel.currentPanel) {
-          MonitorPanel.currentPanel.updateCatalog(plcVarCatalog);
+          MonitorPanel.currentPanel.connectToMonitor("127.0.0.1", port, "Local Debug");
         }
       }
       return;
@@ -299,8 +266,7 @@ class PlcDapTracker implements vscode.DebugAdapterTracker {
   }
 
   onWillStartSession(): void {
-    plcVarCatalog = [];
-    this.watchListSynced = false;
+    // Nothing to reset — catalog/variables flow through WebSocket now
   }
   onWillStopSession(): void {
     cycleStatusBar?.hide();
@@ -493,6 +459,10 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.debug.onDidTerminateDebugSession((session) => {
       if (session.type === "st") {
         cycleStatusBar?.hide();
+        // Disconnect the local monitor WS (the DAP server is shutting down)
+        if (MonitorPanel.currentPanel) {
+          MonitorPanel.currentPanel.disconnectLocalMonitor();
+        }
       }
     })
   );
@@ -510,11 +480,7 @@ export function activate(context: vscode.ExtensionContext) {
         const targets = getTargetsFromConfig();
         MonitorPanel.currentPanel.setTargets(targets);
       }
-      // If we already cached a catalog from an earlier launch event, push
-      // it into the panel immediately so the autocomplete is populated.
-      if (MonitorPanel.currentPanel && plcVarCatalog.length > 0) {
-        MonitorPanel.currentPanel.updateCatalog(plcVarCatalog);
-      }
+      // Catalog is fetched via WebSocket when the panel connects to a target.
     })
   );
 
@@ -584,15 +550,14 @@ export function activate(context: vscode.ExtensionContext) {
   // ── Deployment toolbar commands ──────────────────────────────────
   context.subscriptions.push(
     vscode.commands.registerCommand("structured-text.targetInstall", async () => {
-      const target = await vscode.window.showInputBox({
-        prompt: "Target (user@host)",
-        placeHolder: "plc@192.168.1.50",
-        title: "Install PLC Runtime",
-      });
+      const target = await resolveActiveTargetFull("Install PLC Runtime");
       if (!target) return;
+      const sshTarget = `${target.user}@${target.host}`;
       const terminal = vscode.window.createTerminal("PLC Install");
       terminal.show();
-      terminal.sendText(`st-cli target install ${target}`);
+      terminal.sendText(
+        `st-cli target install ${sshTarget} && echo "\\n--- Rebooting ${target.host} ---" && ssh ${sshTarget} "sudo reboot"`
+      );
     }),
 
     vscode.commands.registerCommand("structured-text.targetUpload", async () => {
@@ -777,6 +742,28 @@ async function resolveActiveTargetWithPort(title: string): Promise<{ host: strin
   if (!host) return undefined;
   const t = targets.find((t: TargetEntry) => t.host === host);
   return { host, port: t?.agentPort || 4840 };
+}
+
+/**
+ * Resolve the active target as a full TargetEntry (including user).
+ * Uses the Monitor panel's dropdown selection, falls back to quick-pick.
+ */
+async function resolveActiveTargetFull(title: string): Promise<TargetEntry | undefined> {
+  const targets = getTargetsFromConfig();
+  const { MonitorPanel } = require("./monitorPanel");
+  const selectedHost = MonitorPanel.currentPanel?.selectedTargetHost;
+  if (selectedHost) {
+    const t = targets.find((t: TargetEntry) => t.host === selectedHost);
+    if (t) return t;
+  }
+  const host = await pickOrInputTarget(targets, title);
+  if (!host) return undefined;
+  return targets.find((t: TargetEntry) => t.host === host) || {
+    name: host,
+    host,
+    agentPort: 4840,
+    user: "plc",
+  };
 }
 
 /**

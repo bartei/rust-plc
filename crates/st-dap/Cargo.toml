@@ -17,6 +17,7 @@ st-syntax.workspace = true
 st-compiler.workspace = true
 st-comm-api = { path = "../st-comm-api" }
 st-comm-sim = { path = "../st-comm-sim" }
+st-monitor = { path = "../st-monitor" }
 dap.workspace = true
 tracing.workspace = true
 serde_json.workspace = true

@@ -3,16 +3,12 @@ import * as vscode from "vscode";
 /**
  * WebView panel for PLC online monitoring.
  *
- * The panel shows scan-cycle stats and a user-managed watch list of variables.
- * Variables in the watch list are streamed from the DAP every ~500ms while the
- * program runs. The user adds variables via an autocomplete dropdown populated
- * from the `plc/varCatalog` event the DAP pushes on launch.
+ * Connects to a WebSocket monitor server (embedded in the DAP for local
+ * debug, or on the remote target agent) and displays real-time scan-cycle
+ * stats + a user-managed watch list of variables with force/unforce.
  *
  * Watch lists are persisted to workspace state so they survive panel close
  * and reload. Each project (keyed by workspace folder) has its own watch list.
- *
- * Data flows in via postMessage so the DOM updates incrementally — no
- * flicker even at high refresh rates.
  */
 export class MonitorPanel {
   public static currentPanel: MonitorPanel | undefined;
@@ -22,6 +18,11 @@ export class MonitorPanel {
   private catalog: Array<{ name: string; type: string }> = [];
   private watchList: string[] = [];
   private statusPollTimer: ReturnType<typeof setInterval> | undefined;
+
+  /** Active WebSocket connection to the target agent. */
+  private monitorWs: import("ws").WebSocket | undefined;
+  /** Whether WebSocket monitoring is connected and streaming. */
+  private wsMonitorActive = false;
 
   private constructor(panel: vscode.WebviewPanel) {
     this.panel = panel;
@@ -34,11 +35,6 @@ export class MonitorPanel {
     // Load persisted watch list for this workspace.
     this.watchList = this.loadWatchList();
     this.setInitialHtml();
-    // Push the persisted list to the DAP so the next telemetry tick
-    // includes its values.
-    if (this.watchList.length > 0) {
-      this.sendWatchListToDap();
-    }
   }
 
   public static createOrShow(extensionUri: vscode.Uri) {
@@ -68,12 +64,6 @@ export class MonitorPanel {
     MonitorPanel.workspaceState = state;
   }
 
-  public updateVariables(
-    vars: Array<{ name: string; value: string; type: string; forced?: boolean }>
-  ) {
-    this.panel.webview.postMessage({ command: "updateVariables", variables: vars });
-  }
-
   public updateCycleInfo(info: {
     cycle_count: number;
     last_cycle_us: number;
@@ -90,19 +80,6 @@ export class MonitorPanel {
   public updateCatalog(catalog: Array<{ name: string; type: string }>) {
     this.catalog = catalog;
     this.panel.webview.postMessage({ command: "updateCatalog", catalog });
-    // A new catalog signals a new debug session. Clear stale variable data
-    // from the previous session so the panel rebuilds cleanly when the first
-    // telemetry tick arrives.
-    this.panel.webview.postMessage({ command: "resetSession" });
-    // Send the persisted watch list back to the new session — the DAP doesn't
-    // know about it until we re-issue the command.
-    if (this.watchList.length > 0) {
-      this.sendWatchListToDap();
-      this.panel.webview.postMessage({
-        command: "updateWatchList",
-        watchList: this.watchList,
-      });
-    }
   }
 
   private handleWebviewMessage(msg: any) {
@@ -111,9 +88,22 @@ export class MonitorPanel {
         if (typeof msg.variable === "string" && msg.variable.trim()) {
           const name = msg.variable.trim();
           if (!this.watchList.some((v) => v.toLowerCase() === name.toLowerCase())) {
+            // Validate against catalog
+            const valid = this.catalog.some(
+              (c) => c.name.toLowerCase() === name.toLowerCase()
+            );
+            if (!valid && this.catalog.length > 0) {
+              vscode.window.showWarningMessage(
+                `Variable "${name}" not found in program catalog`
+              );
+              break;
+            }
             this.watchList.push(name);
             this.saveWatchList();
-            this.evaluate(`addWatch ${name}`);
+            this.wsSend({
+              method: "subscribe",
+              params: { variables: [name], interval_ms: 0 },
+            });
           }
         }
         break;
@@ -125,24 +115,36 @@ export class MonitorPanel {
           );
           if (this.watchList.length !== before) {
             this.saveWatchList();
-            this.evaluate(`removeWatch ${msg.variable}`);
+            this.wsSend({
+              method: "unsubscribe",
+              params: { variables: [msg.variable] },
+            });
           }
         }
         break;
       case "clearWatch":
+        if (this.watchList.length > 0) {
+          this.wsSend({
+            method: "unsubscribe",
+            params: { variables: [...this.watchList] },
+          });
+        }
         this.watchList = [];
         this.saveWatchList();
-        this.evaluate("clearWatch");
         break;
       case "force":
         if (typeof msg.variable === "string" && typeof msg.value === "string") {
-          this.evaluate(`force ${msg.variable} = ${msg.value}`);
+          this.targetForce(msg.variable, msg.value);
         }
         break;
       case "unforce":
         if (typeof msg.variable === "string") {
-          this.evaluate(`unforce ${msg.variable}`);
+          this.targetUnforce(msg.variable);
         }
+        break;
+      case "resetStats":
+        MonitorPanel.log("Sending resetStats");
+        this.wsSend({ method: "resetStats" });
         break;
       case "expandedNodesChanged":
         if (Array.isArray(msg.nodes)) {
@@ -170,9 +172,11 @@ export class MonitorPanel {
         if (msg.host) {
           this.selectedTargetHost = msg.host;
           this.selectedTargetPort = msg.agentPort || 4840;
+          this.stopWsMonitoring();
           this.startStatusPolling();
         } else {
           this.selectedTargetHost = undefined;
+          this.stopWsMonitoring();
           this.stopStatusPolling();
           this.updateTargetStatus("offline");
         }
@@ -192,10 +196,12 @@ export class MonitorPanel {
     });
   }
 
-  /** Poll the selected target's /api/v1/status endpoint and update toolbar. */
+  /** Poll the selected target's /api/v1/status endpoint and update toolbar.
+   *  When the target is running, opens a WebSocket for real-time monitoring. */
   public async pollTargetStatus() {
     if (!this.selectedTargetHost) {
       this.updateTargetStatus("offline");
+      this.stopWsMonitoring();
       return;
     }
     const host = this.selectedTargetHost;
@@ -210,20 +216,227 @@ export class MonitorPanel {
         const status = (body.status || body.runtime_status || "idle").toLowerCase();
         if (status === "running") {
           this.updateTargetStatus("running", host);
+          MonitorPanel.log(
+            `Target ${host}:${port} is running (cycle=${body.cycle_stats?.cycle_count ?? 0}, wsActive=${this.wsMonitorActive})`
+          );
+          // Push cycle stats from the HTTP status response as a baseline
+          // (WS will push fresher data once connected)
+          if (body.cycle_stats) {
+            const cs = body.cycle_stats;
+            this.updateCycleInfo({
+              cycle_count: cs.cycle_count || 0,
+              last_cycle_us: cs.last_cycle_time_us || 0,
+              min_cycle_us: cs.min_cycle_time_us || 0,
+              max_cycle_us: cs.max_cycle_time_us || 0,
+              avg_cycle_us: cs.avg_cycle_time_us || 0,
+              target_us: null,
+              jitter_max_us: 0,
+              last_period_us: 0,
+            });
+          }
+          // Open WebSocket if not already connected (and not in local debug mode)
+          if (!this.wsMonitorActive && !this.monitorWs && !this.isLocalMonitor) {
+            this.connectToMonitor(host, port, host);
+          }
         } else {
           this.updateTargetStatus("idle", host);
+          this.stopWsMonitoring();
         }
       } else {
         this.updateTargetStatus("error", host);
+        this.stopWsMonitoring();
       }
     } catch {
       this.updateTargetStatus("offline", host);
+      this.stopWsMonitoring();
     }
+  }
+
+  // ── WebSocket Variable Monitoring ─────────────────────────────────
+
+  private static log(msg: string) {
+    console.log(`[PLC-Monitor] ${msg}`);
+  }
+
+  /** Open a WebSocket to the target agent for real-time variable monitoring. */
+  public startWsMonitoring() {
+    if (this.monitorWs) return; // already attempting/connected
+    if (!this.selectedTargetHost) return;
+
+    const host = this.selectedTargetHost;
+    const port = this.selectedTargetPort;
+    const url = `ws://${host}:${port}/api/v1/monitor/ws`;
+    MonitorPanel.log(`Connecting WebSocket to ${url}`);
+
+    try {
+      const WebSocket = require("ws") as typeof import("ws");
+      const ws = new WebSocket(url);
+      this.monitorWs = ws;
+
+      ws.on("open", () => {
+        MonitorPanel.log("WebSocket connected — requesting catalog");
+        this.wsMonitorActive = true;
+        // 1. Get catalog for autocomplete
+        this.wsSend({ method: "getCatalog" });
+        // 2. Subscribe to the persisted watch list
+        if (this.watchList.length > 0) {
+          MonitorPanel.log(
+            `Subscribing to ${this.watchList.length} variables: ${this.watchList.join(", ")}`
+          );
+          this.wsSend({
+            method: "subscribe",
+            params: { variables: this.watchList, interval_ms: 0 },
+          });
+        }
+        // 3. Get initial cycle info
+        this.wsSend({ method: "getCycleInfo" });
+      });
+
+      ws.on("message", (data: import("ws").RawData) => {
+        try {
+          const msg = JSON.parse(data.toString());
+          this.handleWsMessage(msg);
+        } catch (e: any) {
+          MonitorPanel.log(`Failed to parse WS message: ${e.message}`);
+        }
+      });
+
+      ws.on("close", (code: number, reason: Buffer) => {
+        MonitorPanel.log(
+          `WebSocket closed (code=${code}, reason=${reason.toString() || "none"})`
+        );
+        this.wsMonitorActive = false;
+        this.monitorWs = undefined;
+      });
+
+      ws.on("error", (err: Error) => {
+        MonitorPanel.log(`WebSocket error: ${err.message}`);
+        this.wsMonitorActive = false;
+        this.monitorWs = undefined;
+      });
+    } catch (e: any) {
+      MonitorPanel.log(`WebSocket connect failed: ${e.message || e}`);
+    }
+  }
+
+  /** Close the WebSocket connection. */
+  public stopWsMonitoring() {
+    if (this.monitorWs) {
+      MonitorPanel.log("Closing WebSocket");
+      try { this.monitorWs.close(); } catch { /* ignore */ }
+      this.monitorWs = undefined;
+    }
+    this.wsMonitorActive = false;
+  }
+
+  /** Send a JSON message over the WebSocket. */
+  private wsSend(msg: any) {
+    if (this.monitorWs && this.monitorWs.readyState === 1 /* OPEN */) {
+      this.monitorWs.send(JSON.stringify(msg));
+    }
+  }
+
+  /** Handle an incoming message from the WebSocket. */
+  private handleWsMessage(msg: any) {
+    switch (msg.type) {
+      case "variableUpdate":
+        if (Array.isArray(msg.variables)) {
+          const vars = msg.variables.map((v: any) => ({
+            name: v.name,
+            value: v.value,
+            type: v.type,
+            forced: !!v.forced,
+          }));
+          this.panel.webview.postMessage({
+            command: "updateVariables",
+            variables: vars,
+          });
+          // Cycle stats are included in every variableUpdate
+          this.updateCycleInfo({
+            cycle_count: msg.cycle || 0,
+            last_cycle_us: msg.last_cycle_us || 0,
+            min_cycle_us: msg.min_cycle_us || 0,
+            max_cycle_us: msg.max_cycle_us || 0,
+            avg_cycle_us: msg.avg_cycle_us || 0,
+            target_us: msg.target_cycle_us || null,
+            jitter_max_us: msg.jitter_max_us || 0,
+            last_period_us: msg.last_period_us || 0,
+          });
+        }
+        break;
+      case "catalog":
+        if (Array.isArray(msg.variables)) {
+          this.catalog = msg.variables.map((v: any) => ({
+            name: v.name,
+            type: v.type,
+          }));
+          MonitorPanel.log(`Catalog received: ${this.catalog.length} variables`);
+          this.panel.webview.postMessage({
+            command: "updateCatalog",
+            catalog: this.catalog,
+          });
+        }
+        break;
+      case "cycleInfo":
+        this.updateCycleInfo({
+          cycle_count: msg.cycle_count || 0,
+          last_cycle_us: msg.last_cycle_us || 0,
+          min_cycle_us: msg.min_cycle_us || 0,
+          max_cycle_us: msg.max_cycle_us || 0,
+          avg_cycle_us: msg.avg_cycle_us || 0,
+          target_us: null,
+          jitter_max_us: 0,
+          last_period_us: 0,
+        });
+        break;
+      case "response":
+        MonitorPanel.log(
+          `WS response: success=${msg.success}${msg.data ? " data=" + JSON.stringify(msg.data) : ""}`
+        );
+        break;
+      case "error":
+        MonitorPanel.log(`WS error: ${msg.message}`);
+        vscode.window.showWarningMessage(`Monitor: ${msg.message}`);
+        break;
+      default:
+        MonitorPanel.log(`Unknown WS message type: ${msg.type}`);
+    }
+  }
+
+  /** Force a variable via WebSocket. */
+  private targetForce(variable: string, value: string) {
+    if (!this.wsMonitorActive) {
+      vscode.window.showWarningMessage("Monitor: not connected to target");
+      return;
+    }
+    let jsonValue: any = value;
+    if (value === "true" || value === "false") {
+      jsonValue = value === "true";
+    } else if (/^-?\d+$/.test(value)) {
+      jsonValue = parseInt(value, 10);
+    } else if (/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(value)) {
+      jsonValue = parseFloat(value);
+    }
+    MonitorPanel.log(`Force ${variable} = ${JSON.stringify(jsonValue)}`);
+    this.wsSend({ method: "force", params: { variable, value: jsonValue } });
+  }
+
+  /** Unforce a variable via WebSocket. */
+  private targetUnforce(variable: string) {
+    if (!this.wsMonitorActive) {
+      vscode.window.showWarningMessage("Monitor: not connected to target");
+      return;
+    }
+    MonitorPanel.log(`Unforce ${variable}`);
+    this.wsSend({ method: "unforce", params: { variable } });
   }
 
   /** Start periodic status polling (every 5s). */
   private startStatusPolling() {
     this.stopStatusPolling();
+    MonitorPanel.log(
+      `Status polling started for ${this.selectedTargetHost}:${this.selectedTargetPort}`
+    );
     this.pollTargetStatus(); // immediate first poll
     this.statusPollTimer = setInterval(() => this.pollTargetStatus(), 5000);
   }
@@ -248,34 +461,49 @@ export class MonitorPanel {
   public selectedTargetHost: string | undefined;
   public selectedTargetPort: number = 4840;
 
-  /// Send a synthetic evaluate request to the active DAP session — used
-  /// for force / unforce / addWatch / removeWatch / clearWatch.
-  private evaluate(expression: string) {
-    const session = vscode.debug.activeDebugSession;
-    if (!session || session.type !== "st") {
-      vscode.window.showWarningMessage(
-        "PLC Monitor: no active debug session"
-      );
-      return;
-    }
-    session.customRequest("evaluate", { expression, context: "repl" });
+  // ── Unified Monitor Connection ───────────────────────────────────
+
+  /** Whether this is a local debug monitor (auto-disconnects on session end). */
+  private isLocalMonitor = false;
+
+  /**
+   * Connect the Monitor panel to a WebSocket monitor server.
+   * Called by the extension when a DAP session starts (local debug) or
+   * when the user selects a remote target and it's running.
+   */
+  public connectToMonitor(host: string, port: number, label: string) {
+    // Disconnect any existing connection first
+    this.stopWsMonitoring();
+    this.isLocalMonitor = host === "127.0.0.1" || host === "localhost";
+    MonitorPanel.log(`connectToMonitor: ${label} → ws://${host}:${port}`);
+
+    // Reset stale data from previous session
+    this.panel.webview.postMessage({ command: "resetSession" });
+    this.panel.webview.postMessage({
+      command: "updateTargetStatus",
+      status: "running",
+      targetName: label,
+    });
+
+    // Stash host/port so startWsMonitoring can use them
+    this.selectedTargetHost = host;
+    this.selectedTargetPort = port;
+    this.startWsMonitoring();
   }
 
-  /// Re-send the persisted watch list to the DAP. Called by the tracker
-  /// when telemetry arrives with an empty variables array — indicating the
-  /// initial sendWatchListToDap (fired during catalog delivery) was too early.
-  public resyncWatchList() {
-    if (this.watchList.length > 0) {
-      this.sendWatchListToDap();
-    }
-  }
-
-  private sendWatchListToDap() {
-    const session = vscode.debug.activeDebugSession;
-    if (!session || session.type !== "st") return;
-    session.customRequest("evaluate", {
-      expression: `watchVariables ${this.watchList.join(",")}`,
-      context: "repl",
+  /**
+   * Disconnect the local debug monitor (called when the debug session ends).
+   * Does NOT disconnect a remote target connection.
+   */
+  public disconnectLocalMonitor() {
+    if (!this.isLocalMonitor) return;
+    MonitorPanel.log("Local debug session ended — disconnecting monitor");
+    this.stopWsMonitoring();
+    this.isLocalMonitor = false;
+    this.panel.webview.postMessage({
+      command: "updateTargetStatus",
+      status: "offline",
+      targetName: "",
     });
   }
 
@@ -574,7 +802,12 @@ export class MonitorPanel {
     </div>
   </div>
 
-  <h2>Scan Cycle</h2>
+  <h2>
+    Scan Cycle
+    <span class="h-actions">
+      <button class="secondary" onclick="resetStats()">Reset Stats</button>
+    </span>
+  </h2>
   <div class="stats">
     <span class="stat-label">Cycles:</span><span class="stat-value" id="s-cycles">0</span>
     <span class="stat-label">Last:</span><span class="stat-value" id="s-last">-</span>
@@ -615,12 +848,10 @@ export class MonitorPanel {
     const vscode = acquireVsCodeApi();
     let catalog = ${initialCatalog};
     let watchList = ${initialWatchList};
-    /** Latest values from the DAP, keyed by lowercased name. */
+    /** Latest values keyed by lowercased name. */
     let valueMap = new Map();
     /** name → type from the catalog, used as a fallback. */
     let typeMap = new Map();
-    /** Pre-built children trees from telemetry, keyed by lowercased name. */
-    let childrenMap = new Map();
 
     function fmtUs(us) {
       if (us >= 1000) {
@@ -689,17 +920,10 @@ export class MonitorPanel {
     let expandedNodes = new Set(${initialExpanded});
 
     /**
-     * Build a tree from the children array (sent by the DAP in
-     * telemetry) or fall back to flat dotted-path prefix matching.
+     * Build a tree from flat dotted-path prefix matching in valueMap.
      */
     function buildSubTree(prefix) {
-      // If the DAP sent a pre-built children array, use it directly.
       const lc = prefix.toLowerCase();
-      const prebuilt = childrenMap.get(lc);
-      if (prebuilt && prebuilt.length > 0) {
-        return childrenToTree(prebuilt);
-      }
-      // Fallback: reconstruct from flat dotted-path entries in valueMap.
       const prefixLc = lc + ".";
       const tree = {};
       valueMap.forEach((v, fullLc) => {
@@ -718,26 +942,6 @@ export class MonitorPanel {
       return tree;
     }
 
-    /** Convert a DAP children array into the tree format used by renderTree. */
-    function childrenToTree(children) {
-      const tree = {};
-      for (const child of children) {
-        const entry = { __value: null, __children: null };
-        if (child.value !== undefined || child.type !== undefined) {
-          entry.__value = {
-            name: child.name,
-            value: child.value || "",
-            type: child.type || "",
-            forced: !!child.forced
-          };
-        }
-        if (child.children && child.children.length > 0) {
-          entry.__children = childrenToTree(child.children);
-        }
-        tree[child.name] = entry;
-      }
-      return tree;
-    }
 
     function renderTree(tree, parentPath, depth) {
       let html = "";
@@ -1079,11 +1283,15 @@ export class MonitorPanel {
       if (stopBtn) stopBtn.disabled = (status !== "running");
     }
 
+    function resetStats() {
+      vscode.postMessage({ command: "resetStats" });
+    }
+
     function clearAll() {
       if (watchList.length === 0) return;
       watchList = [];
       valueMap.clear();
-      childrenMap.clear();
+
       renderWatchTable();
       vscode.postMessage({ command: "clearWatch" });
     }
@@ -1145,10 +1353,6 @@ export class MonitorPanel {
         const prevSize = valueMap.size;
         for (const v of msg.variables) {
           valueMap.set(v.name.toLowerCase(), v);
-          // Store pre-built children tree from the DAP telemetry.
-          if (v.children && Array.isArray(v.children)) {
-            childrenMap.set(v.name.toLowerCase(), v.children);
-          }
         }
         // If new variable keys appeared (e.g., first telemetry after adding
         // a FB watch), rebuild the table structure so the tree can form.
@@ -1162,7 +1366,7 @@ export class MonitorPanel {
         // New debug session — clear stale values from the previous session
         // so the panel rebuilds when the first telemetry tick arrives.
         valueMap.clear();
-        childrenMap.clear();
+  
         renderWatchTable();
       } else if (msg.command === "updateCatalog") {
         catalog = msg.catalog;
@@ -1187,6 +1391,7 @@ export class MonitorPanel {
 
   private dispose() {
     this.stopStatusPolling();
+    this.stopWsMonitoring();
     MonitorPanel.currentPanel = undefined;
     this.panel.dispose();
     while (this.disposables.length) {

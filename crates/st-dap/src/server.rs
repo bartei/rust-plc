@@ -441,6 +441,9 @@ struct DapSession {
     /// applied while the program is executing). Sent by `run_dap` after
     /// `resume_execution` returns.
     deferred_responses: Vec<Response>,
+    /// Monitor handle for the embedded WS server (WebSocket-based variable
+    /// monitoring). Created during handle_launch.
+    monitor_handle: Option<st_monitor::MonitorHandle>,
 }
 
 impl DapSession {
@@ -478,6 +481,7 @@ impl DapSession {
             request_rx: None,
             deferred_requests: Vec::new(),
             deferred_responses: Vec::new(),
+            monitor_handle: None,
         }
     }
 
@@ -983,6 +987,11 @@ impl DapSession {
         // autocomplete dropdown without having to receive every variable's
         // value on every cycle.
         self.push_var_catalog_event();
+
+        // Start the embedded WebSocket monitor server on a random local port.
+        // The VS Code extension picks up the port from the DAP event below
+        // and connects the Monitor panel to ws://localhost:{port}.
+        self.start_monitor_server();
 
         ok(seq, ResponseBody::Launch)
     }
@@ -1579,6 +1588,148 @@ impl DapSession {
         }));
     }
 
+    // ── Embedded Monitor WS Server ──────────────────────────────────
+
+    /// Start the embedded WebSocket monitor server on a random local port.
+    /// Populates the catalog from the current VM and sends the port to the
+    /// VS Code extension via a DAP telemetry event.
+    fn start_monitor_server(&mut self) {
+        let handle = st_monitor::MonitorHandle::new();
+
+        // Populate catalog from the VM
+        if let Some(ref vm) = self.vm {
+            let catalog: Vec<st_monitor::CatalogEntry> = vm
+                .monitorable_catalog()
+                .into_iter()
+                .map(|(name, ty)| st_monitor::CatalogEntry {
+                    name,
+                    var_type: ty,
+                })
+                .collect();
+            eprintln!("[DAP-MONITOR] Catalog: {} variables", catalog.len());
+            handle.set_catalog(catalog);
+        }
+
+        // Start the server on a background tokio runtime (the DAP main loop
+        // is synchronous — no tokio runtime on this thread).
+        let server_handle = handle.clone();
+        let (port_tx, port_rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("dap-monitor".to_string())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to build monitor tokio runtime");
+                rt.block_on(async {
+                    match st_monitor::run_monitor_server("127.0.0.1:0", server_handle).await {
+                        Ok(addr) => {
+                            let _ = port_tx.send(addr.port());
+                            eprintln!("[DAP-MONITOR] WS server listening on {addr}");
+                            // Keep the runtime alive until the process exits
+                            std::future::pending::<()>().await;
+                        }
+                        Err(e) => {
+                            eprintln!("[DAP-MONITOR] Failed to start: {e}");
+                            let _ = port_tx.send(0);
+                        }
+                    }
+                });
+            })
+            .expect("Failed to spawn monitor thread");
+
+        // Wait for the port (with a short timeout)
+        if let Ok(port) = port_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            if port > 0 {
+                eprintln!("[DAP-MONITOR] Sending monitor port {port} to VS Code");
+                self.pending_events.push(Event::Output(OutputEventBody {
+                    category: Some(OutputEventCategory::Telemetry),
+                    output: "plc/monitorPort".to_string(),
+                    data: Some(serde_json::json!({ "port": port })),
+                    ..Default::default()
+                }));
+            }
+        }
+
+        self.monitor_handle = Some(handle);
+    }
+
+    /// Push variable snapshot + cycle stats to the monitor server.
+    /// Called after each completed scan cycle.
+    fn push_monitor_snapshot(&self) {
+        let Some(ref handle) = self.monitor_handle else { return };
+        if !handle.has_subscribers() {
+            return;
+        }
+        let Some(ref vm) = self.vm else { return };
+
+        let forced = vm.forced_variables();
+        let all_vars = vm.monitorable_variables();
+        let vars: Vec<st_monitor::VariableValue> = all_vars
+            .into_iter()
+            .map(|v| {
+                let is_forced = forced.contains_key(&v.name.to_uppercase());
+                st_monitor::VariableValue {
+                    name: v.name,
+                    value: v.value,
+                    var_type: v.ty,
+                    forced: is_forced,
+                }
+            })
+            .collect();
+
+        let cs = &self.cycle_stats;
+        let cycle_info = st_monitor::CycleInfoData {
+            cycle_count: cs.cycle_count,
+            last_cycle_us: cs.last_cycle_time.as_micros() as u64,
+            min_cycle_us: if cs.min_cycle_time == Duration::MAX {
+                0
+            } else {
+                cs.min_cycle_time.as_micros() as u64
+            },
+            max_cycle_us: cs.max_cycle_time.as_micros() as u64,
+            avg_cycle_us: cs.avg_cycle_time().as_micros() as u64,
+            target_cycle_us: self.target_cycle_time.map(|d| d.as_micros() as u64).unwrap_or(0),
+            last_period_us: cs.last_cycle_period.as_micros() as u64,
+            min_period_us: if cs.min_cycle_period == Duration::MAX {
+                0
+            } else {
+                cs.min_cycle_period.as_micros() as u64
+            },
+            max_period_us: cs.max_cycle_period.as_micros() as u64,
+            jitter_max_us: cs.jitter_max.as_micros() as u64,
+        };
+
+        handle.update_variables(vars, cycle_info);
+    }
+
+    /// Apply forced variables and stats resets from WS monitor clients.
+    /// Called between scan cycles.
+    fn apply_monitor_commands(&mut self) {
+        let Some(ref handle) = self.monitor_handle else { return };
+
+        // Apply forced variables
+        let forces = handle.take_forced_variables();
+        if !forces.is_empty() {
+            if let Some(ref mut vm) = self.vm {
+                for (name, value) in forces {
+                    eprintln!("[DAP-MONITOR] Applying force: {name} = {value:?}");
+                    vm.force_variable(&name, value);
+                }
+            }
+        }
+
+        // Reset stats if requested
+        if handle.take_reset_stats() {
+            eprintln!("[DAP-MONITOR] Resetting cycle stats");
+            self.cycle_stats.min_cycle_time = Duration::MAX;
+            self.cycle_stats.max_cycle_time = Duration::ZERO;
+            self.cycle_stats.min_cycle_period = Duration::MAX;
+            self.cycle_stats.max_cycle_period = Duration::ZERO;
+            self.cycle_stats.jitter_max = Duration::ZERO;
+        }
+    }
+
     fn handle_force_command(&mut self, seq: i64, expr: &str) -> Response {
         // Parse "varname = value"
         let parts: Vec<&str> = expr.splitn(2, '=').collect();
@@ -1780,6 +1931,9 @@ impl DapSession {
             self.cycles_since_last_event = 0;
             self.push_cycle_stats_event();
         }
+
+        // Push to the embedded WS monitor server (if any clients are connected)
+        self.push_monitor_snapshot();
     }
 
     /// Push a `plc/cycleStats` telemetry event reflecting the latest stats,
@@ -2248,6 +2402,9 @@ impl DapSession {
                         current_mode = StepMode::StepIn;
                         continue;
                     }
+
+                    // Apply forced variables from WS monitor clients
+                    self.apply_monitor_commands();
 
                     // Continue mode only: drain incoming requests so the
                     // run loop is interruptible by Pause/Disconnect/SetBp.

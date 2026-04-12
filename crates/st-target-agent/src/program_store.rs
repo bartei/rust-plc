@@ -149,6 +149,14 @@ impl ProgramStore {
             None
         };
 
+        // Always persist plc-project.yaml separately (not just inside current_source)
+        // so that engine.cycle_time is available even for release bundles.
+        if let Some(ref yaml) = bundle.project_yaml {
+            let _ = fs::write(self.program_dir.join("current.project.yaml"), yaml);
+        } else {
+            let _ = fs::remove_file(self.program_dir.join("current.project.yaml"));
+        }
+
         // Persist bytecode and metadata to disk for reboot survival
         let _ = fs::write(
             self.program_dir.join("current.bytecode"),
@@ -181,6 +189,11 @@ impl ProgramStore {
     /// Get metadata of the currently deployed program.
     pub fn current_program(&self) -> Option<&ProgramMetadata> {
         self.current.as_ref().map(|s| &s.metadata)
+    }
+
+    /// Get the path to the project YAML (always available, even for release bundles).
+    pub fn project_yaml_path(&self) -> PathBuf {
+        self.program_dir.join("current.project.yaml")
     }
 
     /// Get the path to the extracted source directory (for DAP debugging).
