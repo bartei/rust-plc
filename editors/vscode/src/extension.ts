@@ -85,6 +85,9 @@ function renderStatusBar(stats: PlcCycleStats) {
   cycleStatusBar.show();
 }
 
+/** Active local debug monitor port (0 = no active session). */
+let localMonitorPort = 0;
+
 /**
  * DAP message tracker: forwards cycle stats to the status bar, handles
  * source path remapping for remote debug, and picks up the monitor WS
@@ -192,10 +195,11 @@ class PlcDapTracker implements vscode.DebugAdapterTracker {
 
     if (sentinel === "plc/monitorPort") {
       // The DAP server started an embedded WS monitor on this port.
-      // Auto-connect the Monitor panel to ws://localhost:{port}.
+      // Store it so the Monitor panel can connect whenever it opens.
       const port = (data as any).port;
       if (typeof port === "number" && port > 0) {
         console.log(`[DAP-TRACKER] Monitor WS port received: ${port}`);
+        localMonitorPort = port;
         if (MonitorPanel.currentPanel) {
           MonitorPanel.currentPanel.connectToMonitor("127.0.0.1", port, "Local Debug");
         }
@@ -459,6 +463,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.debug.onDidTerminateDebugSession((session) => {
       if (session.type === "st") {
         cycleStatusBar?.hide();
+        localMonitorPort = 0;
         // Disconnect the local monitor WS (the DAP server is shutting down)
         if (MonitorPanel.currentPanel) {
           MonitorPanel.currentPanel.disconnectLocalMonitor();
@@ -475,12 +480,17 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand("structured-text.openMonitor", () => {
       MonitorPanel.createOrShow(context.extensionUri);
-      // Push targets from plc-project.yaml into the panel dropdown.
       if (MonitorPanel.currentPanel) {
+        // Push targets from plc-project.yaml into the panel dropdown.
         const targets = getTargetsFromConfig();
         MonitorPanel.currentPanel.setTargets(targets);
+        // If a local debug session is active, connect to its monitor server.
+        if (localMonitorPort > 0) {
+          MonitorPanel.currentPanel.connectToMonitor(
+            "127.0.0.1", localMonitorPort, "Local Debug"
+          );
+        }
       }
-      // Catalog is fetched via WebSocket when the panel connects to a target.
     })
   );
 
