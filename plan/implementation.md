@@ -243,114 +243,127 @@ Infrastructure: `@vscode/test-electron` (real Electron instance) + Playwright (w
 
 ---
 
-## Phase 16: RETAIN / PERSISTENT Variable Persistence
+## Phase 16: RETAIN / PERSISTENT Variable Persistence (COMPLETED)
 
 > Design notes: [design_core.md § Phase 16](design_core.md#phase-16-retain--persistent-variable-persistence)
 
 Non-volatile storage for RETAIN and PERSISTENT variables across runtime restarts
-and program downloads, per IEC 61131-3 semantics.
+and program downloads, per IEC 61131-3 semantics. 14 tests.
 
-### IR + Compiler
-
-- [ ] Add `persistent: bool` field to `VarSlot` (alongside existing `retain`)
-- [ ] Compiler: set `retain` and `persistent` from `VarQualifier` list
-- [ ] Compiler: support combined `VAR RETAIN PERSISTENT` qualifier
-- [ ] Semantic checker: validate retain/persistent only on VAR_GLOBAL and PROGRAM locals
-
-### Retain file format + serialization
-
-- [ ] Define binary retain file format (header + named entries)
-- [ ] `RetainStore::save(vm, path)` — serialize retain/persistent variables
-- [ ] `RetainStore::load(path, module)` — deserialize and match by name+type
-- [ ] Handle version migration (skip mismatched entries gracefully)
-- [ ] Unit tests: round-trip save/load for all Value types
-
-### Engine integration
-
-- [ ] `Engine::apply_retained(values)` — inject into VM before first scan cycle
-- [ ] Save on clean shutdown (SIGTERM / engine stop)
-- [ ] Periodic checkpoint every N cycles (configurable, default 1000)
-- [ ] Snapshot before online change / program download
-- [ ] Warm restart: load RETAIN + RETAIN PERSISTENT entries
-- [ ] Cold restart: load PERSISTENT + RETAIN PERSISTENT entries
-- [ ] Integration tests: values survive engine restart
-
-### Storage location resolution
-
-- [ ] Target host: default `/var/lib/st-plc/retain/<program>.retain`
-- [ ] Local dev: `<project-root>/.st-retain/<program>.retain` (sibling of plc-project.yaml)
-- [ ] Fallback: CWD when no project file found
-- [ ] CLI `run` / DAP `launch` resolve and pass retain path to engine
-- [ ] Agent resolves retain path from `agent.yaml` config
-- [ ] Add `.st-retain/` to template project `.gitignore`
-
-### Configuration
-
-- [ ] `plc-project.yaml`: `engine.retain.checkpoint_cycles` (default 1000)
-- [ ] `plc-project.yaml`: `engine.retain.path` (override retain directory)
-- [ ] `agent.yaml`: `storage.retain_dir` (default `/var/lib/st-plc/retain`)
-- [ ] JSON schema updates for both config files
+- [x] IR: `persistent: bool` field on `VarSlot` (serde-default for backward compat)
+- [x] Compiler: set both `retain` and `persistent` from `VarQualifier` for globals and locals
+- [x] `RetainStore` module: capture, restore, save (atomic JSON), load
+- [x] Engine: restore on startup, periodic checkpoint, save on shutdown + before online change
+- [x] CLI: resolve `.st-retain/<program>.retain` next to plc-project.yaml
+- [x] Target agent: save on stop/shutdown, default `/var/lib/st-plc/retain/`
+- [x] `plc-project.yaml`: `engine.retain.checkpoint_cycles` config
+- [x] JSON schema updated
+- [x] 14 unit/integration tests (capture, restore, warm/cold restart, type mismatch, round-trip, engine restart lifecycle)
 
 ### Remaining
 
 - [ ] DAP: show retain/persistent badge in Variables panel
 - [ ] Monitor panel: indicate retain/persistent variables visually
-- [ ] Documentation: `docs/src/language/retain-persistent.md`
 - [ ] E2E test: QEMU target — deploy, run, stop service, restart, verify values preserved
 
 ---
 
-## Phase 17: Singleton Enforcement + Debug Attach to Running Engine (SAFETY-CRITICAL)
+## Phase 17: Singleton Enforcement + Debug Attach to Running Engine
 
-> Design notes: [design_core.md § Phase 17](design_core.md#phase-17-singleton-enforcement--debug-attach-to-running-engine)
+> **⚠️ REMOTE DEBUGGING IS BROKEN — DO NOT USE IN PRODUCTION ⚠️**
+>
+> The Rust-side DAP protocol works (verified by integration tests) but the VS
+> Code extension fails to properly remap source paths between the target and
+> local workspace. Breakpoints don't work, stepping doesn't track lines, and
+> the session is unreliable. 21 of 24 Electron E2E tests pass against a real
+> target, but the 3 that fail are breakpoints, stepping, and full lifecycle —
+> the most critical features.
+>
+> **Status:** Singleton enforcement and engine infrastructure are solid.
+> Remote debug attach is ON HOLD until the VS Code extension path remapping
+> is fundamentally reworked. The current `dap_attach_handler.rs` and
+> `PlcDapTracker` source remapping approach is too fragile.
 
-Two instances controlling the same physical I/O can cause machinery damage or
-personal injury. The debugger must attach to the running engine, not spawn a
-second VM. This is the most safety-critical feature in the system.
+### Phase A — Singleton enforcement (COMPLETED)
 
-### Phase A — Singleton enforcement
+- [x] PID file with `flock(LOCK_EX | LOCK_NB)` at `/run/st-runtime/st-runtime.pid`
+- [x] `SingletonGuard` RAII struct: holds lock, removes PID file on drop
+- [x] Integrated into `st-runtime agent` startup
+- [x] Systemd unit hardening: `StartLimitBurst=5`, `StartLimitIntervalSec=30`, `RuntimeDirectory=st-runtime`
+- [x] 4 unit tests
 
-- [ ] PID file with `flock(LOCK_EX | LOCK_NB)` at `/run/st-runtime/st-runtime.pid`
-- [ ] `SingletonGuard` RAII struct: holds lock, removes PID file on drop
-- [ ] Integrate into `st-runtime agent` startup — exit with clear error if locked
-- [ ] Systemd unit hardening: `StartLimitBurst=5`, `StartLimitIntervalSec=30`, `RuntimeDirectory=st-runtime`
-- [ ] Unit tests: acquire/double-acquire/drop-releases/stale-file (4 tests)
+### Phase B — Handle VmError::Halt as debug pause (COMPLETED)
 
-### Phase B — Handle VmError::Halt as debug pause
+- [x] `RuntimeStatus::DebugPaused` added
+- [x] `run_cycle_loop` restructured: Halt → debug pause, not fatal error
+- [x] Watchdog ignores DebugPaused
 
-- [ ] Add `RuntimeStatus::DebugPaused` to runtime status enum
-- [ ] Restructure `run_cycle_loop`: `Halt` → debug pause, not fatal error
-- [ ] Unit test: halt becomes DebugPaused not Error
+### Phase C — Debug command channel (COMPLETED)
 
-### Phase C — Debug command channel
+- [x] `DebugCommand` / `DebugResponse` enums in `st-engine/src/debug.rs`
+- [x] `RuntimeCommand::DebugAttach` / `DebugDetach`
+- [x] `RuntimeManager::debug_attach()` / `debug_detach()`
+- [x] `handle_debug_commands()` blocking loop with 30-min timeout
+- [x] Auto-detach on channel close
+- [x] 5 integration tests (attach, pause, resume, reattach lifecycle)
 
-- [ ] `DebugCommand` / `DebugResponse` enums in `st-engine/src/debug.rs`
-- [ ] Extend `RuntimeCommand` with `DebugAttach` / `DebugDetach`
-- [ ] `RuntimeManager::debug_attach()` / `debug_detach()` async methods
-- [ ] `handle_debug_commands()` blocking loop in runtime thread
-- [ ] Watchdog: ignore `DebugPaused` status (don't restart paused engine)
-- [ ] Unit tests: attach/detach/variables/channel-drop (5 tests)
+### Phase D — In-process DAP handler (COMPLETED but BROKEN)
 
-### Phase D — In-process DAP handler
-
-- [ ] `dap_attach_handler.rs`: translate DAP protocol ↔ DebugCommand/DebugResponse
-- [ ] DAP proxy: route to attach handler when engine Running, subprocess when Idle
-- [ ] Source file + virtual offset resolution from ProgramStore
-- [ ] Integration tests: attach/breakpoints/step/variables/disconnect (6 tests)
+- [x] `dap_attach_handler.rs`: concurrent reader/event thread architecture
+- [x] DAP proxy routes to attach handler when engine Running
+- [x] stopOnEntry support
+- [x] Variable inspection when paused
+- [x] Engine pause/resume/detach lifecycle works (verified by Rust tests)
+- **[!] Source path remapping broken** — VS Code can't open target-side files
+- **[!] Breakpoints don't work** — path mismatch between local and target
+- **[!] Stepping doesn't track lines** — source offset resolution wrong
+- [ ] Needs fundamental rework of path remapping strategy
 
 ### Phase E — Safety hardening
 
-- [ ] Debug pause timeout (30 min default) — auto-detach on timeout
-- [ ] Auto-detach on TCP disconnect (reader EOF → Disconnect command)
-- [ ] I/O ordering invariant: outputs not written until paused cycle completes
+- [x] Debug pause timeout (30 min)
+- [x] Auto-detach on TCP disconnect
+- [x] Call stack cleanup on detach
+- [x] stop() accepts DebugPaused state
+- [ ] E2E QEMU singleton tests (not yet run)
 
-### E2E QEMU tests
+---
 
-- [ ] `test_singleton_second_instance_fails`
-- [ ] `test_singleton_process_count_exactly_one`
-- [ ] `test_dap_attach_no_second_process`
-- [ ] `test_program_resumes_after_debug_disconnect`
-- [ ] `test_debug_pause_timeout_auto_resumes`
+## Phase 18: Unified HTTP Monitoring (TODO — NEXT PRIORITY)
+
+> The PLC Monitor panel should use HTTP API polling for cycle stats, watch
+> variables, and force/unforce — working identically for local and remote
+> targets. No dependency on DAP debug sessions.
+
+### HTTP API endpoints (st-target-agent)
+
+- [ ] `GET /api/v1/variables/catalog` — list all monitorable variables (names + types)
+- [ ] `GET /api/v1/variables?watch=Main.counter,Main.stats` — read watched variable values
+- [ ] `POST /api/v1/variables/force` — force a variable: `{ "name": "...", "value": "..." }`
+- [ ] `DELETE /api/v1/variables/force/:name` — unforce a variable
+- [ ] `GET /api/v1/variables/forced` — list all currently forced variables
+- [ ] Existing `GET /api/v1/status` already has cycle stats
+
+### Local HTTP server for st-cli debug
+
+- [ ] `st-cli debug` exposes same HTTP endpoints on a local port
+- [ ] Or: DAP server embeds a lightweight HTTP server alongside stdio
+- [ ] Monitor panel connects to same URL regardless of local/remote
+
+### Monitor panel changes (VS Code extension)
+
+- [ ] "Connect" button with target dropdown (reuse existing target selector)
+- [ ] HTTP polling loop: `/api/v1/status` every 1s, `/api/v1/variables` every 500ms
+- [ ] Force/unforce via HTTP POST/DELETE (replace DAP evaluate REPL)
+- [ ] Variable catalog via HTTP GET (replace DAP telemetry plc/varCatalog)
+- [ ] Remove dependency on active debug session for monitoring
+- [ ] Same code path for local and remote
+
+### Remove broken remote debug
+
+- [ ] Disable remote debug F5 attach option (or hide behind feature flag)
+- [ ] Keep local debug (launch mode) working as-is
+- [ ] Keep `dap_attach_handler.rs` code for future rework
 
 ---
 

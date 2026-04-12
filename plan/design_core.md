@@ -59,6 +59,7 @@ Phase 16 (retain/persistent) — after Phase 7+15
 | **15** | Remote deployment & online management (agent, SSH, remote debug/monitor) — [design_deploy.md](design_deploy.md) |
 | **16** | RETAIN / PERSISTENT variable persistence (non-volatile storage across restarts) |
 | **17** | Singleton enforcement + debug attach to running engine (safety-critical) |
+| **18** | Unified HTTP monitoring — cycle stats, watch variables, force/unforce via HTTP API (local + remote) |
 
 ---
 
