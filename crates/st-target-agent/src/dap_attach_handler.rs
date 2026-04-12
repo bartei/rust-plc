@@ -105,6 +105,7 @@ pub fn handle_dap_attach(
     let writer = stream;
     let mut seq_counter: i64 = 1;
     let mut is_paused = false;
+    let mut stop_on_entry = false;
 
     while let Ok(input) = input_rx.recv() {
 
@@ -118,6 +119,7 @@ pub fn handle_dap_attach(
                     &mut is_paused,
                     &source_files,
                     &input_rx,
+                    &mut stop_on_entry,
                 );
                 let command = msg["command"].as_str().unwrap_or("");
                 if command == "disconnect" {
@@ -148,6 +150,7 @@ pub fn handle_dap_attach(
 // DAP request handling
 // =============================================================================
 
+#[allow(clippy::too_many_arguments)]
 fn handle_dap_request(
     msg: &serde_json::Value,
     cmd_tx: &std::sync::mpsc::Sender<st_engine::DebugCommand>,
@@ -156,6 +159,7 @@ fn handle_dap_request(
     is_paused: &mut bool,
     source_files: &[(String, String)],
     input_rx: &std::sync::mpsc::Receiver<Input>,
+    stop_on_entry: &mut bool,
 ) {
     let req_seq = msg["seq"].as_i64().unwrap_or(0);
     let command = msg["command"].as_str().unwrap_or("");
@@ -170,15 +174,17 @@ fn handle_dap_request(
         }
 
         "attach" | "launch" => {
+            *stop_on_entry = msg["arguments"]["stopOnEntry"].as_bool().unwrap_or(false);
             send_dap_response(writer, req_seq, command, serde_json::json!(null));
-            // Send Initialized event so VS Code sends configurationDone
             send_dap_event(writer, seq, "initialized", serde_json::json!({}));
-            // Do NOT pause or send Stopped — the engine keeps running.
-            // VS Code shows the debug toolbar with a Pause button.
         }
 
         "configurationDone" => {
             send_dap_response(writer, req_seq, "configurationDone", serde_json::json!(null));
+            if *stop_on_entry {
+                // Pause the engine — Stopped event arrives via engine event channel
+                let _ = cmd_tx.send(st_engine::DebugCommand::Pause);
+            }
         }
 
         "loadedSources" => {

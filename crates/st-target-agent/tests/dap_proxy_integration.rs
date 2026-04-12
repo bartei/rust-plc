@@ -478,22 +478,7 @@ async fn test_dap_attach_to_running_engine() {
     assert!(cycle_count_before > 0, "Should have run some cycles: {status_resp}");
 
     // 4. Connect to DAP port and do the attach protocol
-    let base_clone = base.clone();
     let dap_result = tokio::task::spawn_blocking(move || {
-        // Check status using raw TCP (no blocking reqwest needed)
-        let addr_str = base_clone.strip_prefix("http://").unwrap_or(&base_clone);
-        if let Ok(mut s) = TcpStream::connect_timeout(
-            &addr_str.parse().unwrap(),
-            Duration::from_secs(2),
-        ) {
-            let _ = s.write_all(b"GET /api/v1/status HTTP/1.0\r\nHost: localhost\r\n\r\n");
-            let mut resp = String::new();
-            let _ = std::io::Read::read_to_string(&mut s, &mut resp);
-            if let Some(body) = resp.split("\r\n\r\n").nth(1) {
-                eprintln!("[TEST] Status before DAP connect: {body}");
-            }
-        }
-
         let stream = TcpStream::connect(format!("127.0.0.1:{dap_port}"))
             .expect("Cannot connect to DAP proxy");
         stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
@@ -621,7 +606,6 @@ async fn test_dap_attach_pause_resume_reattach_lifecycle() {
     eprintln!("[TEST] Initial cycles: {initial_cycles}");
 
     // === SESSION 1: Attach → Pause → Variables → Resume → Disconnect ===
-    let base_clone = base.clone();
     let session1_result = tokio::task::spawn_blocking(move || {
         let stream = TcpStream::connect(format!("127.0.0.1:{dap_port}")).unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
@@ -677,7 +661,6 @@ async fn test_dap_attach_pause_resume_reattach_lifecycle() {
     eprintln!("[TEST] After session 1: status={}, cycles={cycles_after_s1}", status["status"]);
 
     // === SESSION 2: Re-attach to verify engine isn't corrupted ===
-    let base_clone2 = base.clone();
     let session2_result = tokio::task::spawn_blocking(move || {
         let stream = TcpStream::connect(format!("127.0.0.1:{dap_port}")).unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
