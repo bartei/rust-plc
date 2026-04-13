@@ -44,6 +44,51 @@ pub struct RetainSnapshot {
     pub globals: HashMap<String, RetainEntry>,
     /// Program locals: program_name → (var_name → entry).
     pub program_locals: HashMap<String, HashMap<String, RetainEntry>>,
+    /// Struct/FB instance fields: program_name → instance_var_name → field_name → entry.
+    /// Structs and FB instances store their field data in `fb_instances`, not in
+    /// the locals vec, so they need a separate section in the snapshot.
+    #[serde(default)]
+    pub instance_fields:
+        HashMap<String, HashMap<String, HashMap<String, RetainEntry>>>,
+}
+
+/// Capture the scalar fields of a struct instance from fb_instances.
+fn capture_instance_fields(
+    vm: &Vm,
+    type_def_idx: u16,
+    instance_key: &(u32, u16),
+    retain: bool,
+    persistent: bool,
+) -> Option<HashMap<String, RetainEntry>> {
+    let (_, fields) = vm.struct_type_fields(type_def_idx)?;
+    let state = vm.fb_instances_ref().get(instance_key);
+    let mut result = HashMap::new();
+    for (j, field) in fields.iter().enumerate() {
+        // Skip nested composite types for now
+        if matches!(
+            field.ty,
+            VarType::FbInstance(_) | VarType::ClassInstance(_) | VarType::Struct(_)
+        ) {
+            continue;
+        }
+        let val = state
+            .and_then(|s| s.get(j))
+            .cloned()
+            .unwrap_or(Value::default_for_type(field.ty));
+        result.insert(
+            field.name.clone(),
+            RetainEntry {
+                value: val,
+                retain,
+                persistent,
+            },
+        );
+    }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 /// Capture all retainable variables from the VM into a snapshot.
@@ -72,23 +117,71 @@ pub fn capture_snapshot(vm: &Vm) -> RetainSnapshot {
 
     // Capture retainable program locals
     let mut program_locals = HashMap::new();
+    let mut instance_fields: HashMap<String, HashMap<String, HashMap<String, RetainEntry>>> =
+        HashMap::new();
     for (func_idx, locals) in vm.retained_locals_ref() {
         let func = &module.functions[*func_idx as usize];
         if func.kind != PouKind::Program {
             continue;
         }
+        let caller_id = (0xFFFF_u32 << 16) | (*func_idx as u32);
         let mut vars = HashMap::new();
         for (j, slot) in func.locals.slots.iter().enumerate() {
             if !slot.retain && !slot.persistent {
                 continue;
             }
-            // Skip composite types (FBs, structs, classes) — their fields
-            // are stored separately in fb_instances, not in the locals vec.
-            if matches!(
-                slot.ty,
-                VarType::FbInstance(_) | VarType::ClassInstance(_) | VarType::Struct(_)
-            ) {
-                continue;
+            // Struct/FB instance fields are stored in fb_instances, not the
+            // locals vec. Capture their fields into the instance_fields map.
+            match slot.ty {
+                VarType::Struct(td_idx) => {
+                    let instance_key = (caller_id, j as u16);
+                    if let Some(fields) = capture_instance_fields(
+                        vm, td_idx, &instance_key, slot.retain, slot.persistent,
+                    ) {
+                        instance_fields
+                            .entry(func.name.clone())
+                            .or_default()
+                            .insert(slot.name.clone(), fields);
+                    }
+                    continue;
+                }
+                VarType::FbInstance(fb_idx) => {
+                    let fb_func = &module.functions[fb_idx as usize];
+                    let instance_key = (caller_id, j as u16);
+                    let state = vm.fb_instances_ref().get(&instance_key);
+                    let mut fields = HashMap::new();
+                    for (k, fb_slot) in fb_func.locals.slots.iter().enumerate() {
+                        let val = state
+                            .and_then(|s| s.get(k))
+                            .cloned()
+                            .unwrap_or(Value::default_for_type(fb_slot.ty));
+                        if matches!(
+                            fb_slot.ty,
+                            VarType::FbInstance(_) | VarType::ClassInstance(_) | VarType::Struct(_)
+                        ) {
+                            continue;
+                        }
+                        fields.insert(
+                            fb_slot.name.clone(),
+                            RetainEntry {
+                                value: val,
+                                retain: slot.retain,
+                                persistent: slot.persistent,
+                            },
+                        );
+                    }
+                    if !fields.is_empty() {
+                        instance_fields
+                            .entry(func.name.clone())
+                            .or_default()
+                            .insert(slot.name.clone(), fields);
+                    }
+                    continue;
+                }
+                VarType::ClassInstance(_) => {
+                    continue;
+                }
+                _ => {}
             }
             let val = locals.get(j).cloned().unwrap_or(Value::Void);
             vars.insert(
@@ -115,6 +208,7 @@ pub fn capture_snapshot(vm: &Vm) -> RetainSnapshot {
         created_at,
         globals,
         program_locals,
+        instance_fields,
     }
 }
 
@@ -228,6 +322,125 @@ pub fn restore_snapshot(vm: &mut Vm, snapshot: &RetainSnapshot, warm: bool) -> V
             }
 
             vm.set_retained_locals(*func_idx, locals);
+        }
+    }
+
+    // Restore struct/FB instance fields from the instance_fields section.
+    // These are stored in vm.fb_instances keyed by (caller_identity, slot).
+    for (prog_name, instances) in &snapshot.instance_fields {
+        if let Some((func_idx, _, slots)) =
+            func_meta.iter().find(|(_, n, _)| n == prog_name)
+        {
+            let caller_id = (0xFFFF_u32 << 16) | (*func_idx as u32);
+            for (inst_name, fields) in instances {
+                // Check warm/cold filter on the first field entry
+                let dominated = fields.values().next().is_some_and(|entry| {
+                    if warm { entry.retain } else { entry.persistent }
+                });
+                if !dominated {
+                    continue;
+                }
+
+                // Find the local slot for this instance variable
+                let slot_info = slots.iter().find(|(_, n, _)| n == inst_name);
+                let Some(&(slot_idx, _, slot_ty)) = slot_info else {
+                    warnings.push(format!(
+                        "{prog_name}.{inst_name}: no longer exists, skipped"
+                    ));
+                    continue;
+                };
+
+                let instance_key = (caller_id, slot_idx);
+
+                match slot_ty {
+                    VarType::Struct(td_idx) => {
+                        if let Some((_, type_fields)) = vm.struct_type_fields(td_idx) {
+                            let type_fields: Vec<(String, VarType)> = type_fields
+                                .iter()
+                                .map(|f| (f.name.clone(), f.ty))
+                                .collect();
+                            let mut instance_state: Vec<Value> = type_fields
+                                .iter()
+                                .map(|(_, ty)| Value::default_for_type(*ty))
+                                .collect();
+                            // Carry over existing state if present
+                            if let Some(existing) = vm.fb_instances_ref().get(&instance_key) {
+                                for (i, val) in existing.iter().enumerate() {
+                                    if i < instance_state.len() {
+                                        instance_state[i] = val.clone();
+                                    }
+                                }
+                            }
+                            for (field_name, entry) in fields {
+                                if let Some(pos) = type_fields
+                                    .iter()
+                                    .position(|(n, _)| n == field_name)
+                                {
+                                    let field_ty = type_fields[pos].1;
+                                    if is_compatible(&entry.value, field_ty) {
+                                        instance_state[pos] = entry.value.clone();
+                                    } else {
+                                        warnings.push(format!(
+                                            "{prog_name}.{inst_name}.{field_name}: type mismatch, skipped"
+                                        ));
+                                    }
+                                } else {
+                                    warnings.push(format!(
+                                        "{prog_name}.{inst_name}.{field_name}: no longer exists, skipped"
+                                    ));
+                                }
+                            }
+                            vm.set_fb_instance(instance_key, instance_state);
+                        }
+                    }
+                    VarType::FbInstance(fb_idx) => {
+                        let fb_slots: Vec<(String, VarType)> = vm
+                            .module()
+                            .functions[fb_idx as usize]
+                            .locals
+                            .slots
+                            .iter()
+                            .map(|s| (s.name.clone(), s.ty))
+                            .collect();
+                        let mut instance_state: Vec<Value> = fb_slots
+                            .iter()
+                            .map(|(_, ty)| Value::default_for_type(*ty))
+                            .collect();
+                        if let Some(existing) = vm.fb_instances_ref().get(&instance_key) {
+                            for (i, val) in existing.iter().enumerate() {
+                                if i < instance_state.len() {
+                                    instance_state[i] = val.clone();
+                                }
+                            }
+                        }
+                        for (field_name, entry) in fields {
+                            if let Some(pos) = fb_slots
+                                .iter()
+                                .position(|(n, _)| n == field_name)
+                            {
+                                let field_ty = fb_slots[pos].1;
+                                if is_compatible(&entry.value, field_ty) {
+                                    instance_state[pos] = entry.value.clone();
+                                } else {
+                                    warnings.push(format!(
+                                        "{prog_name}.{inst_name}.{field_name}: type mismatch, skipped"
+                                    ));
+                                }
+                            } else {
+                                warnings.push(format!(
+                                    "{prog_name}.{inst_name}.{field_name}: no longer exists, skipped"
+                                ));
+                            }
+                        }
+                        vm.set_fb_instance(instance_key, instance_state);
+                    }
+                    _ => {
+                        warnings.push(format!(
+                            "{prog_name}.{inst_name}: not a struct/FB, skipped instance fields"
+                        ));
+                    }
+                }
+            }
         }
     }
 

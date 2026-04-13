@@ -114,6 +114,11 @@
                 "type": "boolean",
                 "description": "Stop on the first statement",
                 "default": true
+              },
+              "localRoot": {
+                "type": "string",
+                "description": "Local workspace folder containing source files. Used for source path mapping between local editor and remote target. Defaults to ${workspaceFolder}.",
+                "default": "${workspaceFolder}"
               }
             }
           }

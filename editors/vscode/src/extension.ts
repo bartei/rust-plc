@@ -94,84 +94,22 @@ let localMonitorPort = 0;
  * port from the embedded DAP monitor server.
  */
 class PlcDapTracker implements vscode.DebugAdapterTracker {
-  private isRemote: boolean;
-  private localRoot: string | undefined;
-
-  constructor(session: vscode.DebugSession) {
-    this.isRemote = session.configuration.request === "attach";
-    // Resolve localRoot from multiple sources
-    this.localRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? undefined;
-    if (!this.localRoot) {
-      // Fallback: active editor's directory
-      const activeFile = vscode.window.activeTextEditor?.document?.uri?.fsPath;
-      if (activeFile) {
-        this.localRoot = path.dirname(activeFile);
-      }
-    }
-    if (!this.localRoot) {
-      // Fallback: session's workspaceFolder
-      const wf = session.workspaceFolder;
-      if (wf) {
-        this.localRoot = wf.uri.fsPath;
-      }
-    }
-  }
-
-  /** The target-side source prefix, discovered from the first stackTrace response. */
-  private remotePrefix: string | undefined;
-
   onWillReceiveMessage(message: any): void {
-    // Log messages VS Code sends TO the debug adapter (for diagnostics)
     if (message?.type === "request") {
       console.log(`[DAP-TRACKER] → ${message.command} (seq=${message.seq})`);
-    }
-    // Remap local source paths to target-side paths in setBreakpoints requests
-    // so the DAP server on the target can find the source files.
-    if (this.isRemote && message?.type === "request" && message.command === "setBreakpoints") {
-      const srcPath = message.arguments?.source?.path;
-      if (srcPath && this.remotePrefix) {
-        // Extract just the filename (or relative path) from the local path
-        const basename = path.basename(srcPath);
-        const remotePath = this.remotePrefix + "/" + basename;
-        console.log(`[DAP-TRACKER] Remapped breakpoint path: ${srcPath} → ${remotePath}`);
-        message.arguments.source.path = remotePath;
-      }
     }
   }
 
   onDidSendMessage(message: any): void {
-    // Log all responses for debugging
     if (message?.type === "response") {
-      console.log(`[DAP-TRACKER] ← ${message.command} success=${message.success} isRemote=${this.isRemote} localRoot=${this.localRoot ? "set" : "unset"}`);
+      console.log(`[DAP-TRACKER] ← ${message.command} success=${message.success}`);
     }
     if (message?.type === "event") {
       console.log(`[DAP-TRACKER] ← event: ${message.event}`);
     }
-    // Rewrite remote source paths in stackTrace responses so VS Code
-    // opens local files instead of unreachable target-side paths.
-    if (this.isRemote && this.localRoot && message?.type === "response") {
-      if (message.command === "stackTrace" && message.body?.stackFrames) {
-        console.log(`[DAP-TRACKER] stackTrace: ${message.body.stackFrames.length} frames, remotePrefix=${this.remotePrefix}`);
-        for (const frame of message.body.stackFrames) {
-          if (frame.source?.path) {
-            // Discover the remote prefix from the first stack frame
-            if (!this.remotePrefix) {
-              const marker = "current_source";
-              const idx = frame.source.path.indexOf(marker);
-              if (idx >= 0) {
-                this.remotePrefix = frame.source.path.substring(0, idx + marker.length);
-                console.log(`[DAP-TRACKER] Discovered remote prefix: ${this.remotePrefix}`);
-              }
-            }
-            const before = frame.source.path;
-            frame.source.path = this.remapSourcePath(frame.source.path);
-            if (before !== frame.source.path) {
-              console.log(`[DAP-TRACKER] Remapped: ${before} → ${frame.source.path}`);
-            }
-          }
-        }
-      }
-    }
+
+    // Source path remapping is handled adapter-side via localRoot/remoteRoot.
+    // This tracker only forwards telemetry events.
 
     if (
       message?.type !== "event" ||
@@ -208,67 +146,6 @@ class PlcDapTracker implements vscode.DebugAdapterTracker {
     }
   }
 
-  /**
-   * Remap a target-side source path to a local workspace path.
-   * Target paths look like: /var/lib/st-plc/programs/current_source/main.st
-   * or /var/lib/st-plc/programs/current_source/controllers/fill_controller.st
-   * Local paths:            <workspace>/main.st
-   * or                      <workspace>/controllers/fill_controller.st
-   */
-  private remapSourcePath(remotePath: string): string {
-    if (!this.localRoot) return remotePath;
-    // Find "current_source/" marker in the remote path and extract the relative part
-    const marker = "current_source/";
-    const idx = remotePath.indexOf(marker);
-    let relPath = "";
-    if (idx >= 0) {
-      relPath = remotePath.substring(idx + marker.length);
-      // Try direct path from workspace root
-      const localPath = path.join(this.localRoot!, relPath); // localRoot checked above
-      if (fs.existsSync(localPath)) {
-        return localPath;
-      }
-    }
-    // Search all workspace folders and subdirectories for the file
-    const basename = path.basename(remotePath);
-    for (const folder of vscode.workspace.workspaceFolders || []) {
-      const found = this.findFileRecursive(folder.uri.fsPath, relPath || basename, basename);
-      if (found) return found;
-    }
-    return remotePath;
-  }
-
-  /** Recursively search for a file in a directory by relative path or basename. */
-  private findFileRecursive(dir: string, relPath: string, basename: string): string | undefined {
-    // Try relative path from this dir
-    const byRel = path.join(dir, relPath);
-    if (fs.existsSync(byRel)) return byRel;
-    // Try basename directly in this dir
-    const byName = path.join(dir, basename);
-    if (fs.existsSync(byName)) return byName;
-    // Search subdirectories (1 level deep to avoid deep recursion)
-    try {
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        if (entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "node_modules" && entry.name !== "target") {
-          const sub = path.join(dir, entry.name, relPath);
-          if (fs.existsSync(sub)) return sub;
-          const subName = path.join(dir, entry.name, basename);
-          if (fs.existsSync(subName)) return subName;
-          // One more level
-          try {
-            for (const sub2 of fs.readdirSync(path.join(dir, entry.name), { withFileTypes: true })) {
-              if (sub2.isDirectory() && !sub2.name.startsWith(".")) {
-                const deep = path.join(dir, entry.name, sub2.name, basename);
-                if (fs.existsSync(deep)) return deep;
-              }
-            }
-          } catch { /* ignore */ }
-        }
-      }
-    } catch { /* ignore */ }
-    return undefined;
-  }
-
   onWillStartSession(): void {
     // Nothing to reset — catalog/variables flow through WebSocket now
   }
@@ -286,10 +163,8 @@ class PlcDapTracker implements vscode.DebugAdapterTracker {
 }
 
 class PlcDapTrackerFactory implements vscode.DebugAdapterTrackerFactory {
-  createDebugAdapterTracker(
-    session: vscode.DebugSession
-  ): vscode.ProviderResult<vscode.DebugAdapterTracker> {
-    return new PlcDapTracker(session);
+  createDebugAdapterTracker(): vscode.ProviderResult<vscode.DebugAdapterTracker> {
+    return new PlcDapTracker();
   }
 }
 
@@ -397,11 +272,22 @@ export function activate(context: vscode.ExtensionContext) {
         return configs;
       },
       async resolveDebugConfiguration(
-        _folder,
+        folder,
         config
       ): Promise<vscode.DebugConfiguration | undefined> {
-        // If the user already has a full config (from launch.json), pass through
+        // If the user already has a full config (from launch.json), inject
+        // localRoot for attach configs that don't have one explicitly set.
+        if (config.request === "attach" && !config.localRoot) {
+          config.localRoot = folder?.uri.fsPath
+            ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        }
         if (config.request) {
+          console.log(
+            `[ST-DEBUG] resolveDebugConfiguration: request=${config.request} ` +
+            `target=${config.target || "none"} host=${config.host || "none"} ` +
+            `port=${config.port || "default"} localRoot=${config.localRoot || "none"} ` +
+            `stopOnEntry=${config.stopOnEntry}`
+          );
           return config;
         }
         // No launch.json or empty config — show a quick-pick
@@ -429,6 +315,7 @@ export function activate(context: vscode.ExtensionContext) {
               name: `Debug on ${t.name}`,
               target: t.name,
               stopOnEntry: true,
+              localRoot: "${workspaceFolder}",
             },
           });
         }
@@ -462,6 +349,9 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.debug.onDidTerminateDebugSession((session) => {
       if (session.type === "st") {
+        console.log(
+          `[ST-DEBUG] Session terminated: ${session.name} (${session.configuration.request})`
+        );
         cycleStatusBar?.hide();
         localMonitorPort = 0;
         // Disconnect the local monitor WS (the DAP server is shutting down)

@@ -96,8 +96,13 @@ pub async fn run_dap_proxy_with_listener(
             info!("DAP proxy: attaching to running engine (no subprocess)");
             let state_clone = Arc::clone(&app_state);
             let src = source_path.clone();
-            // Convert tokio TcpStream to std TcpStream for the blocking handler
+            // Convert tokio TcpStream to std TcpStream for the blocking handler.
+            // Tokio sockets are non-blocking; we must switch to blocking mode
+            // or the reader thread gets EAGAIN (os error 11) on read_exact.
             let std_stream = stream.into_std().unwrap();
+            std_stream.set_nonblocking(false).unwrap_or_else(|e| {
+                error!("DAP proxy: failed to set socket to blocking mode: {e}");
+            });
             // Spawn on a blocking thread (handler uses std::sync::mpsc blocking recv)
             tokio::task::spawn_blocking(move || {
                 crate::dap_attach_handler::handle_dap_attach(

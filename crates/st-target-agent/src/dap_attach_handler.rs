@@ -10,10 +10,11 @@
 //! engine events, forwarding in both directions without blocking.
 
 use crate::server::AppState;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 /// Messages from the reader thread to the main loop.
 enum Input {
@@ -23,6 +24,170 @@ enum Input {
     EngineDisconnected,
 }
 
+/// Bidirectional path mapper for DAP source path remapping.
+///
+/// Translates between client-side paths (e.g., `/home/user/project/main.st`)
+/// and target-side paths (e.g., `/var/lib/st-plc/programs/current_source/main.st`).
+/// Follows the `localRoot`/`remoteRoot` pattern used by Node.js and Python debug adapters.
+struct PathMapper {
+    /// Client-side workspace root (from attach args `localRoot`).
+    local_root: Option<String>,
+    /// Target-side source directory (the `source_dir` parameter).
+    remote_root: String,
+}
+
+impl PathMapper {
+    fn new(remote_root: &Path) -> Self {
+        let s = remote_root.to_string_lossy().to_string();
+        Self {
+            local_root: None,
+            remote_root: s.trim_end_matches('/').to_string(),
+        }
+    }
+
+    /// Configure the client-side root from the attach request arguments.
+    fn set_local_root(&mut self, local_root: String) {
+        let trimmed = local_root
+            .trim_end_matches('/')
+            .trim_end_matches('\\');
+        self.local_root = Some(trimmed.to_string());
+    }
+
+    /// Remap a target-side path to a client-side path.
+    /// Used for stackTrace responses (outgoing to VS Code).
+    fn to_local(&self, remote_path: &str) -> String {
+        let Some(ref local_root) = self.local_root else {
+            return remote_path.to_string();
+        };
+        let prefix = format!("{}/", self.remote_root);
+        if let Some(rel) = remote_path.strip_prefix(&prefix) {
+            format!("{local_root}/{rel}")
+        } else {
+            remote_path.to_string()
+        }
+    }
+
+    /// Remap a client-side path to a target-side path.
+    /// Used for setBreakpoints requests (incoming from VS Code).
+    fn to_remote(&self, local_path: &str) -> String {
+        let Some(ref local_root) = self.local_root else {
+            return local_path.to_string();
+        };
+        // Normalize Windows backslashes for comparison
+        let normalized = local_path.replace('\\', "/");
+        let prefix = format!("{local_root}/");
+        if let Some(rel) = normalized.strip_prefix(&prefix) {
+            format!("{}/{}", self.remote_root, rel)
+        } else {
+            local_path.to_string()
+        }
+    }
+}
+
+/// Source map for multi-file debugging: tracks virtual byte offsets and
+/// function-to-file mappings, replicating the logic from `st-dap/server.rs`.
+///
+/// The compiler concatenates stdlib + project files into a virtual source space.
+/// Source-map entries in the compiled module use virtual offsets, so we need to
+/// know each file's base offset to convert between virtual ↔ file-local positions.
+struct SourceMap {
+    /// file_path → virtual byte offset in the concatenated source.
+    file_virtual_offsets: HashMap<String, usize>,
+    /// function_name (UPPERCASE) → (file_path, file_content).
+    func_to_file: HashMap<String, (String, String)>,
+}
+
+impl SourceMap {
+    /// Build the source map from the source directory on disk.
+    ///
+    /// Uses `discover_project` + `load_project_sources` to load files in the
+    /// SAME order as the compiler (sorted, respecting plc-project.yaml). This is
+    /// critical: virtual offsets depend on file order, and a mismatch means all
+    /// breakpoints and line numbers are wrong.
+    fn build(source_dir: &Path) -> Self {
+        // Load files using the same project discovery as the compiler
+        let project_files = match st_syntax::project::discover_project(Some(source_dir)) {
+            Ok(project) => match st_syntax::project::load_project_sources(&project) {
+                Ok(sources) => sources
+                    .into_iter()
+                    .map(|(p, c)| (p.to_string_lossy().to_string(), c))
+                    .collect::<Vec<_>>(),
+                Err(e) => {
+                    warn!("Source map: failed to load project sources: {e}");
+                    Vec::new()
+                }
+            },
+            Err(e) => {
+                warn!("Source map: failed to discover project: {e}");
+                Vec::new()
+            }
+        };
+
+        // Compute stdlib total size (same files used by the compiler)
+        let stdlib = st_syntax::multi_file::builtin_stdlib();
+        let stdlib_len: usize = stdlib.iter().map(|s| s.len()).sum();
+
+        // Compute virtual offsets in the SAME order as parse_multi
+        let mut file_virtual_offsets = HashMap::new();
+        let mut cumulative = stdlib_len;
+        for (path, content) in &project_files {
+            file_virtual_offsets.insert(path.clone(), cumulative);
+            cumulative += content.len();
+        }
+
+        // Build function → source file mapping by parsing each file
+        let mut func_to_file: HashMap<String, (String, String)> = HashMap::new();
+        for (path, content) in &project_files {
+            let parse = st_syntax::parse(content);
+            for item in &parse.source_file.items {
+                let names: Vec<String> = match item {
+                    st_syntax::ast::TopLevelItem::Program(p) =>
+                        vec![p.name.name.clone()],
+                    st_syntax::ast::TopLevelItem::Function(f) =>
+                        vec![f.name.name.clone()],
+                    st_syntax::ast::TopLevelItem::FunctionBlock(fb) =>
+                        vec![fb.name.name.clone()],
+                    st_syntax::ast::TopLevelItem::Class(cls) => {
+                        let mut v = vec![cls.name.name.clone()];
+                        for m in &cls.methods {
+                            v.push(format!("{}.{}", cls.name.name, m.name.name));
+                        }
+                        v
+                    }
+                    _ => vec![],
+                };
+                for name in names {
+                    func_to_file.insert(
+                        name.to_uppercase(),
+                        (path.clone(), content.clone()),
+                    );
+                }
+            }
+        }
+
+        info!(
+            "Source map built: {} files, {} functions, stdlib_len={stdlib_len}",
+            file_virtual_offsets.len(),
+            func_to_file.len(),
+        );
+        for (path, offset) in &file_virtual_offsets {
+            let name = Path::new(path).file_name().unwrap_or_default().to_string_lossy();
+            debug!("  {name}: virtual_offset={offset}");
+        }
+
+        Self { file_virtual_offsets, func_to_file }
+    }
+
+    /// Look up the virtual offset for a file path.
+    fn virtual_offset(&self, path: &str) -> usize {
+        self.file_virtual_offsets.get(path).copied().unwrap_or(0)
+    }
+
+    /// Find the source file (path, content) for a function name.
+    fn file_for_func(&self, func_name: &str) -> Option<&(String, String)> {
+        self.func_to_file.get(&func_name.to_uppercase())
+    }
+}
 
 /// Handle a DAP attach session on a TCP stream.
 ///
@@ -54,6 +219,14 @@ pub fn handle_dap_attach(
     // Load source files for breakpoint resolution
     let source_files = load_source_files(source_dir);
 
+    // Path mapper for localRoot/remoteRoot translation (configured when
+    // the attach request arrives with a localRoot argument).
+    let mut path_mapper = PathMapper::new(source_dir);
+
+    // Build source map for virtual offset resolution (same model as st-dap launch mode).
+    // Uses discover_project to load files in the same sorted order as the compiler.
+    let source_map = SourceMap::build(source_dir);
+
     // Create a unified input channel
     let (input_tx, input_rx) = std::sync::mpsc::channel::<Input>();
 
@@ -75,7 +248,13 @@ pub fn handle_dap_attach(
                         break;
                     }
                 }
-                _ => {
+                Ok(None) => {
+                    info!("DAP reader: EOF on TCP stream");
+                    let _ = reader_tx.send(Input::DapDisconnected);
+                    break;
+                }
+                Err(e) => {
+                    warn!("DAP reader: error reading message: {e}");
                     let _ = reader_tx.send(Input::DapDisconnected);
                     break;
                 }
@@ -93,7 +272,8 @@ pub fn handle_dap_attach(
                         break;
                     }
                 }
-                Err(_) => {
+                Err(e) => {
+                    info!("Engine event thread: channel closed ({e})");
                     let _ = event_tx.send(Input::EngineDisconnected);
                     break;
                 }
@@ -118,8 +298,10 @@ pub fn handle_dap_attach(
                     &mut seq_counter,
                     &mut is_paused,
                     &source_files,
+                    &source_map,
                     &input_rx,
                     &mut stop_on_entry,
+                    &mut path_mapper,
                 );
                 let command = msg["command"].as_str().unwrap_or("");
                 if command == "disconnect" {
@@ -142,7 +324,9 @@ pub fn handle_dap_attach(
     }
 
     // Ensure clean detach
-    let _ = cmd_tx.send(st_engine::DebugCommand::Disconnect);
+    if let Err(e) = cmd_tx.send(st_engine::DebugCommand::Disconnect) {
+        debug!("DAP attach: final disconnect send failed (expected if already detached): {e}");
+    }
     info!("DAP attach: session ended for {peer}");
 }
 
@@ -158,8 +342,10 @@ fn handle_dap_request(
     seq: &mut i64,
     is_paused: &mut bool,
     source_files: &[(String, String)],
+    source_map: &SourceMap,
     input_rx: &std::sync::mpsc::Receiver<Input>,
     stop_on_entry: &mut bool,
+    path_mapper: &mut PathMapper,
 ) {
     let req_seq = msg["seq"].as_i64().unwrap_or(0);
     let command = msg["command"].as_str().unwrap_or("");
@@ -167,6 +353,7 @@ fn handle_dap_request(
 
     match command {
         "initialize" => {
+            info!("DAP attach: initialize — sending capabilities");
             send_dap_response(writer, req_seq, "initialize", serde_json::json!({
                 "supportsConfigurationDoneRequest": true,
                 "supportsEvaluateForHovers": true,
@@ -175,15 +362,25 @@ fn handle_dap_request(
 
         "attach" | "launch" => {
             *stop_on_entry = msg["arguments"]["stopOnEntry"].as_bool().unwrap_or(false);
+            if let Some(local_root) = msg["arguments"]["localRoot"].as_str() {
+                path_mapper.set_local_root(local_root.to_string());
+                info!(
+                    "DAP attach: path mapping active — localRoot={local_root}, remoteRoot={}",
+                    path_mapper.remote_root
+                );
+            }
             send_dap_response(writer, req_seq, command, serde_json::json!(null));
             send_dap_event(writer, seq, "initialized", serde_json::json!({}));
         }
 
         "configurationDone" => {
+            info!("DAP attach: configurationDone (stopOnEntry={stop_on_entry})");
             send_dap_response(writer, req_seq, "configurationDone", serde_json::json!(null));
             if *stop_on_entry {
-                // Pause the engine — Stopped event arrives via engine event channel
-                let _ = cmd_tx.send(st_engine::DebugCommand::Pause);
+                info!("DAP attach: sending Pause for stopOnEntry");
+                if let Err(e) = cmd_tx.send(st_engine::DebugCommand::Pause) {
+                    error!("DAP attach: failed to send Pause: {e}");
+                }
             }
         }
 
@@ -204,20 +401,40 @@ fn handle_dap_request(
         }
 
         "setBreakpoints" => {
-            let source_path = msg["arguments"]["source"]["path"]
+            let client_path = msg["arguments"]["source"]["path"]
                 .as_str().unwrap_or("").to_string();
+            // Remap client-side path to target-side path for source lookup
+            let source_path = path_mapper.to_remote(&client_path);
             let bp_lines: Vec<u32> = msg["arguments"]["breakpoints"]
                 .as_array()
                 .map(|arr| arr.iter().filter_map(|b| b["line"].as_u64().map(|l| l as u32)).collect())
                 .unwrap_or_default();
 
             let source_content = find_source_content(source_files, &source_path);
+            let voff = source_map.virtual_offset(&source_path);
 
-            let _ = cmd_tx.send(st_engine::DebugCommand::SetBreakpoints {
+            info!(
+                "setBreakpoints: {} → {} (voff={voff}, content_len={}, lines={:?})",
+                client_path,
+                Path::new(&source_path).file_name().unwrap_or_default().to_string_lossy(),
+                source_content.len(),
+                bp_lines,
+            );
+            if source_content.is_empty() {
+                warn!(
+                    "setBreakpoints: source content is EMPTY for {} — breakpoints will fail",
+                    source_path,
+                );
+            }
+
+            if let Err(e) = cmd_tx.send(st_engine::DebugCommand::SetBreakpoints {
                 source_path,
                 source: source_content,
                 lines: bp_lines.clone(),
-            });
+                source_offset: voff,
+            }) {
+                error!("setBreakpoints: failed to send to engine: {e}");
+            }
 
             // The BreakpointsSet response will arrive as an EngineEvent.
             // For now, respond optimistically (all verified). The engine
@@ -235,42 +452,64 @@ fn handle_dap_request(
         }
 
         "continue" => {
+            info!("DAP: continue (is_paused={is_paused})");
             send_dap_response(writer, req_seq, "continue", serde_json::json!({
                 "allThreadsContinued": true,
             }));
             if *is_paused {
-                let _ = cmd_tx.send(st_engine::DebugCommand::Continue);
+                if let Err(e) = cmd_tx.send(st_engine::DebugCommand::Continue) {
+                    error!("DAP: failed to send Continue to engine: {e}");
+                }
                 *is_paused = false;
+            } else {
+                warn!("DAP: continue ignored — not paused");
             }
-            // Engine is now running — Stopped event will arrive via EngineEvent
         }
 
         "next" => {
+            info!("DAP: next/stepOver (is_paused={is_paused})");
             send_dap_response(writer, req_seq, "next", serde_json::json!(null));
             if *is_paused {
-                let _ = cmd_tx.send(st_engine::DebugCommand::StepOver);
+                if let Err(e) = cmd_tx.send(st_engine::DebugCommand::StepOver) {
+                    error!("DAP: failed to send StepOver to engine: {e}");
+                }
                 *is_paused = false;
+            } else {
+                warn!("DAP: next ignored — not paused");
             }
         }
 
         "stepIn" => {
+            info!("DAP: stepIn (is_paused={is_paused})");
             send_dap_response(writer, req_seq, "stepIn", serde_json::json!(null));
             if *is_paused {
-                let _ = cmd_tx.send(st_engine::DebugCommand::StepIn);
+                if let Err(e) = cmd_tx.send(st_engine::DebugCommand::StepIn) {
+                    error!("DAP: failed to send StepIn to engine: {e}");
+                }
                 *is_paused = false;
+            } else {
+                warn!("DAP: stepIn ignored — not paused");
             }
         }
 
         "stepOut" => {
+            info!("DAP: stepOut (is_paused={is_paused})");
             send_dap_response(writer, req_seq, "stepOut", serde_json::json!(null));
             if *is_paused {
-                let _ = cmd_tx.send(st_engine::DebugCommand::StepOut);
+                if let Err(e) = cmd_tx.send(st_engine::DebugCommand::StepOut) {
+                    error!("DAP: failed to send StepOut to engine: {e}");
+                }
                 *is_paused = false;
+            } else {
+                warn!("DAP: stepOut ignored — not paused");
             }
         }
 
         "pause" => {
-            let _ = cmd_tx.send(st_engine::DebugCommand::Pause);
+            info!("DAP: pause");
+            if let Err(e) = cmd_tx.send(st_engine::DebugCommand::Pause) {
+                error!("DAP: failed to send Pause: {e}");
+            }
             send_dap_response(writer, req_seq, "pause", serde_json::json!(null));
             // Stopped event will arrive via EngineEvent
         }
@@ -284,11 +523,12 @@ fn handle_dap_request(
                 if let Some(st_engine::DebugResponse::StackTrace { frames }) = frames {
                     let stack_frames: Vec<serde_json::Value> = frames.iter().enumerate()
                         .map(|(i, f)| {
-                            let (line, spath) = resolve_frame_location(f, source_files);
+                            let (line, spath) = resolve_frame_location(f, source_files, source_map);
+                            let mapped = path_mapper.to_local(&spath);
                             serde_json::json!({
                                 "id": i,
                                 "name": f.func_name,
-                                "source": { "name": std::path::Path::new(&spath).file_name().unwrap_or_default().to_string_lossy(), "path": spath },
+                                "source": { "name": std::path::Path::new(&spath).file_name().unwrap_or_default().to_string_lossy(), "path": mapped },
                                 "line": line,
                                 "column": 1,
                             })
@@ -384,11 +624,15 @@ fn handle_dap_request(
         }
 
         "disconnect" => {
-            let _ = cmd_tx.send(st_engine::DebugCommand::Disconnect);
+            info!("DAP attach: disconnect — detaching from engine");
+            if let Err(e) = cmd_tx.send(st_engine::DebugCommand::Disconnect) {
+                debug!("DAP attach: disconnect send failed (may already be detached): {e}");
+            }
             send_dap_response(writer, req_seq, "disconnect", serde_json::json!(null));
         }
 
         other => {
+            warn!("DAP: unhandled command '{other}' — responding with empty success");
             send_dap_response(writer, req_seq, other, serde_json::json!(null));
         }
     }
@@ -414,6 +658,7 @@ fn handle_engine_event(
                 st_engine::debug::PauseReason::Entry => "entry",
                 st_engine::debug::PauseReason::None => "pause",
             };
+            info!("Engine event: Stopped (reason={reason_str})");
             send_dap_event(writer, seq, "stopped", serde_json::json!({
                 "reason": reason_str,
                 "threadId": 1,
@@ -421,27 +666,32 @@ fn handle_engine_event(
             }));
         }
         st_engine::DebugResponse::Resumed => {
+            info!("Engine event: Resumed");
             *is_paused = false;
         }
         st_engine::DebugResponse::Detached => {
+            info!("Engine event: Detached");
             *is_paused = false;
             send_dap_event(writer, seq, "terminated", serde_json::json!({}));
         }
         st_engine::DebugResponse::Variables { vars } => {
-            // Late-arriving variable response — VS Code already got an
-            // empty response. This is a known limitation of the async
-            // architecture. Phase E will add proper request/response
-            // correlation with sequence numbers.
-            let _ = vars; // TODO: improve with request correlation
+            debug!("Engine event: Variables ({} entries)", vars.len());
+            let _ = vars;
         }
         st_engine::DebugResponse::StackTrace { frames } => {
-            let _ = frames; // TODO: improve with request correlation
+            debug!("Engine event: StackTrace ({} frames)", frames.len());
+            let _ = frames;
         }
         st_engine::DebugResponse::EvaluateResult { value, ty } => {
-            let _ = (value, ty); // TODO: improve with request correlation
+            debug!("Engine event: EvaluateResult ({ty})");
+            let _ = (value, ty);
         }
         st_engine::DebugResponse::BreakpointsSet { verified } => {
-            let _ = verified; // Already responded optimistically
+            let set_count = verified.iter().filter(|v| **v).count();
+            info!(
+                "Engine event: BreakpointsSet — {set_count}/{} verified",
+                verified.len()
+            );
         }
     }
 }
@@ -451,20 +701,12 @@ fn handle_engine_event(
 // =============================================================================
 
 fn read_dap_message(reader: &mut BufReader<std::net::TcpStream>) -> Result<Option<serde_json::Value>, String> {
-    // Ensure blocking mode for the reader (no timeout interference)
-    let _ = reader.get_ref().set_read_timeout(None);
-
     let mut header = String::new();
     loop {
         header.clear();
         match reader.read_line(&mut header) {
             Ok(0) => return Ok(None),
             Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
-                || e.kind() == std::io::ErrorKind::TimedOut => {
-                // Retry — transient timeout from inherited socket config
-                continue;
-            }
             Err(e) => return Err(format!("Read error: {e}")),
         }
         let trimmed = header.trim();
@@ -548,40 +790,57 @@ fn wait_for_engine_response(
             Ok(Input::DapDisconnected) | Ok(Input::EngineDisconnected) => {
                 return None;
             }
-            Err(_) => return None, // Timeout
+            Err(_) => {
+                warn!("wait_for_engine_response: timed out after 2s");
+                return None;
+            }
         }
     }
 }
 
 /// Resolve a stack frame's source offset to a line number and file path.
+///
+/// `frame.source_offset` is a virtual offset (byte position in the concatenated
+/// stdlib + project sources). We subtract the file's virtual base offset to get
+/// a file-local byte position, then count newlines to get the line number.
 fn resolve_frame_location(
     frame: &st_engine::debug::FrameInfo,
     source_files: &[(String, String)],
+    source_map: &SourceMap,
 ) -> (u32, String) {
-    for (path, content) in source_files {
-        let upper = content.to_uppercase();
-        for keyword in ["PROGRAM ", "FUNCTION_BLOCK ", "FUNCTION ", "CLASS "] {
-            if let Some(idx) = upper.find(keyword) {
-                let after = idx + keyword.len();
-                let name_end = content[after..].find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                    .unwrap_or(content.len() - after);
-                let name = &content[after..after + name_end];
-                if name.eq_ignore_ascii_case(&frame.func_name)
-                    || frame.func_name.to_uppercase().starts_with(&name.to_uppercase())
-                {
-                    let offset = frame.source_offset.min(content.len());
-                    let line = content[..offset].matches('\n').count() as u32 + 1;
-                    return (line, path.clone());
-                }
-            }
-        }
-    }
-    if let Some((path, content)) = source_files.first() {
-        let offset = frame.source_offset.min(content.len());
-        let line = content[..offset].matches('\n').count() as u32 + 1;
+    // Use func_to_file mapping (same approach as st-dap launch mode)
+    if let Some((path, content)) = source_map.file_for_func(&frame.func_name) {
+        let voff = source_map.virtual_offset(path);
+        let local_offset = frame.source_offset.saturating_sub(voff).min(content.len());
+        let line = byte_offset_to_line(content, local_offset);
+        debug!(
+            "stackTrace: {} → {}, voff={voff}, local_offset={local_offset}, line={line}",
+            frame.func_name,
+            Path::new(path).file_name().unwrap_or_default().to_string_lossy(),
+        );
         return (line, path.clone());
     }
+
+    // Fallback: try first source file
+    if let Some((path, content)) = source_files.first() {
+        let voff = source_map.virtual_offset(path);
+        let local_offset = frame.source_offset.saturating_sub(voff).min(content.len());
+        let line = byte_offset_to_line(content, local_offset);
+        warn!(
+            "stackTrace: {} not in func_to_file map, fell back to {}",
+            frame.func_name,
+            Path::new(path).file_name().unwrap_or_default().to_string_lossy(),
+        );
+        return (line, path.clone());
+    }
+
     (1, String::new())
+}
+
+/// Convert a byte offset within source text to a 1-based line number.
+fn byte_offset_to_line(source: &str, offset: usize) -> u32 {
+    let offset = offset.min(source.len());
+    source[..offset].matches('\n').count() as u32 + 1
 }
 
 fn send_dap_error(stream: &std::net::TcpStream, req_seq: i64, message: &str) {
@@ -631,4 +890,100 @@ fn find_source_content(source_files: &[(String, String)], path: &str) -> String 
         return content.clone();
     }
     String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_mapper_to_local_basic() {
+        let mut m = PathMapper::new(Path::new("/var/lib/st-plc/programs/current_source"));
+        m.set_local_root("/home/user/plc-project".into());
+        assert_eq!(
+            m.to_local("/var/lib/st-plc/programs/current_source/main.st"),
+            "/home/user/plc-project/main.st"
+        );
+    }
+
+    #[test]
+    fn path_mapper_to_local_subdirectory() {
+        let mut m = PathMapper::new(Path::new("/var/lib/st-plc/programs/current_source"));
+        m.set_local_root("/home/user/plc-project".into());
+        assert_eq!(
+            m.to_local("/var/lib/st-plc/programs/current_source/controllers/fill.st"),
+            "/home/user/plc-project/controllers/fill.st"
+        );
+    }
+
+    #[test]
+    fn path_mapper_to_remote_basic() {
+        let mut m = PathMapper::new(Path::new("/var/lib/st-plc/programs/current_source"));
+        m.set_local_root("/home/user/plc-project".into());
+        assert_eq!(
+            m.to_remote("/home/user/plc-project/main.st"),
+            "/var/lib/st-plc/programs/current_source/main.st"
+        );
+    }
+
+    #[test]
+    fn path_mapper_to_remote_subdirectory() {
+        let mut m = PathMapper::new(Path::new("/var/lib/st-plc/programs/current_source"));
+        m.set_local_root("/home/user/plc-project".into());
+        assert_eq!(
+            m.to_remote("/home/user/plc-project/controllers/fill.st"),
+            "/var/lib/st-plc/programs/current_source/controllers/fill.st"
+        );
+    }
+
+    #[test]
+    fn path_mapper_windows_separators() {
+        let mut m = PathMapper::new(Path::new("/var/lib/st-plc/programs/current_source"));
+        m.set_local_root("C:/Users/dev/project".into());
+        assert_eq!(
+            m.to_remote("C:\\Users\\dev\\project\\controllers\\fill.st"),
+            "/var/lib/st-plc/programs/current_source/controllers/fill.st"
+        );
+    }
+
+    #[test]
+    fn path_mapper_no_local_root_passthrough() {
+        let m = PathMapper::new(Path::new("/var/lib/st-plc/programs/current_source"));
+        assert_eq!(
+            m.to_local("/var/lib/st-plc/programs/current_source/main.st"),
+            "/var/lib/st-plc/programs/current_source/main.st"
+        );
+        assert_eq!(m.to_remote("/some/path/main.st"), "/some/path/main.st");
+    }
+
+    #[test]
+    fn path_mapper_roundtrip() {
+        let mut m = PathMapper::new(Path::new("/var/lib/st-plc/programs/current_source"));
+        m.set_local_root("/home/user/plc-project".into());
+        let remote = "/var/lib/st-plc/programs/current_source/controllers/fill.st";
+        let local = m.to_local(remote);
+        assert_eq!(m.to_remote(&local), remote);
+    }
+
+    #[test]
+    fn path_mapper_trailing_slash() {
+        let mut m = PathMapper::new(Path::new("/var/lib/st-plc/programs/current_source/"));
+        m.set_local_root("/home/user/plc-project/".into());
+        assert_eq!(
+            m.to_local("/var/lib/st-plc/programs/current_source/main.st"),
+            "/home/user/plc-project/main.st"
+        );
+        assert_eq!(
+            m.to_remote("/home/user/plc-project/main.st"),
+            "/var/lib/st-plc/programs/current_source/main.st"
+        );
+    }
+
+    #[test]
+    fn path_mapper_unrelated_path_passthrough() {
+        let mut m = PathMapper::new(Path::new("/var/lib/st-plc/programs/current_source"));
+        m.set_local_root("/home/user/plc-project".into());
+        assert_eq!(m.to_local("/some/other/file.st"), "/some/other/file.st");
+        assert_eq!(m.to_remote("/some/other/file.st"), "/some/other/file.st");
+    }
 }

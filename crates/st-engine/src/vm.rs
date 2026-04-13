@@ -253,7 +253,9 @@ impl Vm {
             let upper = name.to_uppercase();
             self.forced_variables.insert(upper.clone(), value.clone());
 
-            // Try to find the PROGRAM local by dotted name
+            // Try to find the PROGRAM local by dotted name.
+            // Handles both scalar locals ("Main.cycle") and struct/FB
+            // field paths ("Main.stats.bottles_filled").
             if let Some(dot) = name.find('.') {
                 let prog_name = &name[..dot];
                 let local_name = &name[dot + 1..];
@@ -265,6 +267,53 @@ impl Vm {
                         continue;
                     }
                     let fi = func_idx as u16;
+
+                    // Check for struct/FB field path: "instance.field"
+                    if let Some(field_dot) = local_name.find('.') {
+                        let instance_name = &local_name[..field_dot];
+                        let field_name = &local_name[field_dot + 1..];
+                        for (i, slot) in func.locals.slots.iter().enumerate() {
+                            if !slot.name.eq_ignore_ascii_case(instance_name) {
+                                continue;
+                            }
+                            let caller_id = (0xFFFF_u32 << 16) | (func_idx as u32);
+                            let instance_key = (caller_id, i as u16);
+                            match slot.ty {
+                                VarType::Struct(td_idx) => {
+                                    if let Some((_, fields)) = self.struct_type_fields(td_idx) {
+                                        if let Some(pos) = fields.iter().position(|f| {
+                                            f.name.eq_ignore_ascii_case(field_name)
+                                        }) {
+                                            let width = fields[pos].int_width;
+                                            let narrowed = narrow_value(value, width);
+                                            if let Some(state) = self.fb_instances.get_mut(&instance_key) {
+                                                if pos < state.len() {
+                                                    state[pos] = narrowed;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    return;
+                                }
+                                VarType::FbInstance(fb_idx) => {
+                                    let fb_func = &self.module.functions[fb_idx as usize];
+                                    if let Some((slot_idx, fb_slot)) = fb_func.locals.find_slot(field_name) {
+                                        let narrowed = narrow_value(value, fb_slot.int_width);
+                                        if let Some(state) = self.fb_instances.get_mut(&instance_key) {
+                                            if (slot_idx as usize) < state.len() {
+                                                state[slot_idx as usize] = narrowed;
+                                            }
+                                        }
+                                    }
+                                    return;
+                                }
+                                _ => {}
+                            }
+                            break;
+                        }
+                    }
+
+                    // Scalar local
                     if let Some(locals) = self.retained_locals.get_mut(&fi) {
                         for (i, slot) in func.locals.slots.iter().enumerate() {
                             if slot.name.eq_ignore_ascii_case(local_name) && i < locals.len() {
@@ -294,26 +343,78 @@ impl Vm {
         &self.forced_variables
     }
 
-    /// Apply forced values to retained PROGRAM locals. Called by the engine
-    /// after each scan cycle so that forced PROGRAM-local variables take
-    /// effect on the next cycle start (the forced value is loaded from
-    /// `retained_locals` into the call frame). Globals are enforced
-    /// separately via `forced_global_slots` in `set_global_by_slot`.
+    /// Apply forced values to retained PROGRAM locals and struct/FB fields.
+    /// Called by the engine after each scan cycle so forced values persist.
+    /// Globals are enforced separately via `forced_global_slots`.
     pub fn enforce_retained_locals(&mut self) {
         if self.forced_variables.is_empty() {
             return;
         }
+        // Collect struct/FB field forces to apply after the borrow on retained_locals.
+        let mut field_forces: Vec<((u32, u16), usize, Value)> = Vec::new();
+
         for (func_idx, locals) in &mut self.retained_locals {
             let func = &self.module.functions[*func_idx as usize];
             if func.kind != st_ir::PouKind::Program {
                 continue;
             }
+            let caller_id = (0xFFFF_u32 << 16) | (*func_idx as u32);
             for (i, slot) in func.locals.slots.iter().enumerate() {
+                // Scalar local: "Main.cycle"
                 let full_name = format!("{}.{}", func.name, slot.name).to_uppercase();
                 if let Some(forced_value) = self.forced_variables.get(&full_name) {
                     if i < locals.len() {
                         locals[i] = narrow_value(forced_value.clone(), slot.int_width);
                     }
+                }
+
+                // Struct/FB field: check for "Main.stats.fieldname" patterns
+                match slot.ty {
+                    VarType::Struct(td_idx) => {
+                        if let Some(st_ir::TypeDef::Struct { fields, .. }) =
+                            self.module.type_defs.get(td_idx as usize)
+                        {
+                            let instance_key = (caller_id, i as u16);
+                            for (j, field) in fields.iter().enumerate() {
+                                let field_key = format!(
+                                    "{}.{}.{}", func.name, slot.name, field.name
+                                ).to_uppercase();
+                                if let Some(forced_value) = self.forced_variables.get(&field_key) {
+                                    field_forces.push((
+                                        instance_key,
+                                        j,
+                                        narrow_value(forced_value.clone(), field.int_width),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    VarType::FbInstance(fb_idx) => {
+                        let fb_func = &self.module.functions[fb_idx as usize];
+                        let instance_key = (caller_id, i as u16);
+                        for (j, fb_slot) in fb_func.locals.slots.iter().enumerate() {
+                            let field_key = format!(
+                                "{}.{}.{}", func.name, slot.name, fb_slot.name
+                            ).to_uppercase();
+                            if let Some(forced_value) = self.forced_variables.get(&field_key) {
+                                field_forces.push((
+                                    instance_key,
+                                    j,
+                                    narrow_value(forced_value.clone(), fb_slot.int_width),
+                                ));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Apply collected struct/FB field forces
+        for (key, field_idx, value) in field_forces {
+            if let Some(state) = self.fb_instances.get_mut(&key) {
+                if field_idx < state.len() {
+                    state[field_idx] = value;
                 }
             }
         }
@@ -854,6 +955,11 @@ impl Vm {
     /// server to build hierarchical variable views.
     pub fn fb_instances_ref(&self) -> &std::collections::HashMap<(u32, u16), Vec<Value>> {
         &self.fb_instances
+    }
+
+    /// Inject an FB/struct instance state (used by retain restore).
+    pub fn set_fb_instance(&mut self, key: (u32, u16), state: Vec<Value>) {
+        self.fb_instances.insert(key, state);
     }
 
     /// Public accessor for caller_identity (used by the DAP to compute

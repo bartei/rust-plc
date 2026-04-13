@@ -214,7 +214,7 @@ export class MonitorPanel {
       if (resp.ok) {
         const body = await resp.json() as any;
         const status = (body.status || body.runtime_status || "idle").toLowerCase();
-        if (status === "running") {
+        if (status === "running" || status === "debugpaused") {
           this.updateTargetStatus("running", host);
           MonitorPanel.log(
             `Target ${host}:${port} is running (cycle=${body.cycle_stats?.cycle_count ?? 0}, wsActive=${this.wsMonitorActive})`
@@ -971,13 +971,19 @@ export class MonitorPanel {
             html += renderTree(entry.__children, fullPath, depth + 1);
           }
         } else if (v) {
-          // Leaf node (scalar field)
+          // Leaf node (scalar field) — with force controls
           const isForced = !!v.forced;
+          const leafSafe = fullPath.replace(/'/g, "\\\\'");
+          const leafPlaceholder = v.type ? placeholderForType(v.type) : "value";
           html += '<tr data-var="' + fullLc + '"' + (isForced ? ' class="forced"' : '') + '>' +
             '<td class="name">' + indent + '\\u00a0\\u00a0 ' + key + '</td>' +
             '<td class="value">' + v.value + '</td>' +
             '<td class="type"><i>' + v.type + '</i></td>' +
-            '<td></td></tr>';
+            '<td>' +
+              '<input class="force-input" placeholder="' + leafPlaceholder + '" />' +
+              ' <button onclick="forceVar(\\'' + leafSafe + '\\')">Force</button>' +
+              ' <button class="secondary" onclick="unforceVar(\\'' + leafSafe + '\\')">Unforce</button>' +
+            '</td></tr>';
         }
       }
       return html;

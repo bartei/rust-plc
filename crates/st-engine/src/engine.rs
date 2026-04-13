@@ -289,7 +289,10 @@ impl Engine {
             return Ok(());
         };
         let snapshot = crate::retain_store::capture_snapshot(&self.vm);
-        if snapshot.globals.is_empty() && snapshot.program_locals.is_empty() {
+        if snapshot.globals.is_empty()
+            && snapshot.program_locals.is_empty()
+            && snapshot.instance_fields.is_empty()
+        {
             return Ok(());
         }
         crate::retain_store::save_to_file(&snapshot, &retain_cfg.path)

@@ -12,7 +12,7 @@
 
 ## Phases 0-11: Core Platform (COMPLETED)
 
-714+ tests, zero clippy warnings.
+1050+ tests, zero clippy warnings.
 
 | Phase | Scope | Status |
 |-------|-------|--------|
@@ -99,7 +99,7 @@
 - [x] Watch list resync: tracker retries `sendWatchListToDap` on empty telemetry
 - [x] IntWidth enum + two's complement wrapping at every store boundary
 - [x] Literal context typing in semantic checker
-- [x] Force variable: `forced_global_slots` HashSet, narrowing, lock icon, type validation
+- [x] Force variable: `forced_global_slots` HashSet, narrowing, lock icon, type validation, struct/FB field force
 - [x] Global variable initialization via synthetic `__global_init` function
 
 ---
@@ -160,7 +160,7 @@
 - [x] `postMessage`-based incremental DOM updates
 - [x] Watch list table with autocomplete, Force, Remove, Clear all
 - [x] Per-workspace persistence via `workspaceState`
-- [x] Force/Unforce wired to DAP evaluate REPL
+- [x] Force/Unforce wired to DAP evaluate REPL (local) and WebSocket (remote)
 - [x] Live cycle stats display
 - [x] Tests: `test_watch_list_flow`, `test_var_catalog_emitted_on_launch`
 
@@ -248,7 +248,7 @@ Infrastructure: `@vscode/test-electron` (real Electron instance) + Playwright (w
 > Design notes: [design_core.md § Phase 16](design_core.md#phase-16-retain--persistent-variable-persistence)
 
 Non-volatile storage for RETAIN and PERSISTENT variables across runtime restarts
-and program downloads, per IEC 61131-3 semantics. 14 tests.
+and program downloads, per IEC 61131-3 semantics. 16 tests.
 
 - [x] IR: `persistent: bool` field on `VarSlot` (serde-default for backward compat)
 - [x] Compiler: set both `retain` and `persistent` from `VarQualifier` for globals and locals
@@ -258,7 +258,8 @@ and program downloads, per IEC 61131-3 semantics. 14 tests.
 - [x] Target agent: save on stop/shutdown, default `/var/lib/st-plc/retain/`
 - [x] `plc-project.yaml`: `engine.retain.checkpoint_cycles` config
 - [x] JSON schema updated
-- [x] 14 unit/integration tests (capture, restore, warm/cold restart, type mismatch, round-trip, engine restart lifecycle)
+- [x] Struct-typed PERSISTENT RETAIN variables: `instance_fields` section in `RetainSnapshot`, capture/restore via `fb_instances`
+- [x] 16 unit/integration tests (capture, restore, warm/cold restart, type mismatch, round-trip, engine restart, struct capture, struct restart with non-retain init values)
 
 ### Remaining
 
@@ -270,19 +271,10 @@ and program downloads, per IEC 61131-3 semantics. 14 tests.
 
 ## Phase 17: Singleton Enforcement + Debug Attach to Running Engine
 
-> **⚠️ REMOTE DEBUGGING IS BROKEN — DO NOT USE IN PRODUCTION ⚠️**
->
-> The Rust-side DAP protocol works (verified by integration tests) but the VS
-> Code extension fails to properly remap source paths between the target and
-> local workspace. Breakpoints don't work, stepping doesn't track lines, and
-> the session is unreliable. 21 of 24 Electron E2E tests pass against a real
-> target, but the 3 that fail are breakpoints, stepping, and full lifecycle —
-> the most critical features.
->
-> **Status:** Singleton enforcement and engine infrastructure are solid.
-> Remote debug attach is ON HOLD until the VS Code extension path remapping
-> is fundamentally reworked. The current `dap_attach_handler.rs` and
-> `PlcDapTracker` source remapping approach is too fragile.
+> **Status:** Singleton enforcement, engine infrastructure, and source path
+> remapping are implemented. Path mapping uses the standard `localRoot`/`remoteRoot`
+> adapter-side approach (same pattern as Node.js, Python/debugpy, Go/Delve).
+> Needs E2E validation on a real target.
 
 ### Phase A — Singleton enforcement (COMPLETED)
 
@@ -307,17 +299,24 @@ and program downloads, per IEC 61131-3 semantics. 14 tests.
 - [x] Auto-detach on channel close
 - [x] 5 integration tests (attach, pause, resume, reattach lifecycle)
 
-### Phase D — In-process DAP handler (COMPLETED but BROKEN)
+### Phase D — In-process DAP handler + source path remapping (COMPLETED)
 
 - [x] `dap_attach_handler.rs`: concurrent reader/event thread architecture
 - [x] DAP proxy routes to attach handler when engine Running
 - [x] stopOnEntry support
 - [x] Variable inspection when paused
 - [x] Engine pause/resume/detach lifecycle works (verified by Rust tests)
-- **[!] Source path remapping broken** — VS Code can't open target-side files
-- **[!] Breakpoints don't work** — path mismatch between local and target
-- **[!] Stepping doesn't track lines** — source offset resolution wrong
-- [ ] Needs fundamental rework of path remapping strategy
+- [x] Adapter-side `PathMapper` with `localRoot`/`remoteRoot` prefix swap (9 unit tests)
+- [x] `stackTrace` responses: target paths remapped to local workspace paths
+- [x] `setBreakpoints` requests: local paths remapped to target paths (preserves subdirectory structure)
+- [x] Windows path separator normalization (`\` → `/`)
+- [x] VS Code `package.json`: `localRoot` property in attach config (default: `${workspaceFolder}`)
+- [x] Extension injects `localRoot` automatically from workspace folder
+- [x] Removed fragile client-side `PlcDapTracker` path remapping (marker-based `current_source/` detection)
+- [x] `SourceMap` struct: computes virtual file offsets from stdlib + project files, builds func→file mapping
+- [x] Fixed `resolve_frame_location`: subtracts file virtual offset from `source_offset` before line calculation (was treating virtual offset as file-local, causing "stops at bottom of file")
+- [x] Fixed breakpoints: `DebugCommand::SetBreakpoints` now carries `source_offset` field; runtime manager passes virtual offset to `set_line_breakpoints` (was hardcoded to 0, causing breakpoints to never match)
+- [x] Diagnostic logging: source map build, setBreakpoints path/offset/content, stackTrace frame resolution, attach lifecycle
 
 ### Phase E — Safety hardening
 
@@ -329,41 +328,49 @@ and program downloads, per IEC 61131-3 semantics. 14 tests.
 
 ---
 
-## Phase 18: Unified HTTP Monitoring (TODO — NEXT PRIORITY)
+## Phase 18: Unified HTTP/WS Monitoring (COMPLETED)
 
-> The PLC Monitor panel should use HTTP API polling for cycle stats, watch
-> variables, and force/unforce — working identically for local and remote
-> targets. No dependency on DAP debug sessions.
+> Monitor panel uses WebSocket for real-time variable streaming and
+> force/unforce. Same code path for local and remote targets. No DAP
+> dependency for monitoring.
 
 ### HTTP API endpoints (st-target-agent)
 
-- [ ] `GET /api/v1/variables/catalog` — list all monitorable variables (names + types)
-- [ ] `GET /api/v1/variables?watch=Main.counter,Main.stats` — read watched variable values
-- [ ] `POST /api/v1/variables/force` — force a variable: `{ "name": "...", "value": "..." }`
-- [ ] `DELETE /api/v1/variables/force/:name` — unforce a variable
-- [ ] `GET /api/v1/variables/forced` — list all currently forced variables
-- [ ] Existing `GET /api/v1/status` already has cycle stats
+- [x] `GET /api/v1/variables/catalog` — list all monitorable variables (names + types)
+- [x] `GET /api/v1/variables?watch=Main.counter,Main.stats` — read watched variable values
+- [x] `POST /api/v1/variables/force` — force a variable
+- [x] `DELETE /api/v1/variables/force/:name` — unforce a variable
+- [x] `GET /api/v1/status` — cycle stats + runtime status
 
-### Local HTTP server for st-cli debug
+### WebSocket endpoint
 
-- [ ] `st-cli debug` exposes same HTTP endpoints on a local port
-- [ ] Or: DAP server embeds a lightweight HTTP server alongside stdio
-- [ ] Monitor panel connects to same URL regardless of local/remote
+- [x] `GET /api/v1/monitor/ws` — real-time variable streaming (20 Hz throttled)
+- [x] Protocol: subscribe, unsubscribe, read, force, unforce, getCatalog, getCycleInfo, resetStats
+- [x] Per-client subscription filtering, broadcast from engine thread
 
 ### Monitor panel changes (VS Code extension)
 
-- [ ] "Connect" button with target dropdown (reuse existing target selector)
-- [ ] HTTP polling loop: `/api/v1/status` every 1s, `/api/v1/variables` every 500ms
-- [ ] Force/unforce via HTTP POST/DELETE (replace DAP evaluate REPL)
-- [ ] Variable catalog via HTTP GET (replace DAP telemetry plc/varCatalog)
-- [ ] Remove dependency on active debug session for monitoring
-- [ ] Same code path for local and remote
+- [x] Target dropdown with host/port selection from plc-project.yaml
+- [x] HTTP status polling (every 5s) + auto WS connect when running
+- [x] Force/unforce via WebSocket (scalars + struct/FB fields)
+- [x] Variable catalog via WS getCatalog
+- [x] Force controls on struct field leaf nodes (tree children)
+- [x] Same code path for local and remote targets
+- [x] No dependency on active debug session for monitoring
 
-### Remove broken remote debug
+### Force variable support
 
-- [ ] Disable remote debug F5 attach option (or hide behind feature flag)
-- [ ] Keep local debug (launch mode) working as-is
-- [ ] Keep `dap_attach_handler.rs` code for future rework
+- [x] Scalar globals: value written directly, `forced_global_slots` blocks program writes
+- [x] Scalar PROGRAM locals: written to `retained_locals`, re-enforced after each cycle
+- [x] Struct/FB fields: written to `fb_instances`, re-enforced via `enforce_retained_locals`
+- [x] Force controls in monitor panel for both top-level scalars and struct field children
+- [x] 6 integration tests (HTTP force, WS force, bool force, unforce, not-running, lifecycle)
+
+### Remaining
+
+- [ ] Local `st-cli debug` HTTP/WS server (currently only remote targets use HTTP/WS)
+- [ ] `GET /api/v1/variables/forced` — list all currently forced variables
+- [ ] Disable remote debug F5 attach (keep code for future rework)
 
 ---
 

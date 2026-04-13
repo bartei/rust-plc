@@ -589,11 +589,23 @@ fn run_cycle_loop(
                             source_path: _,
                             source,
                             lines,
+                            source_offset,
                         } => {
                             let module = engine.vm().module().clone();
                             engine.vm_mut().debug_mut().clear_breakpoints();
                             let results = engine.vm_mut().debug_mut().set_line_breakpoints(
-                                &module, &source, &lines, 0,
+                                &module, &source, &lines, source_offset,
+                            );
+                            let set_count = results.iter().filter(|r| r.is_some()).count();
+                            tracing::info!(
+                                "Debug: setBreakpoints (running) — {set_count}/{} verified, source_offset={source_offset}, source_len={}, lines={:?}",
+                                results.len(),
+                                source.len(),
+                                lines,
+                            );
+                            tracing::debug!(
+                                "Debug: active breakpoint count: {}",
+                                engine.vm().debug_state().source_breakpoint_count()
                             );
                             let verified = results.iter().map(|r| r.is_some()).collect();
                             let _ = session.event_tx.send(
@@ -654,7 +666,24 @@ fn handle_debug_commands(
                 engine.vm_mut().unforce_variable(&name);
                 let _ = reply.send(Ok(()));
             }
-            _ => {}
+            Ok(RuntimeCommand::DebugAttach { event_tx, cmd_rx: new_cmd_rx }) => {
+                // A new debug client connected while we're paused.
+                // Detach the old session and swap to the new one.
+                tracing::info!("Debug: new session attached while paused — swapping");
+                if let Some(old) = debug_session.as_ref() {
+                    let _ = old.event_tx.send(st_engine::DebugResponse::Detached);
+                }
+                *debug_session = Some(DebugSession {
+                    event_tx,
+                    cmd_rx: new_cmd_rx,
+                });
+                // Re-enter the loop with the new session
+                return DebugAction::Resume;
+            }
+            Ok(RuntimeCommand::Start { .. }) | Ok(RuntimeCommand::ResetStats) => {
+                // Ignore non-critical commands while debugging
+            }
+            Err(_) => {}
         }
 
         match session.cmd_rx.recv_timeout(timeout) {
@@ -718,11 +747,21 @@ fn handle_debug_commands(
                         st_engine::DebugResponse::EvaluateResult { value, ty },
                     );
                 }
-                st_engine::DebugCommand::SetBreakpoints { source_path: _, source, lines } => {
+                st_engine::DebugCommand::SetBreakpoints { source_path: _, source, lines, source_offset } => {
                     let module = engine.vm().module().clone();
                     engine.vm_mut().debug_mut().clear_breakpoints();
                     let results = engine.vm_mut().debug_mut().set_line_breakpoints(
-                        &module, &source, &lines, 0,
+                        &module, &source, &lines, source_offset,
+                    );
+                    let set_count = results.iter().filter(|r| r.is_some()).count();
+                    tracing::info!(
+                        "Debug: setBreakpoints (paused) — {set_count}/{} verified, source_offset={source_offset}, lines={:?}",
+                        results.len(),
+                        lines,
+                    );
+                    tracing::debug!(
+                        "Debug: active breakpoint count: {}",
+                        engine.vm().debug_state().source_breakpoint_count()
                     );
                     let verified = results.iter().map(|r| r.is_some()).collect();
                     let _ = session.event_tx.send(

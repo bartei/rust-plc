@@ -84,6 +84,11 @@ impl DebugState {
         self.source_breakpoints.remove(&byte_offset);
     }
 
+    /// Get the number of active source breakpoints (for diagnostics).
+    pub fn source_breakpoint_count(&self) -> usize {
+        self.source_breakpoints.len()
+    }
+
     /// Clear all breakpoints.
     pub fn clear_breakpoints(&mut self) {
         self.breakpoints.clear();
@@ -438,6 +443,9 @@ pub enum DebugCommand {
         source_path: String,
         source: String,
         lines: Vec<u32>,
+        /// Virtual byte offset of this source file in the concatenated compilation.
+        /// Required for multi-file projects where source_map entries use virtual offsets.
+        source_offset: usize,
     },
     /// Clear all breakpoints.
     ClearBreakpoints,
