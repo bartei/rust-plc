@@ -1773,7 +1773,7 @@ checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
 
 [[package]]
 name = "st-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -1797,7 +1797,7 @@ dependencies = [
 
 [[package]]
 name = "st-comm-api"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1809,7 +1809,7 @@ dependencies = [
 
 [[package]]
 name = "st-comm-sim"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "futures-util",
  "serde",
@@ -1827,7 +1827,7 @@ dependencies = [
 
 [[package]]
 name = "st-compiler"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "st-ir",
  "st-semantics",
@@ -1837,7 +1837,7 @@ dependencies = [
 
 [[package]]
 name = "st-dap"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "dap",
  "serde_json",
@@ -1856,7 +1856,7 @@ dependencies = [
 
 [[package]]
 name = "st-deploy"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "flate2",
@@ -1876,7 +1876,7 @@ dependencies = [
 
 [[package]]
 name = "st-engine"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1892,7 +1892,7 @@ dependencies = [
 
 [[package]]
 name = "st-grammar"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cc",
  "tree-sitter",
@@ -1900,14 +1900,14 @@ dependencies = [
 
 [[package]]
 name = "st-ir"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "st-lsp"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde_json",
  "st-grammar",
@@ -1921,7 +1921,7 @@ dependencies = [
 
 [[package]]
 name = "st-monitor"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "futures-util",
  "serde",
@@ -1937,7 +1937,7 @@ dependencies = [
 
 [[package]]
 name = "st-runtime"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "clap",
@@ -1960,7 +1960,7 @@ dependencies = [
 
 [[package]]
 name = "st-semantics"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "st-syntax",
  "thiserror 2.0.18",
@@ -1968,7 +1968,7 @@ dependencies = [
 
 [[package]]
 name = "st-syntax"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "glob",
  "serde",
@@ -1980,7 +1980,7 @@ dependencies = [
 
 [[package]]
 name = "st-target-agent"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "axum",

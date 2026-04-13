@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/bartei/rust-plc/compare/st-engine-v0.1.1...st-engine-v0.1.2) - 2026-04-13
+
+### Added
+
+- fix remote debug attach — source mapping, breakpoints, force, retain
+- unified WebSocket-based PLC Monitor panel
+- Phase 17C — debug command channel for attach-to-running-engine
+- Phase 16 — RETAIN/PERSISTENT variable persistence
+- add struct variable support + rename st-runtime/st-plc-runtime crates
+
+### Fixed
+
+- critical state bugs in debug attach/detach lifecycle
+
+### Other
+
+- update all references after st-runtime/st-plc-runtime rename
+
 ## [0.1.1](https://github.com/bartei/rust-plc/compare/st-engine-v0.1.0...st-engine-v0.1.1) - 2026-04-06
 
 ### Added
