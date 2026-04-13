@@ -271,10 +271,11 @@ and program downloads, per IEC 61131-3 semantics. 16 tests.
 
 ## Phase 17: Singleton Enforcement + Debug Attach to Running Engine
 
-> **Status:** Singleton enforcement, engine infrastructure, and source path
-> remapping are implemented. Path mapping uses the standard `localRoot`/`remoteRoot`
+> **Status: COMPLETED.** Singleton enforcement, engine infrastructure, source path
+> remapping, and remote debug attach all working. Validated on real target with
+> multi-file project (breakpoints, continue, step, disconnect/reconnect, inline
+> breakpoint modification). Path mapping uses the standard `localRoot`/`remoteRoot`
 > adapter-side approach (same pattern as Node.js, Python/debugpy, Go/Delve).
-> Needs E2E validation on a real target.
 
 ### Phase A — Singleton enforcement (COMPLETED)
 
