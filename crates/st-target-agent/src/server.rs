@@ -9,6 +9,7 @@ use crate::runtime_manager::RuntimeManager;
 use axum::middleware;
 use axum::routing::{delete, get, post, put};
 use axum::Router;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -19,6 +20,8 @@ pub struct AppState {
     pub runtime_manager: RuntimeManager,
     pub start_time: Instant,
     pub log_level_handle: Option<LogLevelHandle>,
+    /// True when a DAP debug session is active (single-session enforcement).
+    pub active_debug_session: AtomicBool,
 }
 
 /// Build the axum Router with all API routes.
@@ -63,5 +66,6 @@ pub fn build_app_state(
         runtime_manager,
         start_time: Instant::now(),
         log_level_handle,
+        active_debug_session: AtomicBool::new(false),
     }))
 }

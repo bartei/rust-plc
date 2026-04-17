@@ -12,6 +12,7 @@
 
 use crate::server::AppState;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -85,6 +86,13 @@ pub async fn run_dap_proxy_with_listener(
             continue;
         }
 
+        // Single-session enforcement: reject if another debug client is connected
+        if app_state.active_debug_session.swap(true, Ordering::SeqCst) {
+            warn!("DAP proxy: debug session already active, rejecting connection from {peer}");
+            drop(stream);
+            continue;
+        }
+
         // Route based on engine state:
         // - Running/DebugPaused → attach to running engine (no subprocess)
         // - Idle → spawn subprocess for offline debugging
@@ -95,6 +103,7 @@ pub async fn run_dap_proxy_with_listener(
         {
             info!("DAP proxy: attaching to running engine (no subprocess)");
             let state_clone = Arc::clone(&app_state);
+            let session_flag = Arc::clone(&app_state);
             let src = source_path.clone();
             // Convert tokio TcpStream to std TcpStream for the blocking handler.
             // Tokio sockets are non-blocking; we must switch to blocking mode
@@ -108,15 +117,18 @@ pub async fn run_dap_proxy_with_listener(
                 crate::dap_attach_handler::handle_dap_attach(
                     std_stream, state_clone, &src,
                 );
+                session_flag.active_debug_session.store(false, Ordering::SeqCst);
                 info!("DAP proxy: attach session ended for {peer}");
             });
         } else {
             let cli_path = st_cli_path.clone();
+            let session_flag = Arc::clone(&app_state);
             // Offline debug: spawn subprocess
             tokio::spawn(async move {
                 if let Err(e) = handle_dap_connection(stream, &cli_path, &source_path).await {
                     error!("DAP proxy session error: {e}");
                 }
+                session_flag.active_debug_session.store(false, Ordering::SeqCst);
                 info!("DAP proxy: session ended for {peer}");
             });
         }

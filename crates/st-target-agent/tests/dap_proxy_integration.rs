@@ -706,3 +706,197 @@ async fn test_dap_attach_pause_resume_reattach_lifecycle() {
     assert_eq!(status["status"], "idle", "Should be idle after stop");
     eprintln!("[TEST] PASS — full lifecycle: attach → pause → resume → disconnect → re-attach → pause → disconnect → stop");
 }
+
+/// Test that only one debug session can be active at a time (offline/idle engine path).
+/// A second connection is rejected while the first is active, and a third
+/// connection succeeds after the first disconnects.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_dap_proxy_rejects_second_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, dap_port, _handle) = start_agent_with_dap(test_config(dir.path())).await;
+    let client = Client::new();
+
+    // Upload debug bundle (engine stays idle — offline debug path)
+    let bundle = make_debug_bundle();
+    upload_bundle(&client, &base, &bundle).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Client 1: connect and send Initialize to confirm session is active.
+    // Keep the stream alive across client 2's rejection test by returning it.
+    let dap_port_for_c1 = dap_port;
+    let client1_stream = tokio::task::spawn_blocking(move || {
+        let stream = TcpStream::connect_timeout(
+            &format!("127.0.0.1:{dap_port_for_c1}").parse().unwrap(),
+            Duration::from_secs(5),
+        )
+        .expect("Client 1 should connect");
+        stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+        let reader_stream = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(&reader_stream);
+        let mut writer = stream;
+        send_dap_request(&mut writer, 1, "initialize", serde_json::json!({"adapterID": "st"}));
+        let init_resp = read_until(
+            &mut reader,
+            |m| m["type"] == "response" && m["command"] == "initialize",
+            15000,
+        );
+        assert!(init_resp["success"].as_bool().unwrap_or(false), "Client 1 Initialize should succeed");
+        eprintln!("[CLIENT1] Connected and initialized");
+        writer // return to keep session alive
+    }).await.unwrap();
+
+    // Brief pause to ensure session is registered
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Client 2: should be rejected (connection accepted then immediately closed)
+    let result2 = TcpStream::connect_timeout(
+        &format!("127.0.0.1:{dap_port}").parse().unwrap(),
+        Duration::from_secs(2),
+    );
+    match result2 {
+        Ok(stream2) => {
+            stream2.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut buf = [0u8; 1];
+            let n = stream2.peek(&mut buf).unwrap_or(0);
+            assert_eq!(n, 0, "Client 2 should be rejected (session already active)");
+            eprintln!("[TEST] Client 2 correctly rejected");
+        }
+        Err(_) => {
+            eprintln!("[TEST] Client 2 connection refused (also acceptable)");
+        }
+    }
+
+    // Disconnect client 1 by dropping it
+    drop(client1_stream);
+    eprintln!("[TEST] Client 1 disconnected");
+
+    // Wait for session cleanup (subprocess needs to terminate)
+    tokio::time::sleep(Duration::from_millis(3000)).await;
+
+    // Client 3: should succeed now that session is cleared
+    // Use spawn_blocking because the offline DAP subprocess bridge may take time to start
+    let dap_port_for_c3 = dap_port;
+    let client3_result = tokio::task::spawn_blocking(move || {
+        let stream = TcpStream::connect_timeout(
+            &format!("127.0.0.1:{dap_port_for_c3}").parse().unwrap(),
+            Duration::from_secs(5),
+        )
+        .expect("Client 3 should connect after session cleared");
+        stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+        let reader_stream = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(&reader_stream);
+        let mut writer = stream;
+        send_dap_request(&mut writer, 1, "initialize", serde_json::json!({"adapterID": "st"}));
+        let init_resp = read_until(
+            &mut reader,
+            |m| m["type"] == "response" && m["command"] == "initialize",
+            15000,
+        );
+        assert!(init_resp["success"].as_bool().unwrap_or(false), "Client 3 Initialize should succeed");
+        eprintln!("[CLIENT3] Connected and initialized after session 1 ended");
+        send_dap_request(&mut writer, 2, "disconnect", serde_json::Value::Null);
+    }).await;
+    assert!(client3_result.is_ok(), "Client 3 failed: {:?}", client3_result.err());
+    eprintln!("[TEST] PASS — single-session enforcement: client 2 rejected, client 3 accepted after disconnect");
+}
+
+/// Test single-session enforcement on the attach path (running engine).
+/// A second client is rejected while the first is attached, and a third
+/// client can attach after the first disconnects.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_dap_attach_rejects_second_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, dap_port, _handle) = start_agent_with_dap(test_config(dir.path())).await;
+    let client = Client::new();
+
+    // Upload and start program (engine Running — attach path)
+    let bundle = make_debug_bundle();
+    upload_bundle(&client, &base, &bundle).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let start_resp = client.post(format!("{base}/api/v1/program/start")).send().await.unwrap();
+    assert_eq!(start_resp.status(), 200);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Verify running
+    let status: serde_json::Value = client.get(format!("{base}/api/v1/status")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(status["status"], "running");
+
+    // Client 1: attach successfully
+    let dap_port_for_s1 = dap_port;
+    let session1 = tokio::task::spawn_blocking(move || {
+        let stream = TcpStream::connect(format!("127.0.0.1:{dap_port_for_s1}")).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+        let reader_stream = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(&reader_stream);
+        let mut writer = stream;
+
+        // Initialize + Attach
+        send_dap_request(&mut writer, 1, "initialize", serde_json::json!({"adapterID": "st"}));
+        let init = read_until(&mut reader, |m| m["type"] == "response" && m["command"] == "initialize", 5000);
+        assert!(init["success"].as_bool().unwrap_or(false));
+        send_dap_request(&mut writer, 2, "attach", serde_json::json!({"stopOnEntry": false}));
+        let _ = read_until(&mut reader, |m| m["type"] == "response" && m["command"] == "attach", 5000);
+        let _ = read_until(&mut reader, |m| m["type"] == "event" && m["event"] == "initialized", 5000);
+        send_dap_request(&mut writer, 3, "configurationDone", serde_json::Value::Null);
+        let _ = read_until(&mut reader, |m| m["type"] == "response" && m["command"] == "configurationDone", 5000);
+        eprintln!("[SESSION1] Attached to running engine");
+
+        // Return the writer to keep the session alive
+        writer
+    }).await.unwrap();
+    eprintln!("[TEST] Client 1 attached");
+
+    // Brief pause to ensure session is registered
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Client 2: should be rejected
+    let result2 = TcpStream::connect_timeout(
+        &format!("127.0.0.1:{dap_port}").parse().unwrap(),
+        Duration::from_secs(2),
+    );
+    match result2 {
+        Ok(stream2) => {
+            stream2.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut buf = [0u8; 1];
+            let n = stream2.peek(&mut buf).unwrap_or(0);
+            assert_eq!(n, 0, "Client 2 should be rejected (attach session active)");
+            eprintln!("[TEST] Client 2 correctly rejected");
+        }
+        Err(_) => {
+            eprintln!("[TEST] Client 2 connection refused (also acceptable)");
+        }
+    }
+
+    // Disconnect client 1 by sending disconnect and dropping
+    tokio::task::spawn_blocking(move || {
+        let mut writer = session1;
+        send_dap_request(&mut writer, 10, "disconnect", serde_json::json!({"terminateDebuggee": false}));
+        eprintln!("[TEST] Client 1 sent disconnect");
+        // Drop writer to close TCP connection
+    }).await.unwrap();
+
+    // Wait for session cleanup
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    // Client 3: should succeed now
+    let dap_port_for_s3 = dap_port;
+    let session3_result = tokio::task::spawn_blocking(move || {
+        let stream = TcpStream::connect(format!("127.0.0.1:{dap_port_for_s3}")).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+        let reader_stream = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(&reader_stream);
+        let mut writer = stream;
+
+        send_dap_request(&mut writer, 1, "initialize", serde_json::json!({"adapterID": "st"}));
+        let init = read_until(&mut reader, |m| m["type"] == "response" && m["command"] == "initialize", 5000);
+        assert!(init["success"].as_bool().unwrap_or(false), "Client 3 Initialize should succeed");
+        send_dap_request(&mut writer, 2, "attach", serde_json::json!({"stopOnEntry": false}));
+        let _ = read_until(&mut reader, |m| m["type"] == "response" && m["command"] == "attach", 5000);
+        eprintln!("[SESSION3] Attached successfully after session 1 ended");
+
+        send_dap_request(&mut writer, 3, "disconnect", serde_json::json!({"terminateDebuggee": false}));
+    }).await;
+    assert!(session3_result.is_ok(), "Client 3 session failed: {:?}", session3_result.err());
+
+    eprintln!("[TEST] PASS — attach single-session: client 2 rejected, client 3 accepted after disconnect");
+}
