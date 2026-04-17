@@ -7,6 +7,7 @@
 use crate::vm::Vm;
 use st_comm_api::*;
 use st_ir::Value;
+use std::time::{Duration, Instant};
 
 /// Maps device fields to VM global variable slots.
 #[derive(Debug, Clone)]
@@ -31,6 +32,13 @@ struct DeviceEntry {
     device: Box<dyn CommDevice>,
     /// Maps device field names to VM global slots.
     mappings: Vec<FieldMapping>,
+    /// Minimum interval between I/O updates. `None` means every scan cycle.
+    cycle_time: Option<Duration>,
+    /// When this device last executed I/O. `None` means never (first cycle always runs).
+    last_io_time: Option<Instant>,
+    /// Set by `read_inputs` when this device was read in the current cycle.
+    /// Checked by `write_outputs` to keep reads and writes paired.
+    ran_this_cycle: bool,
 }
 
 impl CommManager {
@@ -48,6 +56,7 @@ impl CommManager {
         device: Box<dyn CommDevice>,
         instance_name: &str,
         vm: &Vm,
+        cycle_time: Option<Duration>,
     ) {
         let profile = device.device_profile().clone();
         let mut mappings = Vec::new();
@@ -69,13 +78,34 @@ impl CommManager {
             }
         }
 
-        self.device_entries.push(DeviceEntry { device, mappings });
+        self.device_entries.push(DeviceEntry {
+            device,
+            mappings,
+            cycle_time,
+            last_io_time: None,
+            ran_this_cycle: false,
+        });
     }
 
-    /// Read all input fields from devices and write them into VM globals.
-    /// Called BEFORE each scan cycle.
+    /// Read input fields from devices and write them into VM globals.
+    /// Called BEFORE each scan cycle. Devices with a `cycle_time` are only
+    /// polled once the interval has elapsed; their VM globals hold the
+    /// last-known value in between.
     pub fn read_inputs(&mut self, vm: &mut Vm) {
+        let now = Instant::now();
         for entry in &mut self.device_entries {
+            // Multi-rate gating: skip devices whose cycle_time hasn't elapsed.
+            entry.ran_this_cycle = false;
+            if let Some(ct) = entry.cycle_time {
+                if let Some(last) = entry.last_io_time {
+                    if now.duration_since(last) < ct {
+                        continue;
+                    }
+                }
+            }
+            entry.ran_this_cycle = true;
+            entry.last_io_time = Some(now);
+
             match entry.device.read_inputs() {
                 Ok(values) => {
                     for mapping in &entry.mappings {
@@ -101,10 +131,14 @@ impl CommManager {
         }
     }
 
-    /// Read all output fields from VM globals and write them to devices.
-    /// Called AFTER each scan cycle.
+    /// Write output fields from VM globals to devices.
+    /// Called AFTER each scan cycle. Only writes to devices that were read
+    /// in the current cycle (keeps reads and writes paired for multi-rate).
     pub fn write_outputs(&mut self, vm: &Vm) {
         for entry in &mut self.device_entries {
+            if !entry.ran_this_cycle {
+                continue;
+            }
             let mut outputs = IoValues::new();
             for mapping in &entry.mappings {
                 if !matches!(
@@ -130,6 +164,14 @@ impl CommManager {
     /// Number of registered devices.
     pub fn device_count(&self) -> usize {
         self.device_entries.len()
+    }
+
+    /// Returns per-device diagnostics as `(name, diagnostics)` pairs.
+    pub fn device_diagnostics(&self) -> Vec<(&str, st_comm_api::DeviceDiagnostics)> {
+        self.device_entries
+            .iter()
+            .map(|e| (e.device.name(), e.device.diagnostics()))
+            .collect()
     }
 
     /// Returns `(healthy, error)` counts based on each device's `is_connected()`.
@@ -280,11 +322,152 @@ mod tests {
     fn health_counts_mixed_devices() {
         let vm = empty_vm();
         let mut mgr = CommManager::new();
-        mgr.register_device(Box::new(StubDevice::new("ok_a", true)), "ok_a", &vm);
-        mgr.register_device(Box::new(StubDevice::new("ok_b", true)), "ok_b", &vm);
-        mgr.register_device(Box::new(StubDevice::new("down", false)), "down", &vm);
+        mgr.register_device(Box::new(StubDevice::new("ok_a", true)), "ok_a", &vm, None);
+        mgr.register_device(Box::new(StubDevice::new("ok_b", true)), "ok_b", &vm, None);
+        mgr.register_device(Box::new(StubDevice::new("down", false)), "down", &vm, None);
 
         assert_eq!(mgr.device_count(), 3);
         assert_eq!(mgr.health_counts(), (2, 1));
+    }
+
+    // ── Multi-rate scheduling tests ─────────────────────────────────────
+
+    /// StubDevice that counts how many times read_inputs/write_outputs are called.
+    struct CountingDevice {
+        name: String,
+        profile: DeviceProfile,
+        read_count: Arc<std::sync::atomic::AtomicU32>,
+        write_count: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl CountingDevice {
+        fn new(name: &str) -> (Self, Arc<std::sync::atomic::AtomicU32>, Arc<std::sync::atomic::AtomicU32>) {
+            let read_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let write_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let dev = Self {
+                name: name.to_string(),
+                profile: DeviceProfile {
+                    name: name.to_string(),
+                    vendor: None,
+                    protocol: None,
+                    description: None,
+                    fields: vec![],
+                },
+                read_count: Arc::clone(&read_count),
+                write_count: Arc::clone(&write_count),
+            };
+            (dev, read_count, write_count)
+        }
+    }
+
+    impl CommDevice for CountingDevice {
+        fn name(&self) -> &str { &self.name }
+        fn protocol(&self) -> &str { "counting" }
+        fn configure(&mut self, _: &serde_yaml::Value) -> Result<(), CommError> { Ok(()) }
+        fn bind_link(&mut self, _: Arc<Mutex<dyn st_comm_api::CommLink>>) -> Result<(), CommError> { Ok(()) }
+        fn device_profile(&self) -> &DeviceProfile { &self.profile }
+        fn read_inputs(&mut self) -> Result<IoValues, CommError> {
+            self.read_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(IoValues::new())
+        }
+        fn write_outputs(&mut self, _: &IoValues) -> Result<(), CommError> {
+            self.write_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn acyclic_request(&mut self, _: AcyclicRequest) -> Result<AcyclicResponse, CommError> {
+            Ok(AcyclicResponse { success: true, data: vec![], error: None })
+        }
+        fn is_connected(&self) -> bool { true }
+        fn diagnostics(&self) -> DeviceDiagnostics { DeviceDiagnostics { connected: true, ..Default::default() } }
+    }
+
+    #[test]
+    fn device_without_cycle_time_runs_every_cycle() {
+        let mut vm = empty_vm();
+        let mut mgr = CommManager::new();
+        let (dev, reads, writes) = CountingDevice::new("fast");
+        mgr.register_device(Box::new(dev), "fast", &vm, None);
+
+        for _ in 0..5 {
+            mgr.read_inputs(&mut vm);
+            mgr.write_outputs(&vm);
+        }
+
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 5);
+        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn device_skipped_when_cycle_time_not_elapsed() {
+        let mut vm = empty_vm();
+        let mut mgr = CommManager::new();
+        let (dev, reads, writes) = CountingDevice::new("slow");
+        mgr.register_device(Box::new(dev), "slow", &vm, Some(Duration::from_millis(100)));
+
+        // First call always runs (last_io_time is None)
+        mgr.read_inputs(&mut vm);
+        mgr.write_outputs(&vm);
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Second call immediately after — should be skipped
+        mgr.read_inputs(&mut vm);
+        mgr.write_outputs(&vm);
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn device_runs_after_cycle_time_elapsed() {
+        let mut vm = empty_vm();
+        let mut mgr = CommManager::new();
+        let (dev, reads, _writes) = CountingDevice::new("slow");
+        mgr.register_device(Box::new(dev), "slow", &vm, Some(Duration::from_millis(50)));
+
+        mgr.read_inputs(&mut vm);
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        std::thread::sleep(Duration::from_millis(60));
+
+        mgr.read_inputs(&mut vm);
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn write_outputs_paired_with_read_inputs() {
+        let mut vm = empty_vm();
+        let mut mgr = CommManager::new();
+        let (dev, reads, writes) = CountingDevice::new("slow");
+        mgr.register_device(Box::new(dev), "slow", &vm, Some(Duration::from_millis(100)));
+
+        // First cycle: both run
+        mgr.read_inputs(&mut vm);
+        mgr.write_outputs(&vm);
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Second cycle: both skipped
+        mgr.read_inputs(&mut vm);
+        mgr.write_outputs(&vm);
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn mixed_rate_devices() {
+        let mut vm = empty_vm();
+        let mut mgr = CommManager::new();
+        let (fast_dev, fast_reads, _) = CountingDevice::new("fast");
+        let (slow_dev, slow_reads, _) = CountingDevice::new("slow");
+        mgr.register_device(Box::new(fast_dev), "fast", &vm, None);
+        mgr.register_device(Box::new(slow_dev), "slow", &vm, Some(Duration::from_millis(100)));
+
+        // Run 5 fast cycles without sleeping
+        for _ in 0..5 {
+            mgr.read_inputs(&mut vm);
+        }
+
+        // Fast device ran every cycle, slow device ran only the first
+        assert_eq!(fast_reads.load(std::sync::atomic::Ordering::SeqCst), 5);
+        assert_eq!(slow_reads.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

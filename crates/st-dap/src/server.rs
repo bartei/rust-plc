@@ -937,8 +937,12 @@ impl DapSession {
                 let sim_device =
                     st_comm_sim::SimulatedDevice::new(&dev_cfg.name, profile.clone());
                 let state_handle = sim_device.state_handle();
+                let cycle_time = dev_cfg
+                    .cycle_time
+                    .as_ref()
+                    .and_then(|s| st_comm_api::parse_duration(s).ok());
                 let device_box: Box<dyn CommDevice> = Box::new(sim_device);
-                self.comm.register_device(device_box, &dev_cfg.name, &vm);
+                self.comm.register_device(device_box, &dev_cfg.name, &vm, cycle_time);
                 setup.device_states.push(comm_setup::DeviceState {
                     name: dev_cfg.name.clone(),
                     profile: profile.clone(),

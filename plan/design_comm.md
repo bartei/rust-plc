@@ -478,7 +478,7 @@ st-cli profile import --format eds      device.eds     # CANopen / EtherNet/IP
 
 This generates a `.yaml` profile with the struct fields and register mappings extracted
 from the standard file. Users can then edit the generated YAML to customize field names,
-add scaling, or remove unused channels.
+or remove unused channels.
 
 ---
 
@@ -492,7 +492,7 @@ library.
 Each profile defines:
 1. **Struct type name** — becomes the TYPE name in generated ST code
 2. **Fields** — each field has a name, ST data type, direction, and register mapping
-3. **Register mapping** — Modbus register address, type, bit position, scaling
+3. **Register mapping** — Modbus register address, type, bit position
 
 ```yaml
 # profiles/abb_acs580.yaml
@@ -534,31 +534,31 @@ fields:
     direction: input
     register: { address: 0, bit: 3, kind: discrete_input }
 
-  # Analog I/O (scaled values)
+  # Analog I/O
   - name: SPEED_REF
     type: REAL
     direction: output
-    register: { address: 1, kind: holding_register, scale: 0.1, unit: Hz }
+    register: { address: 1, kind: holding_register }
 
   - name: SPEED_ACT
     type: REAL
     direction: input
-    register: { address: 2, kind: input_register, scale: 0.1, unit: Hz }
+    register: { address: 2, kind: input_register }
 
   - name: CURRENT
     type: REAL
     direction: input
-    register: { address: 3, kind: input_register, scale: 0.1, unit: A }
+    register: { address: 3, kind: input_register }
 
   - name: TORQUE
     type: REAL
     direction: input
-    register: { address: 4, kind: input_register, scale: 0.1, unit: Nm }
+    register: { address: 4, kind: input_register }
 
   - name: POWER
     type: REAL
     direction: input
-    register: { address: 5, kind: input_register, scale: 0.1, unit: kW }
+    register: { address: 5, kind: input_register }
 ```
 
 A generic I/O module profile shows the pattern for digital/analog boards:
@@ -757,7 +757,7 @@ FUXA quickstart (Web API device + tag bindings + connection panel).
 **Modbus protocol** (`st-comm-modbus`): Works over any link. TCP framing (MBAP, auto-selected
 for TCP links), RTU framing (CRC-16, for serial links), ASCII framing (LRC, optional).
 Read/write coils, discrete inputs, holding registers, input registers. Cyclic polling
-with configurable interval. Device profile field ↔ register mapping with scaling.
+with configurable interval. Device profile field ↔ register mapping.
 
 ---
 

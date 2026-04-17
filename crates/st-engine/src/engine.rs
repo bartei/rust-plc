@@ -158,12 +158,16 @@ impl Engine {
 
     /// Register a comm device with the engine. Resolves global slots from the
     /// VM internally so callers don't have to juggle borrows.
+    /// `cycle_time` is the minimum interval between I/O updates for this device;
+    /// `None` means every scan cycle.
     pub fn register_comm_device(
         &mut self,
         device: Box<dyn st_comm_api::CommDevice>,
         instance_name: &str,
+        cycle_time: Option<std::time::Duration>,
     ) {
-        self.comm.register_device(device, instance_name, &self.vm);
+        self.comm
+            .register_device(device, instance_name, &self.vm, cycle_time);
     }
 
     /// Read-only access to the communication manager.

@@ -191,10 +191,13 @@ pub fn register_simulated_devices(setup: &mut CommSetup, engine: &mut Engine) {
         let sim_device = SimulatedDevice::new(&dev_cfg.name, profile.clone());
         let state_handle = sim_device.state_handle();
 
-        // Split the borrow: take an immutable VM ref first, then call comm_mut.
-        // We need both, so use a method that borrows them disjointly.
+        let cycle_time = dev_cfg
+            .cycle_time
+            .as_ref()
+            .and_then(|s| st_comm_api::parse_duration(s).ok());
+
         let device_box: Box<dyn st_comm_api::CommDevice> = Box::new(sim_device);
-        register_one(engine, device_box, &dev_cfg.name);
+        register_one(engine, device_box, &dev_cfg.name, cycle_time);
 
         setup.device_states.push(DeviceState {
             name: dev_cfg.name.clone(),
@@ -213,10 +216,9 @@ fn register_one(
     engine: &mut Engine,
     device: Box<dyn st_comm_api::CommDevice>,
     instance_name: &str,
+    cycle_time: Option<std::time::Duration>,
 ) {
-    // The borrow checker insists we don't hold &Vm and &mut CommManager at the
-    // same time, so split the call by going through the engine's helper.
-    engine.register_comm_device(device, instance_name);
+    engine.register_comm_device(device, instance_name, cycle_time);
 }
 
 /// Spawn a tokio runtime on a background thread and start one web UI per device.

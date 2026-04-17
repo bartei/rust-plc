@@ -1882,6 +1882,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "st-comm-api",
+ "st-comm-sim",
  "st-compiler",
  "st-ir",
  "st-syntax",
