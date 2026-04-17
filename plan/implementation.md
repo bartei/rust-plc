@@ -2,6 +2,8 @@
 
 > **Design document:** [design_core.md](design_core.md) — architecture, phase descriptions, design notes.
 > **See also:**
+> - [implementation_dap.md](implementation_dap.md) — DAP debugger progress (breakpoints, stepping, variables, attach, roadmap)
+> - [dap.md](dap.md) — DAP audit & roadmap (gap analysis, competitive position)
 > - [implementation_comm.md](implementation_comm.md) — communication layer progress
 > - [design_comm.md](design_comm.md) — communication layer design
 > - [implementation_native.md](implementation_native.md) — LLVM native compilation + hardware targets
@@ -14,22 +16,21 @@
 
 1050+ tests, zero clippy warnings.
 
-| Phase | Scope | Status |
-|-------|-------|--------|
-| **0** | Project scaffolding, workspace, CI, VSCode extension scaffold | Done |
-| **1** | Tree-sitter ST grammar (case-insensitive, incremental) | Done |
-| **2** | AST types + CST→AST lowering | Done |
-| **3** | Semantic analysis: scopes, types, 30+ diagnostics | Done |
-| **4** | LSP server skeleton + VSCode extension | Done |
-| **5** | Advanced LSP (completion, signature help, rename, formatting, code actions) | Done |
-| **6** | Register-based IR + AST→IR compiler (50+ instructions) | Done |
-| **7** | Bytecode VM + scan cycle engine + stdlib + pointers | Done |
-| **8** | DAP debugger (breakpoints, stepping, variables, force/unforce) | Done |
-| **9** | Online change manager (hot-reload with variable migration) | Done |
-| **10** | WebSocket monitor server + VSCode panel | Done |
-| **11** | CLI tool (check, run, serve, debug, compile, fmt, --json) | Done |
+- [x] Phase 0: Project scaffolding, workspace, CI, VSCode extension scaffold
+- [x] Phase 1: Tree-sitter ST grammar (case-insensitive, incremental)
+- [x] Phase 2: AST types + CST→AST lowering
+- [x] Phase 3: Semantic analysis: scopes, types, 30+ diagnostics
+- [x] Phase 4: LSP server skeleton + VSCode extension
+- [x] Phase 5: Advanced LSP (completion, signature help, rename, formatting, code actions)
+- [x] Phase 6: Register-based IR + AST→IR compiler (50+ instructions)
+- [x] Phase 7: Bytecode VM + scan cycle engine + stdlib + pointers
+- [x] Phase 8: DAP debugger (breakpoints, stepping, variables, force/unforce)
+- [x] Phase 9: Online change manager (hot-reload with variable migration)
+- [x] Phase 10: WebSocket monitor server + VSCode panel
+- [x] Phase 11: CLI tool (check, run, serve, debug, compile, fmt, --json)
 
 ### Multi-file IDE support
+
 - [x] LSP: project-aware analysis (discovers plc-project.yaml)
 - [x] LSP: cross-file go-to-definition
 - [x] LSP: cross-file type resolution
@@ -41,6 +42,7 @@
 - [x] JSON Schema for plc-project.yaml and device profiles
 
 ### LSP features
+
 - [x] `textDocument/selectionRange` — smart expand/shrink selection
 - [x] `textDocument/inlayHint` — parameter name hints at call sites
 - [x] `textDocument/onTypeFormatting` — auto-indent after Enter
@@ -48,7 +50,8 @@
 - [x] `textDocument/linkedEditingRange` — matching keyword pair highlights
 
 ### Multi-file infrastructure fixes
-- [x] Diagnostic routing via virtual concatenated coordinate system — *see [design](design_core.md#virtual-coordinate-system)*
+
+- [x] Diagnostic routing via virtual concatenated coordinate system
 - [x] Compiler FB field index bug (compilation order fix)
 - [x] `VarType::FbInstance` propagation to debugger
 - [x] Debugger FB field display (hierarchical Variables panel)
@@ -59,13 +62,12 @@
 - [x] DAP launch error points to Problems panel instead of generic dialog
 
 ### Remaining
+
 - [ ] Online change: DAP custom request + VSCode toolbar
 
 ---
 
 ## Phase 12: OOP Extensions (COMPLETED)
-
-> Design notes: [design_core.md § Phase 12](design_core.md#phase-12-oop-extensions--design-notes)
 
 199 new tests. 5 single-file playground examples + 1 multi-file OOP project.
 
@@ -75,14 +77,13 @@
 - [x] 7 runtime bugs found and fixed during playground testing
 
 ### Remaining
+
 - [ ] Constructor/destructor support (FB_INIT / FB_EXIT pattern)
 - [ ] Online change compatibility with classes
 
 ---
 
 ## Runtime + Compiler Improvements (COMPLETED)
-
-> Design notes: [design_core.md § Runtime + Compiler Improvements](design_core.md#runtime--compiler-improvements)
 
 - [x] Configurable `engine.cycle_time` from plc-project.yaml
 - [x] `Engine::run` honors cycle_time with sleep
@@ -106,13 +107,13 @@
 
 ## Cycle-Time Feedback
 
-> Design: [design_core.md § Cycle-Time Feedback](design_core.md#cycle-time-feedback)
+### Tier 1 — scanCycleInfo + real cycle stats (COMPLETED)
 
-### Tier 1 — scanCycleInfo + real cycle stats
 - [x] DAP session owns `CycleStats`, times each cycle in run loop
 - [x] `handle_cycle_info` reports real metrics
 
-### Tier 2 — live status bar
+### Tier 2 — live status bar (COMPLETED)
+
 - [x] DAP emits `plc/cycleStats` every N cycles via telemetry events
 - [x] VS Code extension subscribes via `registerDebugAdapterTrackerFactory`
 - [x] StatusBarItem with cycle stats + color-coded watchdog margin
@@ -120,26 +121,31 @@
 - [x] Hide when no `st`-type debug session active
 
 ### Tier 3 — PLC Scan Cycle tree view
+
 - [ ] `contributes.views` under `debug` container
 - [ ] `TreeDataProvider` fed from `plc/cycleStats`
 - [ ] Rows: cycle count, timing stats, per-device connection leaves
 
 ### Tier 4 — CodeLens + watchdog Diagnostic
+
 - [ ] CodeLens above each POU header showing timing
 - [ ] Watchdog budget from `plc-project.yaml` (`engine.watchdog_ms`)
 - [ ] Warning diagnostic when `last_us > budget`
 
 ### Tier 5 — MonitorPanel sparkline
+
 - [ ] "Cycle time" card in Monitor panel
 - [ ] Rolling sparkline (300 cycles), histogram, max/watchdog markers
 
 ### Tier 6 — per-POU profiling (stretch)
+
 - [ ] VM tracks per-POU `call_count` + `total_time_ns`
 - [ ] DAP custom event `plc/poStats`
 - [ ] CodeLens upgraded to per-POU timing
 - [ ] "Top POUs by time" table in Monitor panel
 
 ### Tier 7 — watchdog breakpoint (stretch)
+
 - [ ] `launch.json` option `"breakOnWatchdog": true`
 - [ ] DAP emits `Stopped` on overrun
 
@@ -147,16 +153,16 @@
 
 ## Live Variable Monitor
 
-> Design: [design_core.md § Live Variable Monitor](design_core.md#live-variable-monitor)
+### Subscription model + watch list (COMPLETED)
 
-### Subscription model + watch list
 - [x] `DapSession.watched_variables` — telemetry only ships watched values
 - [x] REPL commands: `addWatch`, `removeWatch`, `watchVariables`, `clearWatch`, `varCatalog`
 - [x] Immediate telemetry push on each watch mutation
 - [x] `Vm::monitorable_catalog()` and `Vm::monitorable_variables()`
 - [x] `plc/varCatalog` telemetry event on launch
 
-### Monitor panel UX
+### Monitor panel UX (COMPLETED)
+
 - [x] `postMessage`-based incremental DOM updates
 - [x] Watch list table with autocomplete, Force, Remove, Clear all
 - [x] Per-workspace persistence via `workspaceState`
@@ -164,7 +170,8 @@
 - [x] Live cycle stats display
 - [x] Tests: `test_watch_list_flow`, `test_var_catalog_emitted_on_launch`
 
-### Watch Tables (future)
+### Watch Tables
+
 - [ ] Multiple named watch tables with tab strip
 - [ ] Per-table persistence (key: `plcMonitor.watchTables:<workspace>`)
 - [ ] Comment column (editable inline, persisted on blur)
@@ -180,6 +187,7 @@
 - [ ] Documentation: `docs/src/cli/watch-tables.md`
 
 ### Hierarchical FB instance display
+
 - [x] DAP: FB locals with `variablesReference > 0` for tree expansion
 - [x] `fb_var_refs` HashMap for ref ID → `(caller_id, slot_idx, fb_func_idx)`
 - [x] Nested FB recursive expansion
@@ -202,12 +210,11 @@
 
 ## VS Code Extension E2E Testing
 
-> Design: [design_core.md § VS Code Extension E2E Testing](design_core.md#vs-code-extension-e2e-testing)
-
 Infrastructure: `@vscode/test-electron` (real Electron instance) + Playwright (webview DOM).
 14 Electron tests, 21 Playwright tests, 10 unit tests.
 
 ### Extension tests (via @vscode/test-electron) — 5 passing
+
 - [x] ST language registered
 - [x] `.st` files recognized as Structured Text
 - [x] Extension activates on `.st` file
@@ -215,6 +222,7 @@ Infrastructure: `@vscode/test-electron` (real Electron instance) + Playwright (w
 - [x] Syntax highlighting provides tokens
 
 ### Debug button tests (via @vscode/test-electron) — 9 passing
+
 - [x] Launch with `stopOnEntry` pauses at first statement
 - [x] Step In advances to next line
 - [x] Step Over advances without entering calls
@@ -226,6 +234,7 @@ Infrastructure: `@vscode/test-electron` (real Electron instance) + Playwright (w
 - [x] Breakpoint hit stops at correct line
 
 ### Playwright webview tests — 21 passing
+
 - [x] Watch list CRUD (add, remove, clear)
 - [x] FB tree expand/collapse with nested FBs
 - [x] Tree from telemetry `children` array
@@ -234,6 +243,7 @@ Infrastructure: `@vscode/test-electron` (real Electron instance) + Playwright (w
 - [x] Session reset: values clear and rebuild on new session
 
 ### Remaining E2E tests
+
 - [ ] Hover shows type information on variables
 - [ ] Go-to-definition navigates to symbol
 - [ ] Force/unforce variable via custom request
@@ -245,10 +255,7 @@ Infrastructure: `@vscode/test-electron` (real Electron instance) + Playwright (w
 
 ## Phase 16: RETAIN / PERSISTENT Variable Persistence (COMPLETED)
 
-> Design notes: [design_core.md § Phase 16](design_core.md#phase-16-retain--persistent-variable-persistence)
-
-Non-volatile storage for RETAIN and PERSISTENT variables across runtime restarts
-and program downloads, per IEC 61131-3 semantics. 16 tests.
+16 tests.
 
 - [x] IR: `persistent: bool` field on `VarSlot` (serde-default for backward compat)
 - [x] Compiler: set both `retain` and `persistent` from `VarQualifier` for globals and locals
@@ -259,7 +266,7 @@ and program downloads, per IEC 61131-3 semantics. 16 tests.
 - [x] `plc-project.yaml`: `engine.retain.checkpoint_cycles` config
 - [x] JSON schema updated
 - [x] Struct-typed PERSISTENT RETAIN variables: `instance_fields` section in `RetainSnapshot`, capture/restore via `fb_instances`
-- [x] 16 unit/integration tests (capture, restore, warm/cold restart, type mismatch, round-trip, engine restart, struct capture, struct restart with non-retain init values)
+- [x] 16 unit/integration tests
 
 ### Remaining
 
@@ -269,13 +276,7 @@ and program downloads, per IEC 61131-3 semantics. 16 tests.
 
 ---
 
-## Phase 17: Singleton Enforcement + Debug Attach to Running Engine
-
-> **Status: COMPLETED.** Singleton enforcement, engine infrastructure, source path
-> remapping, and remote debug attach all working. Validated on real target with
-> multi-file project (breakpoints, continue, step, disconnect/reconnect, inline
-> breakpoint modification). Path mapping uses the standard `localRoot`/`remoteRoot`
-> adapter-side approach (same pattern as Node.js, Python/debugpy, Go/Delve).
+## Phase 17: Singleton Enforcement + Debug Attach to Running Engine (COMPLETED)
 
 ### Phase A — Singleton enforcement (COMPLETED)
 
@@ -315,8 +316,8 @@ and program downloads, per IEC 61131-3 semantics. 16 tests.
 - [x] Extension injects `localRoot` automatically from workspace folder
 - [x] Removed fragile client-side `PlcDapTracker` path remapping (marker-based `current_source/` detection)
 - [x] `SourceMap` struct: computes virtual file offsets from stdlib + project files, builds func→file mapping
-- [x] Fixed `resolve_frame_location`: subtracts file virtual offset from `source_offset` before line calculation (was treating virtual offset as file-local, causing "stops at bottom of file")
-- [x] Fixed breakpoints: `DebugCommand::SetBreakpoints` now carries `source_offset` field; runtime manager passes virtual offset to `set_line_breakpoints` (was hardcoded to 0, causing breakpoints to never match)
+- [x] Fixed `resolve_frame_location`: subtracts file virtual offset from `source_offset` before line calculation
+- [x] Fixed breakpoints: `DebugCommand::SetBreakpoints` now carries `source_offset` field
 - [x] Diagnostic logging: source map build, setBreakpoints path/offset/content, stackTrace frame resolution, attach lifecycle
 
 ### Phase E — Safety hardening
@@ -330,10 +331,6 @@ and program downloads, per IEC 61131-3 semantics. 16 tests.
 ---
 
 ## Phase 18: Unified HTTP/WS Monitoring (COMPLETED)
-
-> Monitor panel uses WebSocket for real-time variable streaming and
-> force/unforce. Same code path for local and remote targets. No DAP
-> dependency for monitoring.
 
 ### HTTP API endpoints (st-target-agent)
 

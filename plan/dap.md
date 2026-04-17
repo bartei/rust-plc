@@ -1,6 +1,7 @@
 # DAP Implementation Audit & Roadmap
 
 > Last updated: 2026-04-12
+> **Implementation tracker:** [implementation_dap.md](implementation_dap.md) — detailed progress, completed work, test counts.
 
 ## Current Implementation Summary
 
