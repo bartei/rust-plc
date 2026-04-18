@@ -15,6 +15,20 @@ pub enum CompileError {
 
 /// Compile a parsed source file into an IR module.
 pub fn compile(source_file: &SourceFile) -> Result<Module, CompileError> {
+    compile_with_native_fbs(source_file, None)
+}
+
+/// Compile a parsed source file into an IR module, optionally injecting
+/// native FB types from a registry.
+///
+/// When a [`NativeFbRegistry`] is provided, synthetic [`Function`] entries are
+/// created for each registered native FB type (with correct `MemoryLayout` but
+/// empty instruction bodies). These entries are registered BEFORE Pass 1 so
+/// that user code declaring native FB instances resolves correctly.
+pub fn compile_with_native_fbs(
+    source_file: &SourceFile,
+    registry: Option<&st_comm_api::NativeFbRegistry>,
+) -> Result<Module, CompileError> {
     let mut ctx = ModuleCompiler {
         functions: Vec::new(),
         globals: MemoryLayout::default(),
@@ -23,6 +37,31 @@ pub fn compile(source_file: &SourceFile) -> Result<Module, CompileError> {
         class_var_blocks: std::collections::HashMap::new(),
         pending_global_inits: Vec::new(),
     };
+
+    // Pre-pass: inject synthetic Function entries for native FBs.
+    // These must come before Pass 1 so that when the compiler encounters
+    // `VAR dev : NativeFbType; END_VAR`, it finds the Function entry and
+    // correctly sets VarType::FbInstance(func_idx) on the local slot.
+    let mut native_fb_indices = Vec::new();
+    if let Some(reg) = registry {
+        for native_fb in reg.all() {
+            let layout = native_fb.layout();
+            let mem_layout = st_comm_api::layout_to_memory_layout(layout);
+            let func_idx = ctx.functions.len() as u16;
+            ctx.functions.push(Function {
+                name: layout.type_name.clone(),
+                kind: PouKind::FunctionBlock,
+                register_count: 0,
+                instructions: vec![],
+                label_positions: vec![],
+                locals: mem_layout,
+                source_map: vec![],
+                body_start_pc: 0,
+            });
+            native_fb_indices.push(func_idx);
+        }
+    }
+
     // Pass 1: register all POUs so cross-references work
     for item in &source_file.items {
         ctx.register_item(item);
@@ -51,6 +90,7 @@ pub fn compile(source_file: &SourceFile) -> Result<Module, CompileError> {
         functions: ctx.functions,
         globals: ctx.globals,
         type_defs: ctx.type_defs,
+        native_fb_indices,
     })
 }
 

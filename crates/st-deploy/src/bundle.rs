@@ -158,8 +158,14 @@ pub fn create_bundle(
         return Err(format!("Parse errors:\n  {}", msgs.join("\n  ")));
     }
 
+    // Build native FB registry from device profiles (if any exist in the project).
+    let native_registry = build_native_fb_registry_for_bundle(project_root);
+
     // Semantic analysis
-    let analysis = st_semantics::analyze::analyze(&parse_result.source_file);
+    let analysis = st_semantics::analyze::analyze_with_native_fbs(
+        &parse_result.source_file,
+        native_registry.as_ref(),
+    );
     let errors: Vec<_> = analysis
         .diagnostics
         .iter()
@@ -171,8 +177,11 @@ pub fn create_bundle(
     }
 
     // Compile
-    let mut module = st_compiler::compile(&parse_result.source_file)
-        .map_err(|e| format!("Compilation error: {e}"))?;
+    let mut module = st_compiler::compile_with_native_fbs(
+        &parse_result.source_file,
+        native_registry.as_ref(),
+    )
+    .map_err(|e| format!("Compilation error: {e}"))?;
 
     // Extract debug info before any stripping
     let full_debug_map = debug_info::extract_debug_map(&module);
@@ -509,6 +518,76 @@ fn append_bytes<W: Write>(
     header.set_cksum();
     tar.append_data(&mut header, path, data)
         .map_err(|e| format!("Cannot write {path} to archive: {e}"))
+}
+
+/// Build a [`NativeFbRegistry`] from device profiles found in the project's
+/// `profiles/` directory. Used by `create_bundle()` so native FB projects
+/// compile correctly during bundling.
+///
+/// Returns `None` if no profiles directory exists or no profiles are found.
+fn build_native_fb_registry_for_bundle(
+    project_root: &Path,
+) -> Option<st_comm_api::NativeFbRegistry> {
+    let profiles_dir = project_root.join("profiles");
+    if !profiles_dir.is_dir() {
+        // Also try parent directories (workspace root pattern)
+        let mut cur = project_root.to_path_buf();
+        for _ in 0..6 {
+            if let Some(parent) = cur.parent() {
+                let candidate = parent.join("profiles");
+                if candidate.is_dir() {
+                    return build_registry_from_dir(&candidate);
+                }
+                cur = parent.to_path_buf();
+            } else {
+                break;
+            }
+        }
+        return None;
+    }
+    build_registry_from_dir(&profiles_dir)
+}
+
+fn build_registry_from_dir(dir: &Path) -> Option<st_comm_api::NativeFbRegistry> {
+    let mut registry = st_comm_api::NativeFbRegistry::new();
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext != "yaml" && ext != "yml" {
+            continue;
+        }
+        if let Ok(profile) = st_comm_api::DeviceProfile::from_file(&path) {
+            // Create a stub NativeFb that just provides the layout for compilation.
+            // At runtime, the actual NativeFb implementation will be provided by the engine.
+            registry.register(Box::new(StubNativeFb {
+                layout: profile.to_native_fb_layout(),
+            }));
+        }
+    }
+    if registry.is_empty() {
+        None
+    } else {
+        Some(registry)
+    }
+}
+
+/// A stub NativeFb used only during bundle compilation. Provides the layout
+/// for type checking and code generation but execute() is a no-op.
+struct StubNativeFb {
+    layout: st_comm_api::NativeFbLayout,
+}
+
+impl st_comm_api::NativeFb for StubNativeFb {
+    fn type_name(&self) -> &str {
+        &self.layout.type_name
+    }
+    fn layout(&self) -> &st_comm_api::NativeFbLayout {
+        &self.layout
+    }
+    fn execute(&self, _fields: &mut [st_ir::Value]) {
+        // Stub — no-op during bundling.
+    }
 }
 
 #[cfg(test)]

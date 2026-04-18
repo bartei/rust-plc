@@ -62,7 +62,7 @@ elif [ "${ARCH}" = "aarch64" ]; then
         -drive file="${IMAGE_DIR}/seed.iso",format=raw,if=virtio \
         -netdev user,id=net0,hostfwd=tcp::${SSH_PORT}-:22,hostfwd=tcp::${AGENT_PORT}-:4840,hostfwd=tcp::${DAP_PORT}-:4841 \
         -device virtio-net-pci,netdev=net0 \
-        -nographic -daemonize \
+        -display none -daemonize \
         -pidfile "${PID_FILE}" \
         -serial file:"${IMAGE_DIR}/serial-aarch64.log"
 else

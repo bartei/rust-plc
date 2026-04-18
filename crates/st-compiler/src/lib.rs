@@ -5,4 +5,4 @@
 
 mod compile;
 
-pub use compile::{compile, CompileError};
+pub use compile::{compile, compile_with_native_fbs, CompileError};

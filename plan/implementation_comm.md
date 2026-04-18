@@ -2,171 +2,138 @@
 
 > **Design document:** [design_comm.md](design_comm.md) — architecture, examples, rationale.
 > **Parent plan:** [implementation.md](implementation.md) — core platform progress tracker.
-> **See also:** [implementation_native.md](implementation_native.md) — native compilation.
-> **See also:** [implementation_deploy.md](implementation_deploy.md) — remote deployment (Phase 15).
 
 ---
 
-## Core API + Simulated Device
+## Native Function Block Infrastructure
 
-### st-comm-api crate
+### NativeFb Trait and Registry (`st-comm-api`)
 
-- [x] `CommLink` trait (open, close, send, receive, diagnostics)
-- [x] `CommDevice` trait (configure, bind_link, read_inputs, write_outputs, acyclic)
-- [x] `DeviceProfile` struct + `ProfileField` with register mappings
-- [x] `CommError`, `LinkDiagnostics`, `DeviceDiagnostics` types
-- [x] `AcyclicRequest` / `AcyclicResponse` types
-- [x] Device profile YAML parser
-- [x] Profile-to-ST code generator (flat `{device}_{field}` globals)
-- [x] Project YAML parser (`links:` + `devices:` sections)
-- [x] `write_io_map_file()` — writes `_io_map.st` only if changed
+- [x] `NativeFb` trait: `type_name()`, `layout()`, `execute()`
+- [x] `NativeFbLayout`, `NativeFbField`, `NativeFbVarKind` types
+- [x] `NativeFbRegistry`: register, find (case-insensitive), all, is_empty
+- [x] `DeviceProfile::to_native_fb_layout()` — profile → layout conversion
+- [x] `field_data_type_to_var_type()` / `field_data_type_to_int_width()` helpers
+- [x] `layout_to_memory_layout()` — NativeFbLayout → st_ir::MemoryLayout
+- [x] Unit tests: registry operations, profile-to-layout, type mappings
 
-### st-comm-sim crate
+### Semantic Analyzer (`st-semantics`)
 
-- [x] `CommDevice` impl with in-memory register storage
-- [x] Simulated link (no network)
-- [x] Web UI server (HTTP + JSON polling, per-device port)
-- [x] Toggle digital inputs, set analog inputs via web UI
-- [x] Display digital/analog outputs via web UI
-- [ ] Show device diagnostics in web UI (connected, cycle count, last update)
-- [x] Loads standard device profile YAML
-- [x] Multiple simulated devices per project
-- [x] Unit tests: register read/write, profile loading, I/O direction enforcement
-- [x] Integration test: full scan cycle with simulated device
+- [x] `analyze_with_native_fbs()` entry point (backward-compatible)
+- [x] `register_native_fbs()` — injects native FB types as `SymbolKind::FunctionBlock`
+- [x] `field_data_type_to_semantic_ty()` — FieldDataType → Ty mapping
+- [x] VarInput fields → params, Var fields → outputs (for dot-access resolution)
+- [x] Tests: field access, unknown field error, undeclared without registry
 
-### Communication Manager
+### Compiler (`st-compiler`)
 
-- [x] Parse `links:` / `devices:` from plc-project.yaml
-- [x] Create and register device instances
-- [ ] Coordinate bus access for shared links (mutex/queue)
-- [x] Scan cycle integration: `read_inputs` → execute → `write_outputs`
-- [x] Field ↔ VM global mapping via `{device}_{field}` slots
-- [x] Direction-aware I/O (input fields read-only, output fields write-only)
-- [x] Multi-rate scheduling: per-device `cycle_time` with independent timers
-- [ ] Auto-generate `CommDiag` fields per device
-- [ ] Connection monitoring + automatic reconnection with backoff
-- [ ] Diagnostics exposed via monitor server
+- [x] `compile_with_native_fbs()` entry point (backward-compatible)
+- [x] Synthetic `Function` entries with `PouKind::FunctionBlock`, correct `MemoryLayout`
+- [x] `native_fb_indices: Vec<u16>` added to `st_ir::Module`
+- [x] Native FBs registered before Pass 1 (so `VarType::FbInstance` resolves)
+- [x] Tests: instance compilation, field access (LoadField/StoreField)
 
-### Engine + CLI + DAP integration
+### VM Dispatch (`st-engine`)
 
-- [x] `Engine` owns `CommManager`, calls `read_inputs`/`write_outputs` per scan
-- [x] `Engine::register_comm_device()` helper
-- [x] `Vm::set_global_by_slot` / `get_global_by_slot` for fast slot-based I/O
-- [x] `st-cli run` loads config, regenerates `_io_map.st`, starts web UIs
-- [x] `st-cli check` regenerates `_io_map.st`
-- [x] `st-cli comm-gen [path]` for explicit regeneration
-- [x] DAP server does the same setup before launch
-- [x] `read_inputs`/`write_outputs` called at every DAP scan-cycle boundary
-- [ ] `st-cli comm-status` — link health and device connection state
-- [ ] `st-cli profile validate` — check device profile YAML for errors
+- [x] `Vm::new_with_native_fbs()` constructor
+- [x] `call_fb()` checks `native_fb_indices`, dispatches to `execute()`
+- [x] Instance state persists in `fb_instances` (same as normal FBs)
+- [x] No call frame pushed for native FBs (synchronous Rust execution)
+- [x] `Engine::new_with_native_fbs()` constructor
+- [x] Tests: execute called, state persists, input params, field write, multiple instances
 
-### On-disk symbol map
+### Simulated Device (`st-comm-sim`)
 
-- [x] `_io_map.st` written to project root, regenerated only when changed
-- [x] File is gitignored
-- [x] Human-readable header per device + column-aligned mapping table
-- [x] Picked up by project autodiscovery (LSP, semantic checker, compiler, runtime, DAP)
-
-### Bundled device profiles
-
-- [x] `sim_8di_4ai_4do_2ao` — 8 DI, 4 AI, 4 DO, 2 AO
-- [ ] `sim_16di_16do` — 16-channel digital I/O
-- [x] `sim_vfd` — simulated VFD
-
-### Playground + Docs
-
-- [x] `playground/sim_project/` end-to-end example
-- [ ] Simulated device quickstart doc
-- [ ] "How to create a device profile" doc
+- [x] `SimulatedNativeFb` wrapper with cached `NativeFbLayout`
+- [x] `NativeFb` impl: bridges `Value` ↔ `IoValue` for web UI state
+- [x] `io_value_to_vm_value()` / `vm_value_to_io_value()` conversion functions
+- [x] Web UI shared state (`Arc<Mutex<HashMap>>`) works through `execute()`
+- [x] Existing `CommDevice` impl preserved (legacy path still works)
 
 ---
 
-## Diagnostics Exposure
+## Pipeline Wiring
 
-### Layer 1 — ST globals (ground truth)
+### CLI (`st-cli`)
 
-- [ ] Reserve six diag globals per device at `register_device()`
-- [ ] Write diag values after `write_outputs()` each cycle
-- [ ] Emit `--- DIAGNOSTICS ---` block in `_io_map.st`
-- [ ] Link diagnostics globals
-- [ ] Engine-level globals (`engine_cycle_count`, `engine_*_cycle_us`)
-- [ ] Unit test: globals exist, get updated, readable from ST code
+- [x] `load_native_fbs_for_project()` — discovers profiles, builds registry
+- [x] `discover_all_profiles()` — scans profile search paths
+- [x] `start_native_web_uis()` — spawns web UIs for native FB devices
+- [x] `run` command: passes registry to analyze, compile, and engine
+- [x] `check` command: passes registry to analyze
+- [ ] `bundle` command: pass registry to compile (currently uses legacy path)
+- [ ] `compile` command: pass registry to compile
+- [ ] `fmt` command: pass registry to analyze
 
-### Layer 2 — HTTP JSON endpoint
+### LSP (`st-lsp`)
 
-- [ ] `GET /api/diagnostics` — full snapshot with `"schema": "1"`
-- [ ] `GET /api/diagnostics/devices/{name}` — single device
-- [ ] `GET /api/diagnostics/summary` — healthy/count/connected/errors
-- [ ] Separate port from monitor WebSocket, configured in plc-project.yaml
-- [ ] Read-only, no auth in v1, bind `127.0.0.1` by default
+- [x] `build_native_fb_registry()` — discovers profiles from project root
+- [x] `analyze_with_cached_project()` — passes registry to analysis
+- [x] `analyze_source_with_uri()` — passes registry to analysis
+- [x] Dot-completion works for native FB fields (automatic — same symbol table)
+- [x] Hover works for native FB types (automatic)
+- [x] Type checking works for native FB field access (automatic)
 
-### Layer 3 — Documentation
+### DAP (`st-dap`)
 
-- [ ] Field-by-field diag reference (units, semantics, timing)
-- [ ] ST code example: alarm + watchdog using `*_diag_connected`
-- [ ] `/api/diagnostics` schema reference + versioning policy
-- [ ] Node-RED quickstart (inject → http request → json → switch)
-- [ ] FUXA quickstart (Web API device + tag bindings)
-- [ ] Cross-link from quickstart docs
+- [ ] Pass registry to `compile_with_native_fbs()` in `handle_launch()`
+- [x] Variable expansion works for native FB instances (automatic — same MemoryLayout)
+- [x] FB summary display works (automatic — same `fb_summary_value()` path)
 
----
+### Runtime (`st-runtime`)
 
-## Real Protocol Implementations
-
-### st-comm-link-tcp
-
-- [ ] TCP socket management (connect, reconnect, timeout)
-- [ ] Implements `CommLink` trait
-- [ ] Unit tests with mock TCP listener
-
-### st-comm-link-serial
-
-- [ ] Serial port management (RS-485/RS-232, baud, parity, data/stop bits)
-- [ ] Implements `CommLink` trait
-- [ ] Unit tests with mock serial port / PTY pair
-
-### st-comm-modbus
-
-- [ ] Implements `CommDevice` trait for Modbus
-- [ ] TCP framing: MBAP header (auto-selected for TCP links)
-- [ ] RTU framing: CRC-16, silence detection (auto-selected for serial links)
-- [ ] ASCII framing: LRC (optional, for serial links)
-- [ ] Read coils, discrete inputs, holding registers, input registers
-- [ ] Write single/multiple coils, single/multiple registers
-- [ ] Cyclic polling with configurable interval
-- [ ] Device profile field ↔ register mapping
-- [ ] Unit tests with mock link
-- [ ] Integration tests with Modbus simulator
-
-### Additional CLI commands
-
-- [ ] `st-cli comm-test` — send test read to verify connectivity
-- [ ] `st-cli profile import` — convert GSD/GSDML/ESI/EDS → YAML profile
-
-### Bundled hardware device profiles
-
-- [ ] Generic Modbus I/O (8/16/32 channel variants)
-- [ ] ABB ACS580 VFD
-- [ ] Siemens G120 VFD
-- [ ] WAGO 750-352 I/O coupler
-- [ ] Generic temperature sensor (RTD/thermocouple)
-
-### Documentation
-
-- [ ] Communication architecture guide
-- [ ] "Creating a Link Extension" tutorial
-- [ ] "Creating a Device Extension" tutorial
-- [ ] Modbus quickstart (TCP + RTU examples)
+- [ ] Pass registry to analyze/compile/engine in target agent
 
 ---
 
-## Future Protocol Extensions
+## Integration Tests
 
-- [ ] `st-comm-link-udp` — UDP link
-- [ ] `st-comm-profinet` — PROFINET I/O
-- [ ] `st-comm-ethercat` — EtherCAT
-- [ ] `st-comm-canopen` — CANopen / CAN bus
-- [ ] `st-comm-opcua` — OPC UA client
-- [ ] `st-comm-mqtt` — MQTT publish/subscribe
-- [ ] `st-comm-s7` — Siemens S7 protocol
-- [ ] `st-comm-ethernet-ip` — EtherNet/IP (Allen-Bradley)
+- [x] `native_fb_test.rs`: 5 tests (execute, state persistence, params, field write, multi-instance)
+- [x] `native_fb_integration.rs`: 3 tests (profile roundtrip, multiple devices, diagnostics)
+- [x] Semantic tests: 3 tests (field access, unknown field, undeclared type)
+- [x] Compiler tests: 2 tests (instance compilation, field access)
+
+---
+
+## Playground Examples
+
+- [x] `playground/native_fb_demo/` — native FB demo with DemoIo profile
+- [x] Compiles and runs with `st-cli run` and `st-cli check`
+- [ ] Convert `playground/sim_project/` to native FB syntax (currently uses legacy path)
+
+---
+
+## Cleanup (Remaining)
+
+- [ ] Remove `_io_map.st` codegen path (`st-comm-api/src/codegen.rs`)
+- [ ] Remove `CommManager` (`st-engine/src/comm_manager.rs`)
+- [ ] Remove `CommConfig`/`LinkConfig` from `st-comm-api/src/config.rs`
+- [ ] Remove `links:`/`devices:` parsing from CLI comm_setup
+- [ ] Remove `_io_map.st` from bundle system
+- [ ] Generate stub `.st` files for go-to-definition on native FB types
+
+---
+
+## Future Work
+
+### Real Protocol Implementations
+
+- [ ] `SerialLinkFb` — wraps serial port, NativeFb with port/baud/parity params
+- [ ] `TcpLinkFb` — wraps TCP socket, NativeFb with host/port params
+- [ ] `ModbusRtuDeviceFb` — generic Modbus RTU, parameterized by profile
+- [ ] `ModbusTcpDeviceFb` — generic Modbus TCP, parameterized by profile
+
+### Plugin System
+
+- [ ] `plugin.yaml` schema definition
+- [ ] `plugins:` section in `plc-project.yaml`
+- [ ] `st-cli plugin fetch` — clone/update git repos
+- [ ] `st-cli plugin list/update/info` commands
+- [ ] `.st-plugins.lock` lockfile for reproducible builds
+- [ ] Plugin profiles included in bundle deployment
+
+### Advanced Features
+
+- [ ] WASM protocol plugins (Tier 3)
+- [ ] Global FB instances (for multi-program device sharing)
+- [ ] Online change with native FB state migration

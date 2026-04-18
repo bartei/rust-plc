@@ -2331,6 +2331,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "st-ir",
  "st-syntax",
  "tempfile",
  "thiserror 2.0.18",
@@ -2358,6 +2359,7 @@ dependencies = [
 name = "st-compiler"
 version = "0.1.1"
 dependencies = [
+ "st-comm-api",
  "st-ir",
  "st-semantics",
  "st-syntax",
@@ -2440,6 +2442,8 @@ name = "st-lsp"
 version = "0.1.1"
 dependencies = [
  "serde_json",
+ "st-comm-api",
+ "st-comm-sim",
  "st-grammar",
  "st-semantics",
  "st-syntax",
@@ -2510,6 +2514,8 @@ dependencies = [
 name = "st-semantics"
 version = "0.1.1"
 dependencies = [
+ "st-comm-api",
+ "st-ir",
  "st-syntax",
  "thiserror 2.0.18",
 ]

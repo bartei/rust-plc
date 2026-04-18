@@ -3,6 +3,7 @@
 mod test_helpers;
 use st_semantics::diagnostic::DiagnosticCode;
 use test_helpers::*;
+use st_comm_api::native_fb::*;
 
 // =============================================================================
 // Function calls — success
@@ -298,4 +299,148 @@ END_VAR
 END_PROGRAM
 "#,
     );
+}
+
+// =============================================================================
+// Native FB tests
+// =============================================================================
+
+/// Helper: create a registry with a mock device native FB.
+fn mock_device_registry() -> st_comm_api::NativeFbRegistry {
+    use st_comm_api::FieldDataType;
+
+    struct MockDevice {
+        layout: NativeFbLayout,
+    }
+    impl NativeFb for MockDevice {
+        fn type_name(&self) -> &str {
+            &self.layout.type_name
+        }
+        fn layout(&self) -> &NativeFbLayout {
+            &self.layout
+        }
+        fn execute(&self, _fields: &mut [st_ir::Value]) {}
+    }
+
+    let mut reg = st_comm_api::NativeFbRegistry::new();
+    reg.register(Box::new(MockDevice {
+        layout: NativeFbLayout {
+            type_name: "MockIoDevice".to_string(),
+            fields: vec![
+                NativeFbField {
+                    name: "refresh_rate".to_string(),
+                    data_type: FieldDataType::Time,
+                    var_kind: NativeFbVarKind::VarInput,
+                },
+                NativeFbField {
+                    name: "connected".to_string(),
+                    data_type: FieldDataType::Bool,
+                    var_kind: NativeFbVarKind::Var,
+                },
+                NativeFbField {
+                    name: "DI_0".to_string(),
+                    data_type: FieldDataType::Bool,
+                    var_kind: NativeFbVarKind::Var,
+                },
+                NativeFbField {
+                    name: "AI_0".to_string(),
+                    data_type: FieldDataType::Int,
+                    var_kind: NativeFbVarKind::Var,
+                },
+                NativeFbField {
+                    name: "DO_0".to_string(),
+                    data_type: FieldDataType::Bool,
+                    var_kind: NativeFbVarKind::Var,
+                },
+            ],
+        },
+    }));
+    reg
+}
+
+#[test]
+fn native_fb_field_access() {
+    let registry = mock_device_registry();
+    let result = test_helpers::analyze_with_registry(
+        r#"
+PROGRAM Main
+VAR
+    dev : MockIoDevice;
+    flag : BOOL;
+    val : INT;
+END_VAR
+    dev(refresh_rate := T#100ms);
+    flag := dev.DI_0;
+    val := dev.AI_0;
+    dev.DO_0 := TRUE;
+    IF dev.connected THEN
+        flag := TRUE;
+    END_IF;
+END_PROGRAM
+"#,
+        &registry,
+    );
+    let errors: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == st_semantics::diagnostic::Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "Expected no errors, got:\n{}",
+        errors
+            .iter()
+            .map(|e| format!("  [{:?}] {}", e.code, e.message))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[test]
+fn native_fb_unknown_field() {
+    let registry = mock_device_registry();
+    let result = test_helpers::analyze_with_registry(
+        r#"
+PROGRAM Main
+VAR
+    dev : MockIoDevice;
+    x : BOOL;
+END_VAR
+    dev();
+    x := dev.nonexistent_field;
+END_PROGRAM
+"#,
+        &registry,
+    );
+    let error_codes: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == st_semantics::diagnostic::Severity::Error)
+        .map(|d| d.code)
+        .collect();
+    assert!(
+        error_codes.contains(&DiagnosticCode::NoSuchField),
+        "Expected NoSuchField error, got: {:?}",
+        error_codes
+    );
+}
+
+#[test]
+fn native_fb_without_registry_is_undeclared() {
+    // Without a registry, MockIoDevice is not known — should produce an error.
+    let result = test_helpers::analyze(
+        r#"
+PROGRAM Main
+VAR
+    dev : MockIoDevice;
+END_VAR
+    dev();
+END_PROGRAM
+"#,
+    );
+    let has_error = result
+        .diagnostics
+        .iter()
+        .any(|d| d.severity == st_semantics::diagnostic::Severity::Error);
+    assert!(has_error, "Expected undeclared type error without registry");
 }

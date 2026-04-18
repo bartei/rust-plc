@@ -111,7 +111,13 @@ impl Document {
         all_sources.push(source);
 
         let multi_result = st_syntax::multi_file::parse_multi(&all_sources);
-        let analysis = st_semantics::analyze::analyze(&multi_result.source_file);
+        // Build native FB registry from cached project info (if we have a project root).
+        // This is a lightweight operation (no I/O if profiles haven't changed).
+        let registry = Self::build_native_fb_registry(cached_project_files);
+        let analysis = st_semantics::analyze::analyze_with_native_fbs(
+            &multi_result.source_file,
+            registry.as_ref(),
+        );
         let lower_result: LowerResult = st_syntax::lower::lower(&tree, source);
 
         (tree, lower_result.source_file, multi_result.errors, analysis, virtual_offset)
@@ -193,7 +199,11 @@ impl Document {
         all_sources.push(source);
 
         let multi_result = st_syntax::multi_file::parse_multi(&all_sources);
-        let analysis = st_semantics::analyze::analyze(&multi_result.source_file);
+        let registry = Self::build_native_fb_registry(&project_files);
+        let analysis = st_semantics::analyze::analyze_with_native_fbs(
+            &multi_result.source_file,
+            registry.as_ref(),
+        );
 
         let lower_result: LowerResult = st_syntax::lower::lower(&tree, source);
         (
@@ -204,6 +214,57 @@ impl Document {
             project_files,
             virtual_offset,
         )
+    }
+
+    /// Build a native FB registry by finding the project root from the cached
+    /// project files and discovering device profiles. Returns `None` if no
+    /// project root or no profiles are found.
+    fn build_native_fb_registry(
+        project_files: &[(String, String)],
+    ) -> Option<st_comm_api::NativeFbRegistry> {
+        // Find the project root by looking for plc-project.yaml in the project files' parent dirs.
+        let project_root = project_files.first().and_then(|(path, _)| {
+            let p = std::path::Path::new(path);
+            let mut dir = p.parent()?;
+            loop {
+                if dir.join("plc-project.yaml").exists() || dir.join("plc-project.yml").exists() {
+                    return Some(dir.to_path_buf());
+                }
+                dir = dir.parent()?;
+            }
+        });
+
+        let root = project_root?;
+        // Discover all device profiles in the project's profile search paths.
+        let profiles_dir = root.join("profiles");
+        if !profiles_dir.is_dir() {
+            return None;
+        }
+
+        let mut registry = st_comm_api::NativeFbRegistry::new();
+        let entries = std::fs::read_dir(&profiles_dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext != "yaml" && ext != "yml" {
+                continue;
+            }
+            if let Ok(profile) = st_comm_api::DeviceProfile::from_file(&path) {
+                let protocol = profile.protocol.as_deref().unwrap_or("simulated");
+                if protocol == "simulated" {
+                    let name = profile.name.clone();
+                    registry.register(Box::new(
+                        st_comm_sim::SimulatedNativeFb::new(&name, profile),
+                    ));
+                }
+            }
+        }
+
+        if registry.is_empty() {
+            None
+        } else {
+            Some(registry)
+        }
     }
 
     /// Convert a byte offset to an LSP Position (line, character).

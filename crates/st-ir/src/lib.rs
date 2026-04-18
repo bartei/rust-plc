@@ -21,6 +21,11 @@ pub struct Module {
     pub globals: MemoryLayout,
     /// User-defined type definitions (for runtime struct/array construction).
     pub type_defs: Vec<TypeDef>,
+    /// Indices into `functions` that are native (Rust-backed) FBs.
+    /// These have empty instruction bodies — the VM dispatches to
+    /// `NativeFb::execute()` instead of interpreting bytecode.
+    #[serde(default)]
+    pub native_fb_indices: Vec<u16>,
 }
 
 /// A compiled function, function block, or program.

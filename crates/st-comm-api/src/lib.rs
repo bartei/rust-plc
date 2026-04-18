@@ -22,6 +22,7 @@ pub mod device;
 pub mod profile;
 pub mod codegen;
 pub mod config;
+pub mod native_fb;
 
 pub use error::*;
 pub use link::*;
@@ -29,3 +30,4 @@ pub use device::*;
 pub use profile::*;
 pub use codegen::*;
 pub use config::*;
+pub use native_fb::*;

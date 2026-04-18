@@ -307,6 +307,7 @@ mod tests {
             functions: vec![],
             globals: MemoryLayout::default(),
             type_defs: vec![],
+            native_fb_indices: vec![],
         };
         Vm::new(module, VmConfig::default())
     }

@@ -166,13 +166,12 @@ fn run_check(path: Option<&str>, args: &[String]) {
     } else {
         // Project mode
 
-        // Refresh the auto-generated I/O map before discovering files,
-        // so the LSP/check sees the same set of comm globals as `run`.
+        // Refresh the auto-generated I/O map (legacy path) and build native FB registry.
         let probe_root = resolve_project_root(target);
-        if let Err(e) = comm_setup::load_for_project(&probe_root) {
-            eprintln!("Comm config error: {e}");
-            process::exit(1);
-        }
+        let _ = comm_setup::load_for_project(&probe_root); // legacy: regenerate _io_map.st
+        let native_comm = comm_setup::load_native_fbs_for_project(&probe_root)
+            .ok()
+            .flatten();
 
         let project = match st_syntax::project::discover_project(target) {
             Ok(p) => p,
@@ -195,7 +194,10 @@ fn run_check(path: Option<&str>, args: &[String]) {
             }
         };
 
-        let result = st_semantics::analyze::analyze(&parse_result.source_file);
+        let result = st_semantics::analyze::analyze_with_native_fbs(
+            &parse_result.source_file,
+            native_comm.as_ref().map(|nc| &nc.registry),
+        );
         let has_errors = print_diagnostics(&result.diagnostics, "", &project.name, json_output);
 
         if !json_output && !has_errors {
@@ -298,8 +300,26 @@ fn run_program_cmd(args: &[String]) {
         (parse_result, project.entry_point, comm_setup)
     };
 
+    // Build native FB registry from device profiles (if any).
+    // The registry is used for semantics, compilation, and the VM runtime,
+    // so we build it once and share via Arc.
+    let native_comm = if !is_single_file {
+        match comm_setup::load_native_fbs_for_project(&resolve_project_root(target)) {
+            Ok(setup) => setup,
+            Err(e) => {
+                eprintln!("[COMM] {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Semantic check
-    let analysis = st_semantics::analyze::analyze(&parse_result.source_file);
+    let analysis = st_semantics::analyze::analyze_with_native_fbs(
+        &parse_result.source_file,
+        native_comm.as_ref().map(|nc| &nc.registry),
+    );
     let has_errors = analysis.diagnostics.iter().any(|d| {
         d.severity == st_semantics::diagnostic::Severity::Error
     });
@@ -313,7 +333,10 @@ fn run_program_cmd(args: &[String]) {
     }
 
     // Compile
-    let module = match st_compiler::compile(&parse_result.source_file) {
+    let module = match st_compiler::compile_with_native_fbs(
+        &parse_result.source_file,
+        native_comm.as_ref().map(|nc| &nc.registry),
+    ) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("Compilation error: {e}");
@@ -372,12 +395,40 @@ fn run_program_cmd(args: &[String]) {
         retain: retain_config,
         ..Default::default()
     };
-    let mut engine = st_engine::Engine::new(module, program_name, config);
+    // Build engine — with or without native FB registry.
+    // Move the registry into an Arc for shared ownership between compile and VM.
+    // Extract device states first (for web UI), then consume the registry.
+    let (native_arc, native_device_states) = if let Some(nc) = native_comm {
+        let device_states = nc.device_states;
+        (Some(std::sync::Arc::new(nc.registry)), device_states)
+    } else {
+        (None, Vec::new())
+    };
 
-    // Register simulated devices and start their web UIs (if any).
+    let mut engine = if let Some(ref arc_reg) = native_arc {
+        st_engine::Engine::new_with_native_fbs(
+            module,
+            program_name,
+            config,
+            Some(std::sync::Arc::clone(arc_reg)),
+        )
+    } else {
+        st_engine::Engine::new(module, program_name, config)
+    };
+
+    // Register simulated devices (old CommManager path) and start web UIs.
     if let Some(ref mut setup) = comm_setup {
         comm_setup::register_simulated_devices(setup, &mut engine);
         comm_setup::start_web_uis(setup, 8080);
+    }
+
+    // Start web UIs for native FB devices.
+    if !native_device_states.is_empty() {
+        let native_setup = comm_setup::NativeCommSetup {
+            registry: st_comm_api::NativeFbRegistry::new(), // placeholder, states matter
+            device_states: native_device_states,
+        };
+        comm_setup::start_native_web_uis(&native_setup, 8090);
     }
 
     let wall_started = std::time::Instant::now();

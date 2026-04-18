@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 st-comm-api = { path = "../st-comm-api" }
+st-ir.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

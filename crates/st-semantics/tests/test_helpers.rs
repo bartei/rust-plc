@@ -15,6 +15,20 @@ pub fn analyze(source: &str) -> AnalysisResult {
     st_semantics::analyze::analyze(&parse_result.source_file)
 }
 
+/// Parse and analyze source with a native FB registry, returning the analysis result.
+pub fn analyze_with_registry(
+    source: &str,
+    registry: &st_comm_api::NativeFbRegistry,
+) -> AnalysisResult {
+    let parse_result = st_syntax::parse(source);
+    assert!(
+        parse_result.errors.is_empty(),
+        "Unexpected parse errors: {:?}",
+        parse_result.errors
+    );
+    st_semantics::analyze::analyze_with_native_fbs(&parse_result.source_file, Some(registry))
+}
+
 /// Assert that the analysis produces zero errors (warnings are OK).
 pub fn assert_no_errors(source: &str) {
     let result = analyze(source);

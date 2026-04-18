@@ -10,4 +10,5 @@ rust-version.workspace = true
 st-syntax.workspace = true
 st-semantics.workspace = true
 st-ir.workspace = true
+st-comm-api = { path = "../st-comm-api" }
 thiserror.workspace = true

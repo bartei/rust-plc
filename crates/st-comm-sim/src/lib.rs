@@ -9,4 +9,5 @@ pub mod link;
 pub mod web;
 
 pub use device::SimulatedDevice;
+pub use device::SimulatedNativeFb;
 pub use link::SimulatedLink;

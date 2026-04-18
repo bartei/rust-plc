@@ -627,6 +627,7 @@ mod tests {
             }],
             globals: MemoryLayout::default(),
             type_defs: vec![],
+            native_fb_indices: vec![],
         };
         let source = "PROGRAM Main\n    x := 1;\n    x := 2;\nEND_PROGRAM\n";
 

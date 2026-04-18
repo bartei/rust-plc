@@ -334,6 +334,7 @@ mod tests {
             functions,
             globals,
             type_defs: vec![],
+            native_fb_indices: vec![],
         }
     }
 

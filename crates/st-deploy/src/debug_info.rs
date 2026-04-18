@@ -305,6 +305,7 @@ mod tests {
                     int_width: IntWidth::None,
                 }],
             }],
+            native_fb_indices: vec![],
         }
     }
 

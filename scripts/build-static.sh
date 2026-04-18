@@ -35,6 +35,8 @@ case "$ARCH" in
         NIX_PKG="pkgsCross.aarch64-multiplatform-musl.stdenv.cc"
         CC_VAR="CC_aarch64_unknown_linux_musl"
         CC_BIN="aarch64-unknown-linux-musl-gcc"
+        # aarch64 cross-build needs the linker set explicitly (host ld can't link aarch64 objects)
+        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="aarch64-unknown-linux-musl-gcc"
         ;;
     *)
         echo "Usage: $0 [x86_64|aarch64]"

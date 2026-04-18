@@ -151,6 +151,54 @@ impl Engine {
         }
     }
 
+    /// Create a new engine with an optional native FB registry for Rust-backed FBs.
+    pub fn new_with_native_fbs(
+        module: Module,
+        program_name: String,
+        config: EngineConfig,
+        native_fbs: Option<std::sync::Arc<st_comm_api::NativeFbRegistry>>,
+    ) -> Self {
+        let mut vm = Vm::new_with_native_fbs(module, config.vm_config.clone(), native_fbs);
+        let _ = vm.run_global_init();
+
+        if let Some(ref retain_cfg) = config.retain {
+            if retain_cfg.path.exists() {
+                match crate::retain_store::load_from_file(&retain_cfg.path) {
+                    Ok(snapshot) => {
+                        let warnings =
+                            crate::retain_store::restore_snapshot(&mut vm, &snapshot, true);
+                        for w in &warnings {
+                            tracing::warn!("Retain restore: {w}");
+                        }
+                        tracing::info!(
+                            "Restored {} globals, {} programs from {}",
+                            snapshot.globals.len(),
+                            snapshot.program_locals.len(),
+                            retain_cfg.path.display(),
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to load retain file: {e}");
+                    }
+                }
+            }
+        }
+
+        Self {
+            vm,
+            config,
+            stats: CycleStats {
+                min_cycle_time: Duration::MAX,
+                min_cycle_period: Duration::MAX,
+                ..Default::default()
+            },
+            program_name,
+            comm: CommManager::new(),
+            previous_cycle_start: None,
+            retain_cycle_counter: 0,
+        }
+    }
+
     /// Mutable access to the communication manager (for registering devices).
     pub fn comm_mut(&mut self) -> &mut CommManager {
         &mut self.comm

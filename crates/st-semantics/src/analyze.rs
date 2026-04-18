@@ -14,6 +14,18 @@ pub struct AnalysisResult {
 
 /// Analyze a parsed source file.
 pub fn analyze(source_file: &SourceFile) -> AnalysisResult {
+    analyze_with_native_fbs(source_file, None)
+}
+
+/// Analyze a parsed source file, optionally injecting native FB types from a registry.
+///
+/// When a [`NativeFbRegistry`] is provided, all registered native FB types are
+/// added to the symbol table as `SymbolKind::FunctionBlock`, enabling code
+/// completion, type checking, and field-access resolution for native FBs.
+pub fn analyze_with_native_fbs(
+    source_file: &SourceFile,
+    registry: Option<&st_comm_api::NativeFbRegistry>,
+) -> AnalysisResult {
     let mut analyzer = Analyzer {
         symbols: SymbolTable::new(),
         diagnostics: Vec::new(),
@@ -23,6 +35,9 @@ pub fn analyze(source_file: &SourceFile) -> AnalysisResult {
         current_class: None,
     };
     analyzer.register_intrinsics();
+    if let Some(reg) = registry {
+        analyzer.register_native_fbs(reg);
+    }
     analyzer.analyze_source_file(source_file);
     analyzer.check_unused();
     AnalysisResult {
@@ -170,6 +185,53 @@ impl Analyzer {
                 assigned: true,
             },
         );
+    }
+
+    /// Register native FB types from a [`NativeFbRegistry`] into the global scope.
+    ///
+    /// Each native FB becomes a `SymbolKind::FunctionBlock` with its VAR_INPUT
+    /// fields as `params` and VAR fields as `outputs` (so they're accessible
+    /// via `instance.field` dot notation through the existing field-access code).
+    fn register_native_fbs(&mut self, registry: &st_comm_api::NativeFbRegistry) {
+        use st_comm_api::native_fb::NativeFbVarKind;
+
+        let global = self.symbols.global_scope_id();
+
+        for native_fb in registry.all() {
+            let layout = native_fb.layout();
+            let mut params = Vec::new();
+            let mut outputs = Vec::new();
+
+            for field in &layout.fields {
+                let ty = field_data_type_to_semantic_ty(field.data_type);
+                let pd = ParamDef {
+                    name: field.name.clone(),
+                    ty,
+                    var_kind: match field.var_kind {
+                        NativeFbVarKind::VarInput => VarKind::VarInput,
+                        NativeFbVarKind::Var => VarKind::Var,
+                    },
+                };
+                match field.var_kind {
+                    NativeFbVarKind::VarInput => params.push(pd),
+                    NativeFbVarKind::Var => outputs.push(pd),
+                }
+            }
+
+            self.symbols.define(
+                global,
+                Symbol {
+                    name: layout.type_name.clone(),
+                    ty: Ty::FunctionBlock {
+                        name: layout.type_name.clone(),
+                    },
+                    kind: SymbolKind::FunctionBlock { params, outputs },
+                    range: TextRange::new(0, 0),
+                    used: true,
+                    assigned: true,
+                },
+            );
+        }
     }
 
     fn analyze_source_file(&mut self, sf: &SourceFile) {
@@ -1993,6 +2055,34 @@ impl Analyzer {
 }
 
 // =============================================================================
+// Native FB helpers
+// =============================================================================
+
+/// Map a [`st_comm_api::FieldDataType`] to the semantic [`Ty`].
+fn field_data_type_to_semantic_ty(dt: st_comm_api::FieldDataType) -> Ty {
+    use st_comm_api::FieldDataType;
+    use st_syntax::ast::ElementaryType;
+    Ty::Elementary(match dt {
+        FieldDataType::Bool => ElementaryType::Bool,
+        FieldDataType::Sint => ElementaryType::Sint,
+        FieldDataType::Int => ElementaryType::Int,
+        FieldDataType::Dint => ElementaryType::Dint,
+        FieldDataType::Lint => ElementaryType::Lint,
+        FieldDataType::Usint => ElementaryType::Usint,
+        FieldDataType::Uint => ElementaryType::Uint,
+        FieldDataType::Udint => ElementaryType::Udint,
+        FieldDataType::Ulint => ElementaryType::Ulint,
+        FieldDataType::Real => ElementaryType::Real,
+        FieldDataType::Lreal => ElementaryType::Lreal,
+        FieldDataType::Byte => ElementaryType::Byte,
+        FieldDataType::Word => ElementaryType::Word,
+        FieldDataType::Dword => ElementaryType::Dword,
+        FieldDataType::Lword => ElementaryType::Lword,
+        FieldDataType::String => return Ty::String { wide: false, max_len: None },
+        FieldDataType::Time => ElementaryType::Time,
+    })
+}
+
 // Type compatibility
 // =============================================================================
 

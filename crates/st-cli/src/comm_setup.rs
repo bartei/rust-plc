@@ -4,8 +4,8 @@
 //! profiles, generates ST source code for the device globals, instantiates
 //! simulated devices, and starts a web UI for each one.
 
-use st_comm_api::{write_io_map_file, CommConfig, DeviceProfile, EngineProjectConfig};
-use st_comm_sim::SimulatedDevice;
+use st_comm_api::{write_io_map_file, CommConfig, DeviceProfile, EngineProjectConfig, NativeFbRegistry};
+use st_comm_sim::{SimulatedDevice, SimulatedNativeFb};
 use st_engine::Engine;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -86,6 +86,157 @@ pub fn load_for_project(project_root: &Path) -> Result<Option<CommSetup>, String
         io_map_path,
         device_states: Vec::new(),
     }))
+}
+
+/// Result of loading native FB comm setup for a project.
+pub struct NativeCommSetup {
+    /// Native FB registry containing all device types from discovered profiles.
+    pub registry: NativeFbRegistry,
+    /// Device states for web UIs (one per simulated device profile).
+    pub device_states: Vec<DeviceState>,
+}
+
+/// Build a [`NativeFbRegistry`] from all device profiles discovered in the
+/// project's profile search paths. Each profile becomes a native FB type.
+///
+/// Also creates `SimulatedNativeFb` instances for profiles with `protocol: simulated`
+/// and collects their state handles for the web UI.
+///
+/// Returns `Ok(None)` if no project YAML or no profiles exist.
+pub fn load_native_fbs_for_project(project_root: &Path) -> Result<Option<NativeCommSetup>, String> {
+    let yaml_path = find_project_yaml(project_root);
+    let yaml_text = yaml_path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+
+    let profile_dirs = if yaml_text.is_empty() {
+        default_profile_dirs(project_root)
+    } else {
+        parse_profile_dirs(&yaml_text, project_root)
+    };
+
+    // Discover all profiles in search paths
+    let profiles = discover_all_profiles(&profile_dirs);
+    if profiles.is_empty() {
+        return Ok(None);
+    }
+
+    let mut registry = NativeFbRegistry::new();
+    let mut device_states = Vec::new();
+
+    for profile in profiles {
+        let protocol = profile.protocol.as_deref().unwrap_or("simulated");
+        match protocol {
+            "simulated" => {
+                let sim_fb = SimulatedNativeFb::new(&profile.name, profile.clone());
+                let state_handle = sim_fb.state_handle();
+                device_states.push(DeviceState {
+                    name: profile.name.clone(),
+                    profile: profile.clone(),
+                    state: state_handle,
+                });
+                registry.register(Box::new(sim_fb));
+            }
+            other => {
+                eprintln!(
+                    "[COMM] Profile '{}' uses unsupported protocol '{}', skipping",
+                    profile.name, other
+                );
+            }
+        }
+    }
+
+    if registry.is_empty() {
+        return Ok(None);
+    }
+
+    eprintln!(
+        "[COMM] Loaded {} native FB type(s) from profiles",
+        registry.len()
+    );
+
+    Ok(Some(NativeCommSetup {
+        registry,
+        device_states,
+    }))
+}
+
+/// Discover all device profile YAML files in the given search directories.
+fn discover_all_profiles(search_dirs: &[PathBuf]) -> Vec<DeviceProfile> {
+    let mut profiles = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
+
+    for dir in search_dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext != "yaml" && ext != "yml" {
+                continue;
+            }
+            if let Ok(profile) = DeviceProfile::from_file(&path) {
+                if seen_names.insert(profile.name.clone()) {
+                    profiles.push(profile);
+                }
+            }
+        }
+    }
+    profiles
+}
+
+/// Start web UIs for native FB device states.
+pub fn start_native_web_uis(setup: &NativeCommSetup, base_port: u16) {
+    if setup.device_states.is_empty() {
+        return;
+    }
+
+    #[allow(clippy::type_complexity)]
+    let states: Vec<(
+        String,
+        DeviceProfile,
+        Arc<Mutex<HashMap<String, st_comm_api::IoValue>>>,
+        u16,
+    )> = setup
+        .device_states
+        .iter()
+        .enumerate()
+        .map(|(i, ds)| {
+            (
+                ds.name.clone(),
+                ds.profile.clone(),
+                Arc::clone(&ds.state),
+                base_port + i as u16,
+            )
+        })
+        .collect();
+
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("[COMM] Failed to start web UI runtime: {e}");
+                return;
+            }
+        };
+
+        rt.block_on(async {
+            for (name, profile, state, port) in states {
+                tokio::spawn(st_comm_sim::web::start_web_ui(name, profile, state, port));
+            }
+            std::future::pending::<()>().await;
+        });
+    });
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
 }
 
 fn find_project_yaml(root: &Path) -> Option<PathBuf> {

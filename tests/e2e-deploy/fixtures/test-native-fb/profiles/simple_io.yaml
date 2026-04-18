@@ -1,0 +1,17 @@
+name: SimpleIO
+vendor: E2ETest
+protocol: simulated
+description: "Simple I/O for e2e testing"
+fields:
+  - name: INPUT_1
+    type: INT
+    direction: input
+    register: { address: 0, kind: virtual }
+  - name: OUTPUT_1
+    type: INT
+    direction: output
+    register: { address: 10, kind: virtual }
+  - name: FLAG
+    type: BOOL
+    direction: output
+    register: { address: 20, kind: virtual }

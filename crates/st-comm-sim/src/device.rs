@@ -1,6 +1,7 @@
-//! Simulated device — in-memory register storage implementing CommDevice.
+//! Simulated device — in-memory register storage implementing CommDevice and NativeFb.
 
 use st_comm_api::*;
+use st_ir::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -147,6 +148,150 @@ impl CommDevice for SimulatedDevice {
             last_response_ms: 0,
             last_error: None,
         }
+    }
+}
+
+// =========================================================================
+// NativeFb implementation — allows SimulatedDevice to be used as an ST
+// function block via the new native FB dispatch mechanism.
+// =========================================================================
+
+/// Number of fixed fields before the profile fields in the NativeFb layout.
+/// These are: refresh_rate, connected, error_code, io_cycles, last_response_ms.
+const DIAG_FIELD_COUNT: usize = 5;
+
+impl NativeFb for SimulatedDevice {
+    fn type_name(&self) -> &str {
+        &self.profile.name
+    }
+
+    fn layout(&self) -> &NativeFbLayout {
+        // Generate on demand. In a production setup this could be cached,
+        // but `to_native_fb_layout()` is cheap and only called at compile/analysis time.
+        // For the trait we need to return a reference, so we store it.
+        // Actually, we can't return a reference to a temporary. Let's cache it.
+        // For now, leak a Box (this is called a small number of times at startup).
+        // A better approach is to store it in the struct.
+        unreachable!("layout() on SimulatedDevice should not be called at runtime; use cached_layout()")
+    }
+
+    fn execute(&self, fields: &mut [Value]) {
+        // Field layout (from DeviceProfile::to_native_fb_layout):
+        //   [0] refresh_rate : TIME (VarInput)
+        //   [1] connected    : BOOL (Var)
+        //   [2] error_code   : INT  (Var)
+        //   [3] io_cycles    : UDINT (Var)
+        //   [4] last_response_ms : REAL (Var)
+        //   [5..] profile fields (Var)
+
+        let mut state = self.state.lock().unwrap();
+
+        // Read input-direction fields from shared state → fields slice
+        for (i, pf) in self.profile.fields.iter().enumerate() {
+            let slot = DIAG_FIELD_COUNT + i;
+            if slot >= fields.len() {
+                break;
+            }
+            if matches!(pf.direction, FieldDirection::Input | FieldDirection::Inout) {
+                if let Some(io_val) = state.get(&pf.name) {
+                    fields[slot] = io_value_to_vm_value(io_val);
+                }
+            }
+        }
+
+        // Read output-direction fields from fields slice → shared state
+        for (i, pf) in self.profile.fields.iter().enumerate() {
+            let slot = DIAG_FIELD_COUNT + i;
+            if slot >= fields.len() {
+                break;
+            }
+            if matches!(pf.direction, FieldDirection::Output | FieldDirection::Inout) {
+                state.insert(pf.name.clone(), vm_value_to_io_value(&fields[slot], pf.data_type));
+            }
+        }
+
+        // Update diagnostics
+        fields[1] = Value::Bool(true); // connected
+        fields[2] = Value::Int(0);     // error_code
+        let cycles = fields[3].as_int() as u64 + 1;
+        fields[3] = Value::UInt(cycles);
+        fields[4] = Value::Real(0.0);  // last_response_ms (simulated = instant)
+    }
+}
+
+/// A wrapper that provides a cached `NativeFbLayout` and delegates to `SimulatedDevice`.
+/// This is needed because `NativeFb::layout()` returns `&NativeFbLayout` (a reference),
+/// and `SimulatedDevice` doesn't store the layout internally.
+pub struct SimulatedNativeFb {
+    device: SimulatedDevice,
+    layout: NativeFbLayout,
+}
+
+impl SimulatedNativeFb {
+    pub fn new(name: &str, profile: DeviceProfile) -> Self {
+        let layout = profile.to_native_fb_layout();
+        let device = SimulatedDevice::new(name, profile);
+        Self { device, layout }
+    }
+
+    /// Get the shared state handle (for the web UI).
+    pub fn state_handle(&self) -> Arc<Mutex<HashMap<String, IoValue>>> {
+        self.device.state_handle()
+    }
+
+    /// Get the device profile.
+    pub fn profile(&self) -> &DeviceProfile {
+        &self.device.profile
+    }
+}
+
+impl NativeFb for SimulatedNativeFb {
+    fn type_name(&self) -> &str {
+        &self.layout.type_name
+    }
+
+    fn layout(&self) -> &NativeFbLayout {
+        &self.layout
+    }
+
+    fn execute(&self, fields: &mut [Value]) {
+        self.device.execute(fields);
+    }
+}
+
+/// Convert an `IoValue` to an `st_ir::Value`.
+fn io_value_to_vm_value(io: &IoValue) -> Value {
+    match io {
+        IoValue::Bool(b) => Value::Bool(*b),
+        IoValue::Int(i) => Value::Int(*i),
+        IoValue::UInt(u) => Value::UInt(*u),
+        IoValue::Real(r) => Value::Real(*r),
+        IoValue::String(s) => Value::String(s.clone()),
+    }
+}
+
+/// Convert an `st_ir::Value` to an `IoValue`, using the field's data type to
+/// choose the right IoValue variant.
+fn vm_value_to_io_value(val: &Value, dt: FieldDataType) -> IoValue {
+    match dt {
+        FieldDataType::Bool => IoValue::Bool(val.as_bool()),
+        FieldDataType::Real | FieldDataType::Lreal => IoValue::Real(val.as_real()),
+        FieldDataType::String => {
+            if let Value::String(s) = val {
+                IoValue::String(s.clone())
+            } else {
+                IoValue::String(String::new())
+            }
+        }
+        FieldDataType::Usint | FieldDataType::Uint | FieldDataType::Udint | FieldDataType::Ulint
+        | FieldDataType::Byte | FieldDataType::Word | FieldDataType::Dword | FieldDataType::Lword => {
+            match val {
+                Value::UInt(u) => IoValue::UInt(*u),
+                Value::Int(i) => IoValue::UInt(*i as u64),
+                _ => IoValue::UInt(0),
+            }
+        }
+        _ => IoValue::Int(val.as_int()),
     }
 }
 

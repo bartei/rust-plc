@@ -115,8 +115,9 @@
 
 - [x] Unit tests: config (5), error (2), program store (6), runtime manager (4) — 18 total
 - [x] Integration tests: HTTP API via reqwest on random port — 18 tests
-- [x] QEMU E2E tests: x86_64 (13 tests) + aarch64 (3 tests) — 16 tests (gated by `ST_E2E_QEMU=1`)
-- [x] QEMU infrastructure: VM scripts, cloud-init, test fixtures (v1/v2/v3)
+- [x] QEMU E2E tests: x86_64 (21 tests) + aarch64 (4 tests) — 25 tests (gated by `ST_E2E_QEMU=1`)
+- [x] QEMU infrastructure: VM scripts, cloud-init, test fixtures (v1/v2/v3/native-fb)
+- [x] Native FB e2e: device profile project compiled, bundled, deployed, verified on both architectures
 
 ---
 
@@ -434,6 +435,7 @@
 - [x] `tests/e2e-deploy/fixtures/test-project/` — counter + FB, multi-file, 10ms cycle
 - [x] `tests/e2e-deploy/fixtures/test-project-v2/` — online update test (counter increments by 2)
 - [x] `tests/e2e-deploy/fixtures/test-project-v3/` — incompatible layout (forces full restart)
+- [x] `tests/e2e-deploy/fixtures/test-native-fb/` — native FB with SimpleIO device profile
 
 ### E2E: Remote deployment via HTTP API
 

@@ -2,6 +2,7 @@
 #![allow(clippy::approx_constant)]
 
 use st_compiler::compile;
+use st_compiler::compile_with_native_fbs;
 use st_ir::*;
 
 fn compile_ok(source: &str) -> Module {
@@ -383,5 +384,121 @@ fn module_find_function() {
     assert!(m.find_function("Foo").is_some());
     assert!(m.find_function("foo").is_some()); // case insensitive
     assert!(m.find_function("Bar").is_none());
+}
+
+// =============================================================================
+// Native FB compilation
+// =============================================================================
+
+fn mock_native_fb_registry() -> st_comm_api::NativeFbRegistry {
+    use st_comm_api::native_fb::*;
+    use st_comm_api::FieldDataType;
+
+    struct MockDevice {
+        layout: NativeFbLayout,
+    }
+    impl NativeFb for MockDevice {
+        fn type_name(&self) -> &str { &self.layout.type_name }
+        fn layout(&self) -> &NativeFbLayout { &self.layout }
+        fn execute(&self, _fields: &mut [Value]) {}
+    }
+
+    let mut reg = st_comm_api::NativeFbRegistry::new();
+    reg.register(Box::new(MockDevice {
+        layout: NativeFbLayout {
+            type_name: "MockIo".to_string(),
+            fields: vec![
+                NativeFbField {
+                    name: "refresh_rate".to_string(),
+                    data_type: FieldDataType::Time,
+                    var_kind: NativeFbVarKind::VarInput,
+                },
+                NativeFbField {
+                    name: "connected".to_string(),
+                    data_type: FieldDataType::Bool,
+                    var_kind: NativeFbVarKind::Var,
+                },
+                NativeFbField {
+                    name: "DI_0".to_string(),
+                    data_type: FieldDataType::Bool,
+                    var_kind: NativeFbVarKind::Var,
+                },
+                NativeFbField {
+                    name: "count".to_string(),
+                    data_type: FieldDataType::Int,
+                    var_kind: NativeFbVarKind::Var,
+                },
+            ],
+        },
+    }));
+    reg
+}
+
+fn compile_with_registry(source: &str, registry: &st_comm_api::NativeFbRegistry) -> Module {
+    let result = st_syntax::parse(source);
+    assert!(result.errors.is_empty(), "Parse errors: {:?}", result.errors);
+    compile_with_native_fbs(&result.source_file, Some(registry))
+        .expect("Compilation failed")
+}
+
+#[test]
+fn compile_native_fb_instance() {
+    let reg = mock_native_fb_registry();
+    let m = compile_with_registry(
+        r#"
+PROGRAM Main
+VAR
+    dev : MockIo;
+END_VAR
+    dev(refresh_rate := T#100ms);
+END_PROGRAM
+"#,
+        &reg,
+    );
+
+    // The synthetic Function entry should exist
+    let (idx, fb_func) = m.find_function("MockIo").expect("MockIo not found");
+    assert_eq!(fb_func.kind, PouKind::FunctionBlock);
+    assert!(fb_func.instructions.is_empty(), "Native FB should have empty instructions");
+    assert_eq!(fb_func.locals.slots.len(), 4); // refresh_rate, connected, DI_0, count
+
+    // It should be in native_fb_indices
+    assert!(m.native_fb_indices.contains(&idx));
+
+    // The program's local for `dev` should be FbInstance pointing to MockIo
+    let main = m.find_function("Main").expect("Main not found").1;
+    let dev_slot = main.locals.find_slot("dev").expect("dev not found").1;
+    assert!(matches!(dev_slot.ty, VarType::FbInstance(fi) if fi == idx));
+}
+
+#[test]
+fn compile_native_fb_field_access() {
+    let reg = mock_native_fb_registry();
+    let m = compile_with_registry(
+        r#"
+PROGRAM Main
+VAR
+    dev : MockIo;
+    flag : BOOL;
+    val : INT;
+END_VAR
+    dev();
+    flag := dev.connected;
+    val := dev.count;
+    dev.DI_0 := TRUE;
+END_PROGRAM
+"#,
+        &reg,
+    );
+
+    // Should compile successfully — verify the program exists with instructions
+    let main = m.find_function("Main").expect("Main not found").1;
+    assert!(!main.instructions.is_empty());
+
+    // Verify LoadField and StoreField instructions exist
+    let has_load_field = main.instructions.iter().any(|i| matches!(i, Instruction::LoadField { .. }));
+    let has_store_field = main.instructions.iter().any(|i| matches!(i, Instruction::StoreField { .. }));
+    assert!(has_load_field, "Expected LoadField for dev.connected or dev.count");
+    assert!(has_store_field, "Expected StoreField for dev.DI_0 := TRUE");
 }
 

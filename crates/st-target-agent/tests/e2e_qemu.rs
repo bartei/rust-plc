@@ -1,30 +1,77 @@
 //! QEMU/KVM end-to-end tests for the target agent.
 //!
 //! These tests boot real QEMU virtual machines, deploy the agent binary via SSH,
-//! and exercise the full deployment pipeline over the network.
+//! and exercise the full deployment pipeline over the network — including native
+//! function block projects that use device profiles for communication I/O.
 //!
 //! **Gated by `ST_E2E_QEMU=1`** — not run during normal `cargo test`.
 //!
 //! ## Prerequisites
 //!
-//! 1. QEMU installed (`qemu-system-x86_64`, `qemu-system-aarch64`)
-//! 2. KVM available (`/dev/kvm` for x86_64, QEMU emulation for aarch64)
-//! 3. Cloud images downloaded: `tests/e2e-deploy/vm/setup-images.sh`
-//! 4. Agent built: `cargo build -p st-target-agent`
-//! 5. For aarch64: `cross build -p st-target-agent --target aarch64-unknown-linux-gnu`
+//! 1. **QEMU**: `qemu-system-x86_64` must be installed. For aarch64 tests, also
+//!    `qemu-system-aarch64` (available via `nix-shell -p qemu`).
+//! 2. **KVM**: `/dev/kvm` must be accessible for x86_64 (hardware acceleration).
+//!    aarch64 uses software emulation (no KVM required, but ~10x slower).
+//! 3. **Cloud images**: Run `tests/e2e-deploy/vm/setup-images.sh` once to download
+//!    Debian 12 images and generate SSH keys. For aarch64, also run
+//!    `setup-images.sh aarch64` and copy UEFI firmware (see below).
+//! 4. **Static agent binary**: Cross-compiled musl-static binary required because
+//!    the QEMU VM runs Debian 12 (glibc 2.36), which is older than the host.
+//!    Build with: `scripts/build-static.sh` (x86_64) or
+//!    `scripts/build-static.sh aarch64` (ARM64). The tests automatically prefer
+//!    static binaries from `target/<triple>/release-static/` over debug builds.
 //!
-//! ## Running
+//! ## Quick start (x86_64)
 //!
 //! ```bash
-//! # Setup (once)
-//! cd tests/e2e-deploy/vm && ./setup-images.sh
+//! # 1. Download VM images (once)
+//! cd tests/e2e-deploy/vm && ./setup-images.sh x86_64
 //!
-//! # Run x86_64 tests
-//! ST_E2E_QEMU=1 cargo test -p st-target-agent --test e2e_qemu
+//! # 2. Build static agent + CLI
+//! scripts/build-static.sh
 //!
-//! # Run with aarch64 tests too
-//! ST_E2E_QEMU=1 ST_E2E_AARCH64=1 cargo test -p st-target-agent --test e2e_qemu
+//! # 3. Run all x86_64 e2e tests
+//! ST_E2E_QEMU=1 cargo test -p st-target-agent --test e2e_qemu -- --test-threads=1
+//!
+//! # Or run a single test with output:
+//! ST_E2E_QEMU=1 cargo test -p st-target-agent --test e2e_qemu \
+//!     e2e_x86_64_native_fb_deploy_and_run -- --nocapture
 //! ```
+//!
+//! ## Quick start (aarch64)
+//!
+//! ```bash
+//! # 1. Download VM images + UEFI firmware (once)
+//! cd tests/e2e-deploy/vm && ./setup-images.sh aarch64
+//! # If UEFI firmware not found, copy from nix:
+//! nix-shell -p qemu --run "cp \$(find /nix/store -maxdepth 4 \
+//!     -name 'edk2-aarch64-code.fd' | head -1) images/QEMU_EFI.fd"
+//!
+//! # 2. Cross-compile static aarch64 binaries
+//! scripts/build-static.sh aarch64
+//!
+//! # 3. Run aarch64 tests (requires qemu-system-aarch64)
+//! nix-shell -p qemu --run \
+//!     "ST_E2E_QEMU=1 ST_E2E_AARCH64=1 cargo test -p st-target-agent \
+//!      --test e2e_qemu e2e_aarch64 -- --nocapture --test-threads=1"
+//! ```
+//!
+//! ## Test inventory
+//!
+//! **x86_64** (21 tests, ~10 min): bootstrap, upload, start/stop/restart, delete,
+//! health, logs, target-info, online update (v2 compatible + v3 incompatible),
+//! native FB deploy, DAP remote debug (direct + SSH tunnel + release rejected +
+//! update during session).
+//!
+//! **aarch64** (4 tests, ~6 min): bootstrap, upload+run, full lifecycle, native FB
+//! deploy. Runs under QEMU software emulation (~10x slower than KVM).
+//!
+//! ## Test fixtures
+//!
+//! - `test-project/` — Counter program (v1.0.0) with FB helper
+//! - `test-project-v2/` — Compatible update (counter += 2)
+//! - `test-project-v3/` — Incompatible layout change (forces restart)
+//! - `test-native-fb/` — Native function block project with device profile
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -57,9 +104,18 @@ fn fixtures_dir() -> PathBuf {
 }
 
 fn agent_binary(arch: &str) -> PathBuf {
+    // Prefer static musl binary (works on any Linux) over debug build (requires host glibc).
     match arch {
-        "x86_64" => project_root().join("target/debug/st-target-agent"),
-        "aarch64" => project_root().join("target/aarch64-unknown-linux-gnu/debug/st-target-agent"),
+        "x86_64" => {
+            let static_bin = project_root().join("target/x86_64-unknown-linux-musl/release-static/st-target-agent");
+            if static_bin.exists() { return static_bin; }
+            project_root().join("target/debug/st-target-agent")
+        }
+        "aarch64" => {
+            let static_bin = project_root().join("target/aarch64-unknown-linux-musl/release-static/st-target-agent");
+            if static_bin.exists() { return static_bin; }
+            project_root().join("target/aarch64-unknown-linux-gnu/debug/st-target-agent")
+        }
         _ => panic!("Unknown arch: {arch}"),
     }
 }
@@ -166,10 +222,17 @@ fn deploy_agent(vm: &VmHandle) {
         );
     }
 
-    // Also deploy st-cli (needed by the DAP proxy subprocess)
+    // Also deploy st-cli (needed by the DAP proxy subprocess).
+    // Prefer static musl binary.
     let cli_bin = match vm.arch.as_str() {
-        "x86_64" => project_root().join("target/debug/st-cli"),
-        "aarch64" => project_root().join("target/aarch64-unknown-linux-gnu/debug/st-cli"),
+        "x86_64" => {
+            let static_bin = project_root().join("target/x86_64-unknown-linux-musl/release-static/st-cli");
+            if static_bin.exists() { static_bin } else { project_root().join("target/debug/st-cli") }
+        }
+        "aarch64" => {
+            let static_bin = project_root().join("target/aarch64-unknown-linux-musl/release-static/st-cli");
+            if static_bin.exists() { static_bin } else { project_root().join("target/aarch64-unknown-linux-gnu/debug/st-cli") }
+        }
         _ => panic!("Unknown arch"),
     };
 
@@ -197,15 +260,31 @@ fn deploy_agent(vm: &VmHandle) {
         .unwrap();
     assert!(output.status.success(), "Config write failed");
 
-    // Start agent in background
+    // Start agent in background (sudo needed for /var/lib/st-agent access).
+    // Use `sudo bash -c` so the redirect also runs as root.
     let output = vm
-        .ssh_cmd("nohup /tmp/st-target-agent --config /etc/st-agent/agent.yaml > /var/log/st-agent/stdout.log 2>&1 &")
+        .ssh_cmd("sudo bash -c 'nohup /tmp/st-target-agent --config /etc/st-agent/agent.yaml > /var/log/st-agent/stdout.log 2>&1 &'")
         .output()
         .unwrap();
     assert!(output.status.success(), "Agent start failed");
 
-    // Wait for agent to be ready
-    std::thread::sleep(Duration::from_secs(2));
+    // Wait for agent HTTP API to be ready (OPC-UA cert generation can take ~6s on
+    // x86_64/KVM, ~30s on aarch64 emulation). Poll the health endpoint.
+    let url = vm.agent_url("/api/v1/health");
+    let max_wait = if vm.arch == "aarch64" { 60 } else { 30 };
+    for i in 1..=max_wait {
+        let output = Command::new("curl")
+            .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "--connect-timeout", "2", &url])
+            .output()
+            .unwrap();
+        let code = String::from_utf8_lossy(&output.stdout);
+        if code.trim() == "200" {
+            eprintln!("Agent ready after {i}s");
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    panic!("Agent did not become ready within {max_wait}s. Check /var/log/st-agent/stdout.log on the VM.");
 }
 
 fn create_test_bundle(fixture: &str) -> Vec<u8> {
@@ -672,6 +751,77 @@ fn e2e_aarch64_full_lifecycle() {
     assert_eq!(s, 200);
 }
 
+/// End-to-end test: cross-compile a native FB project to aarch64, deploy to
+/// an emulated ARM64 VM, and verify the program runs with all native FB fields
+/// visible in the variable catalog.
+#[test]
+fn e2e_aarch64_native_fb_deploy_and_run() {
+    if !qemu_enabled() || !aarch64_enabled() {
+        eprintln!("Skipping (set ST_E2E_QEMU=1 ST_E2E_AARCH64=1)");
+        return;
+    }
+
+    let vm = boot_vm("aarch64");
+    deploy_agent(&vm);
+
+    // Create bundle (compiled on host, deployed to ARM64 target)
+    let bundle = create_test_bundle("test-native-fb");
+
+    // Upload
+    let (upload_status, upload_body) = agent_upload(&vm, &bundle);
+    assert_eq!(upload_status, 200, "Upload failed: {upload_body}");
+    assert_eq!(
+        upload_body["program"]["name"].as_str(),
+        Some("NativeFbE2E"),
+    );
+
+    // Start
+    let (start_status, start_body) = agent_post(&vm, "/api/v1/program/start");
+    assert_eq!(start_status, 200, "Start failed: {start_body}");
+
+    // Wait longer for aarch64 emulation
+    std::thread::sleep(Duration::from_millis(2000));
+
+    // Verify running
+    let (_, status_body) = agent_get(&vm, "/api/v1/status");
+    assert_eq!(status_body["status"], "running", "Program not running on ARM64");
+    let cycle_count = status_body["cycle_stats"]["cycle_count"]
+        .as_u64()
+        .unwrap_or(0);
+    assert!(cycle_count > 0, "Expected cycles > 0 on ARM64, got {cycle_count}");
+
+    // Verify variable catalog includes native FB fields
+    let (cat_status, catalog) = agent_get(&vm, "/api/v1/variables/catalog");
+    assert_eq!(cat_status, 200);
+    let entries = catalog["variables"]
+        .as_array()
+        .expect("Expected variables array in catalog");
+    let names: Vec<&str> = entries
+        .iter()
+        .filter_map(|e| e["name"].as_str())
+        .collect();
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("g_cycle")),
+        "g_cycle not in ARM64 catalog: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.contains("io.OUTPUT_1") || n.contains("io.output_1")),
+        "Native FB field io.OUTPUT_1 not in ARM64 catalog: {names:?}"
+    );
+
+    // Verify target info reports aarch64
+    let (_, info) = agent_get(&vm, "/api/v1/target-info");
+    let arch = info["arch"].as_str().unwrap_or("");
+    assert!(
+        arch.contains("aarch64") || arch.contains("arm"),
+        "Expected ARM64 architecture, got: {arch}"
+    );
+
+    // Stop
+    let (stop_status, _) = agent_post(&vm, "/api/v1/program/stop");
+    assert_eq!(stop_status, 200);
+}
+
 // ─── DAP Remote Debug via Direct Port Forwarding ────────────────────────
 
 /// DAP wire protocol helpers (Content-Length framing)
@@ -988,4 +1138,102 @@ fn e2e_x86_64_remote_debug_update_during_session() {
     assert_eq!(stopped["body"]["reason"], "entry", "V2 should stop on entry");
 
     send_dap(&mut writer2, 3, "disconnect", serde_json::json!({ "terminateDebuggee": true }));
+}
+
+// =============================================================================
+// Native Function Block E2E
+// =============================================================================
+
+/// End-to-end test: compile a native FB project, bundle it, deploy to the
+/// QEMU VM, start the runtime, and verify it runs cycles with the native FB
+/// types correctly compiled into the module.
+#[test]
+fn e2e_x86_64_native_fb_deploy_and_run() {
+    if !qemu_enabled() {
+        eprintln!("Skipping (set ST_E2E_QEMU=1)");
+        return;
+    }
+
+    let vm = boot_vm("x86_64");
+    deploy_agent(&vm);
+
+    // Create bundle from the native FB test fixture.
+    // This exercises the full pipeline: profile discovery → NativeFbRegistry →
+    // compile_with_native_fbs → bundle with native_fb_indices in the Module.
+    let bundle = create_test_bundle("test-native-fb");
+
+    // Upload
+    let (upload_status, upload_body) = agent_upload(&vm, &bundle);
+    assert_eq!(upload_status, 200, "Upload failed: {upload_body}");
+    assert_eq!(
+        upload_body["program"]["name"].as_str(),
+        Some("NativeFbE2E"),
+        "Bundle name mismatch"
+    );
+
+    // Start
+    let (start_status, start_body) = agent_post(&vm, "/api/v1/program/start");
+    assert_eq!(start_status, 200, "Start failed: {start_body}");
+
+    // Wait for cycles to execute
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Verify running
+    let (_, status_body) = agent_get(&vm, "/api/v1/status");
+    assert_eq!(status_body["status"], "running", "Program not running");
+    let cycle_count = status_body["cycle_stats"]["cycle_count"]
+        .as_u64()
+        .unwrap_or(0);
+    assert!(
+        cycle_count > 5,
+        "Expected >5 cycles after 500ms at 10ms/cycle, got {cycle_count}"
+    );
+
+    // Verify the variable catalog includes our native FB fields.
+    // Even without a runtime NativeFbRegistry, the compiled Module has the
+    // synthetic Function entries and the program's locals include the FB instance.
+    let (cat_status, catalog) = agent_get(&vm, "/api/v1/variables/catalog");
+    assert_eq!(cat_status, 200);
+    let entries = catalog["variables"]
+        .as_array()
+        .expect("Expected variables array in catalog");
+    let names: Vec<&str> = entries
+        .iter()
+        .filter_map(|e| e["name"].as_str())
+        .collect();
+    // g_cycle and g_flag should be in the global catalog
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("g_cycle")),
+        "g_cycle not in catalog: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("g_flag")),
+        "g_flag not in catalog: {names:?}"
+    );
+    // Native FB fields should also be visible
+    assert!(
+        names.iter().any(|n| n.contains("io.OUTPUT_1") || n.contains("io.output_1")),
+        "Native FB field io.OUTPUT_1 not in catalog: {names:?}"
+    );
+
+    // Verify g_cycle is advancing via the variables endpoint
+    let (_, vars) = agent_get(&vm, "/api/v1/variables");
+    let var_list = vars["variables"].as_array();
+    if let Some(var_list) = var_list {
+        let g_cycle = var_list
+            .iter()
+            .find(|v| v["name"].as_str().map(|n| n.eq_ignore_ascii_case("g_cycle")).unwrap_or(false));
+        if let Some(g_cycle) = g_cycle {
+            let val_str = g_cycle["value"].as_str().unwrap_or("0");
+            let cycle_val: i64 = val_str.parse().unwrap_or(0);
+            assert!(
+                cycle_val > 0,
+                "g_cycle should be > 0 after running, got {cycle_val}"
+            );
+        }
+    }
+
+    // Stop
+    let (stop_status, _) = agent_post(&vm, "/api/v1/program/stop");
+    assert_eq!(stop_status, 200);
 }

@@ -81,11 +81,22 @@ pub struct Vm {
     /// caller_identity encodes both the function index and the caller's own
     /// instance position to distinguish nested instances (e.g. class inside FB).
     fb_instances: std::collections::HashMap<(u32, u16), Vec<Value>>,
+    /// Optional native FB registry for dispatching Rust-backed function blocks.
+    native_fbs: Option<std::sync::Arc<st_comm_api::NativeFbRegistry>>,
 }
 
 impl Vm {
     /// Create a new VM with the given module.
     pub fn new(module: Module, config: VmConfig) -> Self {
+        Self::new_with_native_fbs(module, config, None)
+    }
+
+    /// Create a new VM with the given module and an optional native FB registry.
+    pub fn new_with_native_fbs(
+        module: Module,
+        config: VmConfig,
+        native_fbs: Option<std::sync::Arc<st_comm_api::NativeFbRegistry>>,
+    ) -> Self {
         let globals = module
             .globals
             .slots
@@ -104,6 +115,7 @@ impl Vm {
             forced_global_slots: std::collections::HashSet::new(),
             elapsed_time_ms: 0,
             fb_instances: std::collections::HashMap::new(),
+            native_fbs,
         }
     }
 
@@ -1592,8 +1604,6 @@ impl Vm {
             .get(func_index as usize)
             .ok_or(VmError::InvalidFunction(func_index))?;
 
-        let register_count = func.register_count as usize;
-
         // Load retained instance locals, or create fresh ones
         let expected_len = func.locals.slots.len();
         let mut locals: Vec<Value> = self
@@ -1623,6 +1633,22 @@ impl Vm {
                 locals[param_slot as usize] = val;
             }
         }
+
+        // Native FB dispatch: if this function is a native FB, call execute()
+        // directly instead of pushing a call frame with interpreted instructions.
+        if self.module.native_fb_indices.contains(&func_index) {
+            let func_name = func.name.clone();
+            if let Some(ref registry) = self.native_fbs {
+                if let Some(native_fb) = registry.find(&func_name) {
+                    native_fb.execute(&mut locals);
+                }
+            }
+            // Save instance state back (same as normal FB return path)
+            self.fb_instances.insert(instance_key, locals);
+            return Ok(());
+        }
+
+        let register_count = func.register_count as usize;
 
         self.call_stack.push(CallFrame {
             func_index,

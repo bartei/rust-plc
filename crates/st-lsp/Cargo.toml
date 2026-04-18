@@ -13,6 +13,8 @@ serde_json.workspace = true
 st-grammar.workspace = true
 st-syntax.workspace = true
 st-semantics.workspace = true
+st-comm-api = { path = "../st-comm-api" }
+st-comm-sim = { path = "../st-comm-sim" }
 tower-lsp.workspace = true
 tokio.workspace = true
 tracing.workspace = true
