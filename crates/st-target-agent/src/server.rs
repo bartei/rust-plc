@@ -60,12 +60,61 @@ pub fn build_app_state(
     let program_store = ProgramStore::new(&config.storage.program_dir)?;
     let runtime_manager = RuntimeManager::new(config.runtime.clone());
 
-    Ok(Arc::new(AppState {
+    let state = Arc::new(AppState {
         config,
         program_store: RwLock::new(program_store),
         runtime_manager,
         start_time: Instant::now(),
         log_level_handle,
         active_debug_session: AtomicBool::new(false),
-    }))
+    });
+
+    // Start OPC-UA server if enabled
+    #[cfg(feature = "opcua")]
+    if state.config.opcua_server.enabled {
+        start_opcua_server(&state);
+    }
+
+    Ok(state)
+}
+
+/// Spawn the OPC-UA server as a background tokio task.
+#[cfg(feature = "opcua")]
+fn start_opcua_server(state: &Arc<AppState>) {
+    let opcua_cfg = &state.config.opcua_server;
+    let bind = opcua_cfg
+        .bind
+        .clone()
+        .unwrap_or_else(|| state.config.network.bind.clone());
+
+    // Use the agent's retain directory for PKI storage (persistent across restarts).
+    let pki_dir = state.config.storage.retain_dir.join("opcua-pki");
+
+    let server_config = st_opcua_server::OpcuaServerConfig {
+        enabled: true,
+        port: opcua_cfg.port,
+        bind,
+        security_policy: opcua_cfg.security_policy.clone(),
+        anonymous_access: opcua_cfg.anonymous_access,
+        sampling_interval_ms: opcua_cfg.sampling_interval_ms,
+        pki_dir: Some(pki_dir),
+        ..Default::default()
+    };
+
+    let provider = Arc::new(crate::opcua_bridge::AgentDataProvider::new(
+        Arc::clone(state),
+    ));
+
+    tokio::spawn(async move {
+        match st_opcua_server::run_opcua_server(server_config, provider).await {
+            Ok(_handle) => {
+                // Server is running — handle will be dropped when the
+                // tokio runtime shuts down, which cancels the server.
+                tracing::info!("OPC-UA server started successfully");
+            }
+            Err(e) => {
+                tracing::error!("OPC-UA server failed to start: {e}");
+            }
+        }
+    });
 }

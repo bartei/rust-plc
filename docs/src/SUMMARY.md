@@ -46,6 +46,7 @@
 - [Bytecode VM](./architecture/bytecode-vm.md)
 - [Online Change](./architecture/online-change.md)
 - [Monitor Server](./architecture/monitor-server.md)
+- [OPC-UA Server](./architecture/opcua-server.md)
 
 # Contributing
 

@@ -16,3 +16,6 @@ pub mod runtime_manager;
 pub mod server;
 pub mod singleton;
 pub mod watchdog;
+
+#[cfg(feature = "opcua")]
+pub mod opcua_bridge;

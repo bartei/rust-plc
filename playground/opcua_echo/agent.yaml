@@ -1,0 +1,21 @@
+# Sample agent configuration for the OPC-UA echo example.
+# Deploy this to /etc/st-plc/agent.yaml on the target device.
+
+agent:
+  name: opcua-echo-demo
+  description: "OPC-UA echo test — HMI writes are echoed back by the PLC"
+
+network:
+  bind: 0.0.0.0
+  port: 4840
+
+runtime:
+  auto_start: true
+  mode: vm
+
+opcua_server:
+  enabled: true
+  port: 4842
+  security_policy: None
+  anonymous_access: true
+  sampling_interval_ms: 100

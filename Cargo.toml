@@ -15,6 +15,7 @@ members = [
     "crates/st-deploy",
     "crates/st-target-agent",
     "crates/st-runtime",
+    "crates/st-opcua-server",
 ]
 resolver = "3"
 

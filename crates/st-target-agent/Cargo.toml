@@ -17,6 +17,7 @@ st-syntax = { path = "../st-syntax" }
 st-monitor = { path = "../st-monitor" }
 st-deploy = { path = "../st-deploy" }
 st-comm-api = { path = "../st-comm-api" }
+st-opcua-server = { path = "../st-opcua-server", optional = true }
 
 tokio.workspace = true
 futures-util.workspace = true
@@ -34,6 +35,11 @@ clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing-journald = "0.3"
 libc = "0.2"
+async-trait = "0.1"
+
+[features]
+default = ["opcua"]
+opcua = ["dep:st-opcua-server"]
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json", "multipart"] }

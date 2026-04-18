@@ -19,6 +19,61 @@ pub struct AgentConfig {
     pub security: SecurityConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// OPC-UA server configuration. Enabled by default.
+    #[serde(default)]
+    pub opcua_server: OpcuaServerConfig,
+}
+
+/// OPC-UA server configuration for the agent.
+///
+/// Enabled by default — OPC-UA is a core feature for HMI/SCADA integration.
+/// All fields have defaults so existing `agent.yaml` files without an
+/// `opcua_server:` section automatically get OPC-UA on port 4842.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpcuaServerConfig {
+    /// Whether the OPC-UA server is enabled. Default: `true`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// TCP port. Default: `4842` (HTTP=4840, DAP=4841, OPC-UA=4842).
+    #[serde(default = "default_opcua_port")]
+    pub port: u16,
+    /// Bind address. Default: uses the agent's `network.bind`.
+    #[serde(default)]
+    pub bind: Option<String>,
+    /// OPC-UA security policy. Default: `"None"`.
+    #[serde(default = "default_opcua_security")]
+    pub security_policy: String,
+    /// Allow anonymous access. Default: `true`.
+    #[serde(default = "default_true")]
+    pub anonymous_access: bool,
+    /// Value sync interval in ms. Default: `100`.
+    #[serde(default = "default_opcua_sampling")]
+    pub sampling_interval_ms: u64,
+}
+
+impl Default for OpcuaServerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: default_opcua_port(),
+            bind: None,
+            security_policy: default_opcua_security(),
+            anonymous_access: true,
+            sampling_interval_ms: default_opcua_sampling(),
+        }
+    }
+}
+
+fn default_opcua_port() -> u16 {
+    4842
+}
+
+fn default_opcua_security() -> String {
+    "None".to_string()
+}
+
+fn default_opcua_sampling() -> u64 {
+    100
 }
 
 

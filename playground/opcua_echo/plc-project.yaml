@@ -1,0 +1,14 @@
+# OPC-UA echo example — PLC program that echoes written values.
+#
+# HMI/SCADA workflow:
+#   1. Deploy this project to a target running st-runtime
+#   2. Enable the OPC-UA server in agent.yaml (see agent.yaml in this directory)
+#   3. Connect an OPC-UA client (UaExpert, Ignition, FUXA) to opc.tcp://<target>:4842
+#   4. Write to written_val → PLC copies it to echo_val
+#
+# OPC-UA server config is in agent.yaml (deployment-specific, not here).
+
+name: OpcUaEcho
+entryPoint: Main
+engine:
+  cycle_time: 10ms

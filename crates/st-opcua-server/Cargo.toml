@@ -1,0 +1,39 @@
+[package]
+name = "st-opcua-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "OPC-UA server for ST PLC runtime — exposes PLC variables to HMI/SCADA clients"
+
+[dependencies]
+# OPC-UA server implementation (pure Rust, no OpenSSL)
+async-opcua-server = "0.18"
+async-opcua-types = "0.18"
+async-opcua-crypto = "0.18"
+async-opcua-nodes = "0.18"
+async-opcua-core-namespace = "0.18"
+
+# Async runtime
+tokio = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Serialization (for config)
+serde = { workspace = true }
+
+# Async trait support
+async-trait = "0.1"
+
+# Serialization (for config deserialization)
+serde_yaml = { workspace = true }
+
+[dev-dependencies]
+# OPC-UA client for integration tests
+async-opcua-client = "0.18"
+
+# Test support
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tracing-subscriber = { workspace = true }
+async-trait = "0.1"
