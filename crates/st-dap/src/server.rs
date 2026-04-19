@@ -1810,8 +1810,12 @@ impl DapSession {
                 indexed_variables: None, memory_reference: None,
             }));
         }
-        let var_name = parts[0].trim();
+        let raw_var_name = parts[0].trim();
         let value_str = parts[1].trim();
+
+        // Auto-qualify with the current program name if the user omitted it.
+        // e.g., "io.DI_0" → "Main.io.DI_0", "cycle" → "Main.cycle"
+        let var_name = self.qualify_variable_name(raw_var_name);
 
         let value = if value_str.eq_ignore_ascii_case("true") {
             st_ir::Value::Bool(true)
@@ -1826,7 +1830,7 @@ impl DapSession {
         };
 
         if self.vm.is_some() {
-            self.vm.as_mut().unwrap().force_variable(var_name, value.clone());
+            self.vm.as_mut().unwrap().force_variable(&var_name, value.clone());
             let result = format!("Forced {} = {}", var_name, st_engine::debug::format_value(&value));
             self.pending_events.push(console_output(&result));
             // Push a fresh telemetry snapshot so the Monitor panel updates
@@ -1849,7 +1853,35 @@ impl DapSession {
         }
     }
 
+    /// Auto-qualify a variable name with the current program name if needed.
+    ///
+    /// Users type `io.DI_0` in the debug console, but the VM expects `Main.io.DI_0`.
+    /// If the name is already fully qualified (starts with a program name), return as-is.
+    /// If it's a bare global (`g_cycle`), try that first.
+    fn qualify_variable_name(&self, name: &str) -> String {
+        if let Some(ref vm) = self.vm {
+            // If it resolves as a global, use as-is
+            if vm.get_global(name).is_some() {
+                return name.to_string();
+            }
+            // If it already contains the program name prefix, use as-is
+            for func in &vm.module().functions {
+                if func.kind == st_ir::PouKind::Program
+                    && name.to_uppercase().starts_with(&format!("{}.", func.name.to_uppercase()))
+                {
+                    return name.to_string();
+                }
+            }
+            // Auto-qualify: find the first PROGRAM and prepend its name
+            if let Some(prog) = vm.module().functions.iter().find(|f| f.kind == st_ir::PouKind::Program) {
+                return format!("{}.{}", prog.name, name);
+            }
+        }
+        name.to_string()
+    }
+
     fn handle_unforce_command(&mut self, seq: i64, var_name: &str) -> Response {
+        let var_name = &self.qualify_variable_name(var_name);
         if self.vm.is_some() {
             self.vm.as_mut().unwrap().unforce_variable(var_name);
             let result = format!("Unforced {var_name}");

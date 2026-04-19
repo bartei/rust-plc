@@ -7,7 +7,7 @@ Open playground/native_fb_demo/main.st in your JetBrains IDE and verify:
 
 - [X] io. triggers dot-completion showing: refresh_rate, connected, error_code, io_cycles, last_response_ms, DI_0..DI_3, AI_0, DO_0, DO_1, AO_0
 - [X] Hover over io shows FUNCTION_BLOCK DemoIo(refresh_rate) => (connected, error_code, ...)
-- [ ] Hover over io.DI_0 shows type BOOL - NOT WORKING
+- [X] Hover over io.DI_0 shows type BOOL
 - [X] Typing io.NONEXISTENT produces a red squiggly / "no member" diagnostic
 - [X] No false errors on the existing program — the file should show zero problems
 
@@ -31,10 +31,10 @@ cargo run -p st-cli -- check playground/native_fb_demo
 Open playground/native_fb_demo/ in VS Code with the ST extension, set a breakpoint on io.DO_0 := io.DI_0;, and launch the debugger:
 
 - [X] Program stops at the breakpoint
-- [ ] Variables panel shows io as an expandable FB instance -> not working shows "io = 0"
-- [ ] Expanding io shows all fields: refresh_rate, connected, DI_0, DO_0, etc. -> Not expandable
-- [ ] Field values update when stepping (e.g., cycle increments) -> not testable due to the above
-- [ ] Can write to io.DI_0 via the debug console or watch panel -> not testable due to the above
+- [X] Variables panel shows io as an expandable FB instance 
+- [X] Expanding io shows all fields: refresh_rate, connected, DI_0, DO_0, etc. 
+- [X] Field values update when stepping (e.g., cycle increments) 
+- [ ] Can write to io.DI_0 via the debug console or watch panel -> found two issues, when there are no variables in the watch list the scan cycle data is not updating. i tried forcing io.DI_0 but it's not accepting the input value "TRUE" or 1
 
 5. Existing Projects Still Work
 
