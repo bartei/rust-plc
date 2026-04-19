@@ -159,12 +159,10 @@
 
 ### Known issues
 
-- [ ] Monitor panel: scan cycle stats not updating when watch list is empty.
-  The DAP server emits `plc/cycleStats` events every ~500ms with full stats
-  regardless of the watch list, but the VS Code extension panel appears inactive
-  when the `variables` array in the event payload is empty. Fix needed in the
-  extension's webview JS — cycle stats should render independently of the
-  watched variables section.
+- [x] Monitor panel: scan cycle stats not updating when watch list is empty.
+  Root cause: WebSocket push loop skipped entirely when no subscriptions.
+  Fix: always send `variableUpdate` with cycle stats, even with empty variables.
+  (Fixed in st-monitor/src/server.rs)
 
 ### Hierarchical FB instance display
 
