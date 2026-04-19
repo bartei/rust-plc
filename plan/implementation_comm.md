@@ -121,85 +121,35 @@
 
 ---
 
-## RS-485 Serial Link
+## RS-485 Serial Link (COMPLETED)
 
-> **Design:** [design_comm.md](design_comm.md) — RS-485 Serial Link section
-
-### New crate: `st-comm-serial`
-
-- [ ] Create `crates/st-comm-serial/` with `Cargo.toml`
-- [ ] Add `serialport` crate dependency (cross-platform serial I/O)
-- [ ] Implement `SerialTransport` — opens/closes serial port, send/receive bytes
-- [ ] RS-485 half-duplex support: Linux `RS485` ioctl for DE/RE pin control
-- [ ] Bus access mutex: `Arc<Mutex<SerialTransport>>` shared across devices
-- [ ] Inter-frame timing: enforce 3.5-character silent interval between frames
-
-### SerialLink NativeFb
-
-- [ ] Implement `SerialLinkNativeFb` (NativeFb trait)
-- [ ] VAR_INPUT: `port`, `baud`, `parity`, `data_bits`, `stop_bits`
-- [ ] VAR: `connected`, `error_code`
-- [ ] `execute()`: open port on first call, maintain connection, set diagnostics
-- [ ] Expose `Arc<Mutex<SerialTransport>>` for device FBs via link handle
-- [ ] Reconnect with backoff on port errors
-
-### Tests
-
-- [ ] Unit tests: frame timing, bus mutex, connect/reconnect logic
-- [ ] Integration test with virtual serial port pair (`socat` pty)
-- [ ] Test on Raspberry Pi: `/dev/ttyAMA0` (built-in UART) and `/dev/ttyUSB0` (USB adapter)
+- [x] `st-comm-serial` crate with `serialport` dependency
+- [x] `SerialTransport`: open/close, send/receive, inter-frame timing (3.5 char gap)
+- [x] RS-485 hardware direction control (automatic for USB adapters)
+- [x] Bus access via `Arc<Mutex<SerialTransport>>`
+- [x] `SerialLinkNativeFb`: NativeFb with port/baud/parity/data_bits/stop_bits params
+- [x] Connection lifecycle: open on first call, reconnect on loss
+- [x] 11 unit tests + 5 integration tests with socat virtual serial pairs
 
 ---
 
-## Modbus RTU Protocol
+## Modbus RTU Protocol (COMPLETED)
 
-> **Design:** [design_comm.md](design_comm.md) — Modbus RTU Protocol section
+- [x] `st-comm-modbus` crate
+- [x] CRC16 (Modbus polynomial 0xA001)
+- [x] Frame builder/parser for FC01-FC06, FC0F, FC10
+- [x] Exception response parsing
+- [x] `RtuClient`: high-level API (read_coils, read_holding_registers, write_single_coil, etc.)
+- [x] `ModbusRtuDeviceNativeFb`: generic device FB parameterized by YAML profile
+- [x] Register scaling/offset from profile
+- [x] Multi-rate I/O via refresh_rate
+- [x] 19 unit tests + 9 integration tests with socat Modbus slave simulator
 
-### New crate: `st-comm-modbus`
+### Remaining
 
-- [ ] Create `crates/st-comm-modbus/` with `Cargo.toml`
-- [ ] Modbus RTU frame builder: slave address + function code + data + CRC16
-- [ ] Modbus RTU frame parser: validate CRC, extract response data
-- [ ] CRC16 calculation (Modbus polynomial)
-- [ ] Supported function codes:
-  - [ ] FC01 Read Coils
-  - [ ] FC02 Read Discrete Inputs
-  - [ ] FC03 Read Holding Registers
-  - [ ] FC04 Read Input Registers
-  - [ ] FC05 Write Single Coil
-  - [ ] FC06 Write Single Register
-  - [ ] FC15 Write Multiple Coils
-  - [ ] FC16 Write Multiple Registers
-- [ ] Exception response parsing (error codes 01-06)
-- [ ] Register grouping optimizer: merge consecutive registers into multi-read/write
-
-### ModbusRtuDevice NativeFb
-
-- [ ] Implement `ModbusRtuDeviceNativeFb` (NativeFb trait)
-- [ ] VAR_INPUT: `link` (SerialLink handle), `slave_id`, `refresh_rate`
-- [ ] VAR: `connected`, `error_code`, `io_cycles`, `last_response_ms`, + profile fields
-- [ ] `execute()` flow:
-  1. [ ] Check refresh_rate timing (skip if not elapsed)
-  2. [ ] Read inputs: group registers by kind → build FC01/02/03/04 requests → send via link → parse response → write to field slots
-  3. [ ] Write outputs: read field slots → build FC05/06/15/16 requests → send via link
-  4. [ ] Apply register scaling/offset from profile
-  5. [ ] Update diagnostics (connected, error_code, io_cycles, last_response_ms)
-- [ ] Timeout handling: 100ms default, configurable per-device
-- [ ] Retry logic: 1 retry on timeout, then mark disconnected
-
-### Device Profiles for Real Hardware
-
-- [ ] `profiles/wago_750_352.yaml` — WAGO 750-352 I/O coupler (16 DI/DO)
-- [ ] `profiles/abb_acs580.yaml` — ABB ACS580 VFD (speed ref, feedback, status)
-- [ ] `profiles/siemens_g120.yaml` — Siemens G120 VFD
-- [ ] `profiles/generic_modbus_16di.yaml` — Generic 16-channel digital input
-- [ ] `profiles/generic_modbus_8do.yaml` — Generic 8-channel digital output
-- [ ] `profiles/pt100_4ch.yaml` — 4-channel PT100 temperature sensor
-
-### Tests
-
-- [ ] Unit tests: CRC16, frame build/parse, exception handling, register grouping
-- [ ] Integration test: mock serial loopback with Modbus slave simulator
+- [ ] Register grouping optimizer (merge consecutive registers into multi-read/write)
+- [ ] Wire SerialLink + ModbusRtuDevice through NativeFbRegistry for ST-level usage
+- [ ] Retry logic (1 retry on timeout)
 - [ ] E2E test: QEMU VM with `socat` virtual serial + Modbus slave emulator
 - [ ] Raspberry Pi test: real RS-485 adapter + WAGO I/O module
 

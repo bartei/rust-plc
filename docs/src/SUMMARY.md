@@ -39,6 +39,12 @@
 - [Deployment Commands](./deployment/commands.md)
 - [Troubleshooting](./deployment/troubleshooting.md)
 
+# Communication & Devices
+
+- [Device Communication](./communication/overview.md)
+- [Device Profiles](./communication/device-profiles.md)
+- [Modbus RTU](./communication/modbus-rtu.md)
+
 # Architecture
 
 - [Overview](./architecture/overview.md)
