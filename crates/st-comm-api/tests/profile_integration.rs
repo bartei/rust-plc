@@ -1,7 +1,6 @@
-//! Integration tests: load bundled profiles, generate ST code, verify it parses.
+//! Integration tests: load bundled profiles and verify native FB layout generation.
 
 use st_comm_api::*;
-use std::collections::HashMap;
 
 fn load_bundled_profile(name: &str) -> DeviceProfile {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -31,132 +30,71 @@ fn load_sim_vfd_profile() {
 }
 
 #[test]
-fn generate_and_parse_sim_io_code() {
+fn profile_to_native_fb_layout() {
     let profile = load_bundled_profile("sim_8di_4ai_4do_2ao");
-    let mut profiles = HashMap::new();
-    profiles.insert("sim_8di_4ai_4do_2ao".to_string(), profile);
+    let layout = profile.to_native_fb_layout();
 
-    let devices = vec![DeviceConfig {
-        name: "io_rack".to_string(),
-        link: "sim_link".to_string(),
-        protocol: "simulated".to_string(),
-        unit_id: None,
-        mode: "cyclic".to_string(),
-        cycle_time: None,
-        device_profile: "sim_8di_4ai_4do_2ao".to_string(),
-        extra: Default::default(),
-    }];
+    assert_eq!(layout.type_name, "Sim8DI4AI4DO2AO");
 
-    let code = generate_st_code(&profiles, &devices);
-    eprintln!("Generated ST code:\n{code}");
+    // Expected: refresh_rate + 4 diag fields + 18 profile fields = 23
+    assert_eq!(layout.fields.len(), 23);
 
-    // Each profile field becomes a flat global named {device}_{field}
-    assert!(code.contains("io_rack_DI_0 : BOOL;"));
-    assert!(code.contains("io_rack_DO_0 : BOOL;"));
-    assert!(code.contains("io_rack_AI_0 : INT;"));
+    // First field is refresh_rate (VarInput)
+    assert_eq!(layout.fields[0].name, "refresh_rate");
+    assert_eq!(layout.fields[0].var_kind, NativeFbVarKind::VarInput);
 
-    let full = format!(
-        "{code}\nPROGRAM Main\nVAR x : INT; END_VAR\n    IF io_rack_DI_0 THEN io_rack_DO_0 := TRUE; END_IF;\n    x := io_rack_AI_0;\nEND_PROGRAM\n"
-    );
+    // Diagnostic fields
+    assert_eq!(layout.fields[1].name, "connected");
+    assert_eq!(layout.fields[2].name, "error_code");
+    assert_eq!(layout.fields[3].name, "io_cycles");
+    assert_eq!(layout.fields[4].name, "last_response_ms");
 
-    let result = st_syntax::parse(&full);
-    assert!(result.errors.is_empty(),
-        "Generated code has parse errors: {:?}\n\n{full}", result.errors);
+    // Profile fields start at index 5
+    assert_eq!(layout.fields[5].name, "DI_0");
+    assert_eq!(layout.fields[5].data_type, FieldDataType::Bool);
+    assert_eq!(layout.fields[5].var_kind, NativeFbVarKind::Var);
 }
 
 #[test]
-fn generate_and_parse_multi_device_code() {
-    let io_profile = load_bundled_profile("sim_8di_4ai_4do_2ao");
-    let vfd_profile = load_bundled_profile("sim_vfd");
+fn layout_to_memory_layout_roundtrip() {
+    let profile = load_bundled_profile("sim_vfd");
+    let layout = profile.to_native_fb_layout();
+    let mem = layout_to_memory_layout(&layout);
 
-    let mut profiles = HashMap::new();
-    profiles.insert("sim_8di_4ai_4do_2ao".to_string(), io_profile);
-    profiles.insert("sim_vfd".to_string(), vfd_profile);
+    // All fields should be present in the memory layout
+    assert_eq!(mem.slots.len(), layout.fields.len());
 
-    let devices = vec![
-        DeviceConfig {
-            name: "rack_left".to_string(),
-            link: "sim_link".to_string(),
-            protocol: "simulated".to_string(),
-            unit_id: None,
-            mode: "cyclic".to_string(),
-            cycle_time: None,
-            device_profile: "sim_8di_4ai_4do_2ao".to_string(),
-            extra: Default::default(),
-        },
-        DeviceConfig {
-            name: "rack_right".to_string(),
-            link: "sim_link".to_string(),
-            protocol: "simulated".to_string(),
-            unit_id: None,
-            mode: "cyclic".to_string(),
-            cycle_time: None,
-            device_profile: "sim_8di_4ai_4do_2ao".to_string(),
-            extra: Default::default(),
-        },
-        DeviceConfig {
-            name: "pump_vfd".to_string(),
-            link: "sim_link".to_string(),
-            protocol: "simulated".to_string(),
-            unit_id: None,
-            mode: "cyclic".to_string(),
-            cycle_time: None,
-            device_profile: "sim_vfd".to_string(),
-            extra: Default::default(),
-        },
-    ];
+    // Check a few fields
+    let (_, slot) = mem.find_slot("connected").expect("connected not found");
+    assert_eq!(slot.ty, st_ir::VarType::Bool);
 
-    let code = generate_st_code(&profiles, &devices);
+    let (_, slot) = mem.find_slot("SPEED_REF").expect("SPEED_REF not found");
+    assert_eq!(slot.ty, st_ir::VarType::Real);
 
-    let full = format!(
-        "{code}\nPROGRAM Main\nVAR motor_on : BOOL; END_VAR\n\
-        IF rack_left_DI_0 THEN rack_right_DO_0 := TRUE; END_IF;\n\
-        pump_vfd_RUN := motor_on;\n\
-        pump_vfd_SPEED_REF := 45.0;\n\
-        END_PROGRAM\n"
-    );
-
-    let result = st_syntax::parse(&full);
-    assert!(result.errors.is_empty(),
-        "Generated code has parse errors: {:?}", result.errors);
+    let (_, slot) = mem.find_slot("RUN").expect("RUN not found");
+    assert_eq!(slot.ty, st_ir::VarType::Bool);
 }
 
 #[test]
-fn config_to_codegen_roundtrip() {
-    let yaml = r#"
-name: TestProject
-entryPoint: Main
+fn native_fb_registry_from_profiles() {
+    let io = load_bundled_profile("sim_8di_4ai_4do_2ao");
+    let vfd = load_bundled_profile("sim_vfd");
 
-links:
-  - name: sim_link
-    type: simulated
+    let mut registry = NativeFbRegistry::new();
 
-devices:
-  - name: io_rack
-    link: sim_link
-    protocol: simulated
-    mode: cyclic
-    device_profile: sim_8di_4ai_4do_2ao
-  - name: vfd
-    link: sim_link
-    protocol: simulated
-    mode: cyclic
-    device_profile: sim_vfd
-"#;
-    let config = CommConfig::from_project_yaml(yaml).unwrap();
-    assert_eq!(config.devices.len(), 2);
-
-    // Load profiles
-    let mut profiles = HashMap::new();
-    for dev in &config.devices {
-        let profile = load_bundled_profile(&dev.device_profile);
-        profiles.insert(dev.device_profile.clone(), profile);
+    // Use stub NativeFbs for testing (no SimulatedDevice dependency here)
+    struct StubFb(NativeFbLayout);
+    impl NativeFb for StubFb {
+        fn type_name(&self) -> &str { &self.0.type_name }
+        fn layout(&self) -> &NativeFbLayout { &self.0 }
+        fn execute(&self, _: &mut [st_ir::Value]) {}
     }
 
-    // Generate code: each profile field becomes a flat global named {device}_{field}
-    let code = generate_st_code(&profiles, &config.devices);
-    assert!(code.contains("io_rack_DI_0 : BOOL;"));
-    assert!(code.contains("io_rack_AO_1 : INT;"));
-    assert!(code.contains("vfd_SPEED_REF : REAL;"));
-    assert!(code.contains("vfd_RUN : BOOL;"));
+    registry.register(Box::new(StubFb(io.to_native_fb_layout())));
+    registry.register(Box::new(StubFb(vfd.to_native_fb_layout())));
+
+    assert_eq!(registry.len(), 2);
+    assert!(registry.find("Sim8DI4AI4DO2AO").is_some());
+    assert!(registry.find("SimVfd").is_some());
+    assert!(registry.find("nonexistent").is_none());
 }

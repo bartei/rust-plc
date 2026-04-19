@@ -107,37 +107,122 @@
 
 ---
 
-## Cleanup (Remaining)
+## Legacy Cleanup (COMPLETED)
 
-- [ ] Remove `_io_map.st` codegen path (`st-comm-api/src/codegen.rs`)
-- [ ] Remove `CommManager` (`st-engine/src/comm_manager.rs`)
-- [ ] Remove `CommConfig`/`LinkConfig` from `st-comm-api/src/config.rs`
-- [ ] Remove `links:`/`devices:` parsing from CLI comm_setup
-- [ ] Remove `_io_map.st` from bundle system
-- [ ] Generate stub `.st` files for go-to-definition on native FB types
+- [x] Removed `_io_map.st` codegen (`st-comm-api/src/codegen.rs` deleted)
+- [x] Removed `CommManager` (`st-engine/src/comm_manager.rs` deleted)
+- [x] Removed `CommConfig`/`LinkConfig`/`DeviceConfig` from config.rs
+- [x] Removed `CommDevice`/`CommLink` traits (`device.rs`, `link.rs` deleted)
+- [x] Removed `SimulatedLink` (`st-comm-sim/src/link.rs` deleted)
+- [x] Removed old `comm_setup` from CLI and DAP (load_for_project, register_simulated_devices)
+- [x] Removed `_io_map.st` from bundle system
+- [x] Removed `comm-gen` CLI command
+- [x] Updated all tests (profile_integration, bundle_e2e, sim device tests)
+
+---
+
+## RS-485 Serial Link
+
+> **Design:** [design_comm.md](design_comm.md) — RS-485 Serial Link section
+
+### New crate: `st-comm-serial`
+
+- [ ] Create `crates/st-comm-serial/` with `Cargo.toml`
+- [ ] Add `serialport` crate dependency (cross-platform serial I/O)
+- [ ] Implement `SerialTransport` — opens/closes serial port, send/receive bytes
+- [ ] RS-485 half-duplex support: Linux `RS485` ioctl for DE/RE pin control
+- [ ] Bus access mutex: `Arc<Mutex<SerialTransport>>` shared across devices
+- [ ] Inter-frame timing: enforce 3.5-character silent interval between frames
+
+### SerialLink NativeFb
+
+- [ ] Implement `SerialLinkNativeFb` (NativeFb trait)
+- [ ] VAR_INPUT: `port`, `baud`, `parity`, `data_bits`, `stop_bits`
+- [ ] VAR: `connected`, `error_code`
+- [ ] `execute()`: open port on first call, maintain connection, set diagnostics
+- [ ] Expose `Arc<Mutex<SerialTransport>>` for device FBs via link handle
+- [ ] Reconnect with backoff on port errors
+
+### Tests
+
+- [ ] Unit tests: frame timing, bus mutex, connect/reconnect logic
+- [ ] Integration test with virtual serial port pair (`socat` pty)
+- [ ] Test on Raspberry Pi: `/dev/ttyAMA0` (built-in UART) and `/dev/ttyUSB0` (USB adapter)
+
+---
+
+## Modbus RTU Protocol
+
+> **Design:** [design_comm.md](design_comm.md) — Modbus RTU Protocol section
+
+### New crate: `st-comm-modbus`
+
+- [ ] Create `crates/st-comm-modbus/` with `Cargo.toml`
+- [ ] Modbus RTU frame builder: slave address + function code + data + CRC16
+- [ ] Modbus RTU frame parser: validate CRC, extract response data
+- [ ] CRC16 calculation (Modbus polynomial)
+- [ ] Supported function codes:
+  - [ ] FC01 Read Coils
+  - [ ] FC02 Read Discrete Inputs
+  - [ ] FC03 Read Holding Registers
+  - [ ] FC04 Read Input Registers
+  - [ ] FC05 Write Single Coil
+  - [ ] FC06 Write Single Register
+  - [ ] FC15 Write Multiple Coils
+  - [ ] FC16 Write Multiple Registers
+- [ ] Exception response parsing (error codes 01-06)
+- [ ] Register grouping optimizer: merge consecutive registers into multi-read/write
+
+### ModbusRtuDevice NativeFb
+
+- [ ] Implement `ModbusRtuDeviceNativeFb` (NativeFb trait)
+- [ ] VAR_INPUT: `link` (SerialLink handle), `slave_id`, `refresh_rate`
+- [ ] VAR: `connected`, `error_code`, `io_cycles`, `last_response_ms`, + profile fields
+- [ ] `execute()` flow:
+  1. [ ] Check refresh_rate timing (skip if not elapsed)
+  2. [ ] Read inputs: group registers by kind → build FC01/02/03/04 requests → send via link → parse response → write to field slots
+  3. [ ] Write outputs: read field slots → build FC05/06/15/16 requests → send via link
+  4. [ ] Apply register scaling/offset from profile
+  5. [ ] Update diagnostics (connected, error_code, io_cycles, last_response_ms)
+- [ ] Timeout handling: 100ms default, configurable per-device
+- [ ] Retry logic: 1 retry on timeout, then mark disconnected
+
+### Device Profiles for Real Hardware
+
+- [ ] `profiles/wago_750_352.yaml` — WAGO 750-352 I/O coupler (16 DI/DO)
+- [ ] `profiles/abb_acs580.yaml` — ABB ACS580 VFD (speed ref, feedback, status)
+- [ ] `profiles/siemens_g120.yaml` — Siemens G120 VFD
+- [ ] `profiles/generic_modbus_16di.yaml` — Generic 16-channel digital input
+- [ ] `profiles/generic_modbus_8do.yaml` — Generic 8-channel digital output
+- [ ] `profiles/pt100_4ch.yaml` — 4-channel PT100 temperature sensor
+
+### Tests
+
+- [ ] Unit tests: CRC16, frame build/parse, exception handling, register grouping
+- [ ] Integration test: mock serial loopback with Modbus slave simulator
+- [ ] E2E test: QEMU VM with `socat` virtual serial + Modbus slave emulator
+- [ ] Raspberry Pi test: real RS-485 adapter + WAGO I/O module
 
 ---
 
 ## Future Work
 
-### Real Protocol Implementations
+### Modbus TCP
 
-- [ ] `SerialLinkFb` — wraps serial port, NativeFb with port/baud/parity params
-- [ ] `TcpLinkFb` — wraps TCP socket, NativeFb with host/port params
-- [ ] `ModbusRtuDeviceFb` — generic Modbus RTU, parameterized by profile
-- [ ] `ModbusTcpDeviceFb` — generic Modbus TCP, parameterized by profile
+- [ ] `TcpLink` NativeFb (TCP socket management)
+- [ ] `ModbusTcpDevice` NativeFb (Modbus TCP/IP, MBAP header instead of CRC)
+- [ ] Device profiles same as RTU (register map is protocol-independent)
 
 ### Plugin System
 
 - [ ] `plugin.yaml` schema definition
 - [ ] `plugins:` section in `plc-project.yaml`
-- [ ] `st-cli plugin fetch` — clone/update git repos
-- [ ] `st-cli plugin list/update/info` commands
+- [ ] `st-cli plugin fetch/update/list` commands
 - [ ] `.st-plugins.lock` lockfile for reproducible builds
-- [ ] Plugin profiles included in bundle deployment
 
 ### Advanced Features
 
-- [ ] WASM protocol plugins (Tier 3)
+- [ ] Generate stub `.st` files for go-to-definition on native FB types
+- [ ] WASM protocol plugins for third-party proprietary protocols
 - [ ] Global FB instances (for multi-program device sharing)
 - [ ] Online change with native FB state migration

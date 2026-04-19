@@ -135,12 +135,20 @@ impl Backend {
         // Find the scope that contains this offset
         let scope_id = self.find_scope_for_offset(doc, offset);
 
-        // Try to resolve in that scope
+        // Try to resolve in that scope (variables, functions, FBs, programs)
         if doc.analysis.symbols.resolve(scope_id, word).is_some() {
-            Some((word.to_string(), scope_id))
-        } else {
-            None
+            return Some((word.to_string(), scope_id));
         }
+        // Also try resolving as a POU name (function block / class type reference).
+        // This handles hover over type names like `FillController` in VAR declarations.
+        if doc.analysis.symbols.resolve_pou(word).is_some() {
+            return Some((word.to_string(), scope_id));
+        }
+        // Try as a class name
+        if doc.analysis.symbols.resolve_class(word).is_some() {
+            return Some((word.to_string(), scope_id));
+        }
+        None
     }
 
     /// Try to produce a hover for a member access expression (e.g., `io.DI_0`).
@@ -571,9 +579,11 @@ impl LanguageServer for Backend {
         }
 
         if let Some((word, scope_id)) = self.resolve_at_position(doc, offset) {
-            if let Some((_sid, sym)) =
-                doc.analysis.symbols.resolve(scope_id, &word)
-            {
+            // Try variable/function resolution, then fall back to POU/class type names
+            let sym_opt = doc.analysis.symbols.resolve(scope_id, &word).map(|(_, s)| s.clone())
+                .or_else(|| doc.analysis.symbols.resolve_pou(&word).cloned())
+                .or_else(|| doc.analysis.symbols.resolve_class(&word).cloned());
+            if let Some(sym) = sym_opt {
                 let type_info = sym.ty.display_name();
                 let kind_info = match &sym.kind {
                     st_semantics::scope::SymbolKind::Variable(vk) => {

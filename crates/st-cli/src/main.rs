@@ -36,7 +36,6 @@ fn print_usage() {
     eprintln!("  fmt [path]        Format source file(s) in place");
     eprintln!("  bundle [path]     Create a .st-bundle for deployment");
     eprintln!("  target list [path]  List configured deployment targets");
-    eprintln!("  comm-gen [path]   Regenerate _io_map.st from plc-project.yaml + profiles");
     eprintln!("  debug <file>      Start DAP debug server (stdin/stdout)");
     eprintln!("  help              Show this help message");
     eprintln!();
@@ -89,27 +88,6 @@ fn main() {
         }
         "target" => {
             run_target_cmd(&args);
-        }
-        "comm-gen" => {
-            let target = args.get(2).map(|s| s.as_str()).map(Path::new);
-            let root = resolve_project_root(target);
-            match comm_setup::load_for_project(&root) {
-                Ok(Some(setup)) => {
-                    eprintln!(
-                        "Wrote {} ({} device(s), {} profile(s))",
-                        setup.io_map_path.display(),
-                        setup.config.devices.len(),
-                        setup.profiles.len()
-                    );
-                }
-                Ok(None) => {
-                    eprintln!("No comm devices configured in {}", root.display());
-                }
-                Err(e) => {
-                    eprintln!("Comm config error: {e}");
-                    process::exit(1);
-                }
-            }
         }
         "debug" => {
             if args.len() < 3 {
@@ -166,9 +144,8 @@ fn run_check(path: Option<&str>, args: &[String]) {
     } else {
         // Project mode
 
-        // Refresh the auto-generated I/O map (legacy path) and build native FB registry.
+        // Build native FB registry from device profiles.
         let probe_root = resolve_project_root(target);
-        let _ = comm_setup::load_for_project(&probe_root); // legacy: regenerate _io_map.st
         let native_comm = comm_setup::load_native_fbs_for_project(&probe_root)
             .ok()
             .flatten();
@@ -231,7 +208,7 @@ fn run_program_cmd(args: &[String]) {
         .map(|p| p.is_file() && matches!(p.extension().and_then(|e| e.to_str()), Some("st" | "scl")))
         .unwrap_or(false);
 
-    let (parse_result, project_name, mut comm_setup) = if is_single_file {
+    let (parse_result, project_name) = if is_single_file {
         let path = target.unwrap();
         let source = match std::fs::read_to_string(path) {
             Ok(s) => s,
@@ -249,28 +226,9 @@ fn run_program_cmd(args: &[String]) {
             }
             process::exit(1);
         }
-        (parse_result, None, None)
+        (parse_result, None)
     } else {
         // Project mode
-
-        // Load comm config FIRST so the auto-generated `_io_map.st` is
-        // present on disk before project autodiscovery walks the directory.
-        // We need the project root for that — find it by walking up.
-        let probe_root = resolve_project_root(target);
-        let comm_setup = match comm_setup::load_for_project(&probe_root) {
-            Ok(setup) => setup,
-            Err(e) => {
-                eprintln!("Comm config error: {e}");
-                process::exit(1);
-            }
-        };
-        if let Some(ref setup) = comm_setup {
-            eprintln!(
-                "[COMM] Generated I/O map: {} ({} device(s))",
-                setup.io_map_path.display(),
-                setup.config.devices.len()
-            );
-        }
 
         let project = match st_syntax::project::discover_project(target) {
             Ok(p) => p,
@@ -297,7 +255,7 @@ fn run_program_cmd(args: &[String]) {
             process::exit(1);
         }
 
-        (parse_result, project.entry_point, comm_setup)
+        (parse_result, project.entry_point)
     };
 
     // Build native FB registry from device profiles (if any).
@@ -416,19 +374,13 @@ fn run_program_cmd(args: &[String]) {
         st_engine::Engine::new(module, program_name, config)
     };
 
-    // Register simulated devices (old CommManager path) and start web UIs.
-    if let Some(ref mut setup) = comm_setup {
-        comm_setup::register_simulated_devices(setup, &mut engine);
-        comm_setup::start_web_uis(setup, 8080);
-    }
-
-    // Start web UIs for native FB devices.
+    // Start web UIs for native FB simulated devices.
     if !native_device_states.is_empty() {
         let native_setup = comm_setup::NativeCommSetup {
-            registry: st_comm_api::NativeFbRegistry::new(), // placeholder, states matter
+            registry: st_comm_api::NativeFbRegistry::new(),
             device_states: native_device_states,
         };
-        comm_setup::start_native_web_uis(&native_setup, 8090);
+        comm_setup::start_native_web_uis(&native_setup, 8080);
     }
 
     let wall_started = std::time::Instant::now();
@@ -801,11 +753,7 @@ fn run_bundle_cmd(args: &[String]) {
         process::exit(1);
     }
 
-    // Regenerate I/O map before bundling
-    if let Err(e) = comm_setup::load_for_project(&root) {
-        eprintln!("Comm config error: {e}");
-        process::exit(1);
-    }
+
 
     let options = st_deploy::bundle::BundleOptions {
         mode,

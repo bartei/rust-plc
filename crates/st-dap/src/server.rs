@@ -5,10 +5,8 @@ use dap::prelude::*;
 use dap::requests::Command;
 use dap::responses::{ResponseBody, ResponseMessage};
 use dap::types::*;
-use st_comm_api::CommDevice;
 use st_ir::PouKind;
 use dap::base_message::Sendable;
-use st_engine::comm_manager::CommManager;
 use st_engine::debug::{PauseReason, StepMode};
 use st_engine::engine::CycleStats;
 use st_engine::vm::{Vm, VmConfig, VmError};
@@ -17,7 +15,6 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::comm_setup;
 
 /// Read one DAP-framed message (`Content-Length: N\r\n\r\n<json>`) from the
 /// given buffered reader and parse it as a `Request`. Returns `Ok(None)` on
@@ -388,16 +385,12 @@ struct DapSession {
     /// Maps variable reference IDs to struct instance locations for
     /// hierarchical expansion (same pattern as fb_var_refs).
     struct_var_refs: std::collections::HashMap<i64, StructVarRef>,
-    /// Communication manager for simulated devices (read inputs / write outputs each scan).
-    comm: CommManager,
     /// Per-file byte offsets in the virtual concatenated text produced by
     /// `parse_multi()`. Maps file path → virtual offset. Used by
     /// `set_line_breakpoints` to align file-local line numbers with the
     /// compiled module's source_map entries. For single-file mode, the
     /// only entry is `(self.source_path, stdlib_total_length)`.
     file_virtual_offsets: std::collections::HashMap<String, usize>,
-    /// Comm setup data (config, profiles, generated source) loaded from plc-project.yaml.
-    comm_setup: Option<comm_setup::CommSetup>,
     /// Cached native FB registry for compilation and VM creation.
     native_fb_registry: Option<std::sync::Arc<st_comm_api::NativeFbRegistry>>,
     /// Live scan cycle statistics (populated by the DAP run loop).
@@ -464,9 +457,7 @@ impl DapSession {
             fb_var_refs: std::collections::HashMap::new(),
             struct_var_refs: std::collections::HashMap::new(),
             next_var_ref: 1000,
-            comm: CommManager::new(),
             file_virtual_offsets: std::collections::HashMap::new(),
-            comm_setup: None,
             native_fb_registry: None,
             cycle_stats: CycleStats {
                 min_cycle_time: Duration::MAX,
@@ -782,21 +773,16 @@ impl DapSession {
         };
 
         if let Some(ref root) = project_root {
-            // Load communication configuration BEFORE project discovery so the
-            // auto-generated `_io_map.st` is on disk and gets picked up.
-            self.comm_setup = comm_setup::load_for_project(root)
-                .map_err(|e| format!("Comm config error: {e}"))?;
-            if let Some(ref setup) = self.comm_setup {
-                self.pending_events.push(console_output(&format!(
-                    "Comm: {} link(s), {} device(s) — wrote {}",
-                    setup.config.links.len(),
-                    setup.config.devices.len(),
-                    setup.io_map_path.display(),
-                )));
-                self.target_cycle_time = setup.engine.cycle_time;
-            } else {
-                // No comm devices, but the engine section may still exist.
-                self.target_cycle_time = comm_setup::load_engine_config(root).cycle_time;
+            // Load engine config (cycle_time) from plc-project.yaml
+            {
+                let yaml_path = root.join("plc-project.yaml");
+                let alt_path = root.join("plc-project.yml");
+                let path = if yaml_path.exists() { &yaml_path } else { &alt_path };
+                if let Ok(yaml) = std::fs::read_to_string(path) {
+                    if let Ok(cfg) = st_comm_api::EngineProjectConfig::from_project_yaml(&yaml) {
+                        self.target_cycle_time = cfg.cycle_time;
+                    }
+                }
             }
             if let Some(ct) = self.target_cycle_time {
                 self.pending_events.push(console_output(&format!(
@@ -986,41 +972,6 @@ impl DapSession {
         vm.debug_mut().resume(StepMode::StepIn, 0);
 
         // Register simulated devices and start their web UIs (if a comm setup
-        // was loaded from plc-project.yaml).
-        if let Some(ref mut setup) = self.comm_setup {
-            for dev_cfg in &setup.config.devices {
-                let Some(profile) = setup.profiles.get(&dev_cfg.device_profile) else {
-                    continue;
-                };
-                if dev_cfg.protocol != "simulated" {
-                    self.pending_events.push(console_output(&format!(
-                        "[COMM] Skipping device '{}': protocol '{}' not implemented",
-                        dev_cfg.name, dev_cfg.protocol
-                    )));
-                    continue;
-                }
-                let sim_device =
-                    st_comm_sim::SimulatedDevice::new(&dev_cfg.name, profile.clone());
-                let state_handle = sim_device.state_handle();
-                let cycle_time = dev_cfg
-                    .cycle_time
-                    .as_ref()
-                    .and_then(|s| st_comm_api::parse_duration(s).ok());
-                let device_box: Box<dyn CommDevice> = Box::new(sim_device);
-                self.comm.register_device(device_box, &dev_cfg.name, &vm, cycle_time);
-                setup.device_states.push(comm_setup::DeviceState {
-                    name: dev_cfg.name.clone(),
-                    profile: profile.clone(),
-                    state: state_handle,
-                });
-            }
-            self.pending_events.push(console_output(&format!(
-                "[COMM] Registered {} simulated device(s)",
-                setup.device_states.len()
-            )));
-            comm_setup::start_web_uis(setup, 8080);
-        }
-
         // Start the VM — it will immediately halt on the first instruction
         let program_name = self.entry_point_override.clone().unwrap_or_else(|| {
             vm.module()
@@ -1030,8 +981,6 @@ impl DapSession {
                 .map(|f| f.name.clone())
                 .unwrap()
         });
-        // Read device inputs into globals before the very first instruction halts.
-        self.comm.read_inputs(&mut vm);
         vm.reset_instruction_count();
         // Do NOT stamp current_cycle_start here. The entry stop is a
         // debugger-only phase — the user may sit at it for seconds before
@@ -2043,7 +1992,7 @@ impl DapSession {
     /// panel must opt-in via `addWatch` so we don't ship hundreds of values
     /// every 500ms in projects with lots of I/O points.
     fn push_cycle_stats_event(&mut self) {
-        let (devices_ok, devices_err) = self.comm.health_counts();
+        let (devices_ok, devices_err) = (0u32, 0u32);
         let variables: Vec<serde_json::Value> = if self.watched_variables.is_empty() {
             Vec::new()
         } else {
@@ -2223,8 +2172,8 @@ impl DapSession {
 
     /// One iteration of the DAP run loop. Either continues an in-flight
     /// program (vm.continue_execution) or starts a fresh scan cycle. The
-    /// borrow split on `self.vm`/`self.comm` is scoped to this function so
-    /// the outer loop has full `&mut self` access between calls.
+    /// Run one iteration of the DAP-aware scan cycle. Returns whether the
+    /// cycle halted (breakpoint), completed, or errored.
     ///
     /// `cycle_start` tracks the wall-clock at which the *currently in-flight*
     /// scan cycle began. It is `Some` while a cycle is mid-execution
@@ -2237,23 +2186,16 @@ impl DapSession {
         program_name: &str,
         cycle_start: &mut Option<Instant>,
     ) -> CycleStep {
-        let comm = &mut self.comm;
         let vm = self.vm.as_mut().unwrap();
 
         let result = if vm.call_depth() > 0 {
             // Continuing from a previous halt (breakpoint, entry stop, step).
-            // Ensure cycle_start is set so we measure actual VM time, not
-            // user think-time since the Stopped event.
             if cycle_start.is_none() {
                 *cycle_start = Some(Instant::now());
             }
             vm.continue_execution()
         } else {
-            // Start of a fresh scan cycle: pull device inputs into VM globals.
-            comm.read_inputs(vm);
-            // Only reset the debug state if there's no pending pause — otherwise
-            // resume_with_source would overwrite step_mode=Paused back to
-            // Continue, swallowing the user's Pause request.
+            // Start of a fresh scan cycle — native FBs handle I/O inside execute()
             if vm.debug_state().step_mode != StepMode::Paused {
                 vm.debug_mut().resume_with_source(mode, 0, 0);
             }
@@ -2266,7 +2208,6 @@ impl DapSession {
         match result {
             Err(VmError::Halt) => CycleStep::Halted,
             Ok(_) => {
-                comm.write_outputs(vm);
                 let started = cycle_start.take().unwrap_or_else(Instant::now);
                 let elapsed = started.elapsed();
                 let instructions = vm.instruction_count();

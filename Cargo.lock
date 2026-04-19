@@ -2329,7 +2329,6 @@ name = "st-comm-api"
 version = "0.1.1"
 dependencies = [
  "serde",
- "serde_json",
  "serde_yaml",
  "st-ir",
  "st-syntax",

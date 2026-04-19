@@ -407,9 +407,6 @@ devices:
     let target_config = TargetConfig::from_project_yaml(yaml).unwrap();
     assert_eq!(target_config.targets.len(), 1);
 
-    // Comm config also parses fine
-    let comm_config = st_comm_api::CommConfig::from_project_yaml(yaml).unwrap();
-    assert_eq!(comm_config.devices.len(), 1);
 }
 
 // ── E2E: Error cases ────────────────────────────────────────────────────

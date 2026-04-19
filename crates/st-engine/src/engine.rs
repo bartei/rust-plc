@@ -1,6 +1,5 @@
 //! Scan cycle engine: runs PLC programs in a cyclic loop.
 
-use crate::comm_manager::CommManager;
 use crate::vm::{Vm, VmConfig, VmError};
 use st_ir::*;
 use std::time::{Duration, Instant};
@@ -94,7 +93,6 @@ pub struct Engine {
     config: EngineConfig,
     stats: CycleStats,
     program_name: String,
-    comm: CommManager,
     /// Tracks when the previous scan cycle started (for period calculation).
     previous_cycle_start: Option<Instant>,
     /// Cycle counter for periodic retain checkpoints.
@@ -145,7 +143,6 @@ impl Engine {
                 ..Default::default()
             },
             program_name,
-            comm: CommManager::new(),
             previous_cycle_start: None,
             retain_cycle_counter: 0,
         }
@@ -193,36 +190,13 @@ impl Engine {
                 ..Default::default()
             },
             program_name,
-            comm: CommManager::new(),
             previous_cycle_start: None,
             retain_cycle_counter: 0,
         }
     }
 
-    /// Mutable access to the communication manager (for registering devices).
-    pub fn comm_mut(&mut self) -> &mut CommManager {
-        &mut self.comm
-    }
-
-    /// Register a comm device with the engine. Resolves global slots from the
+    /// Run the scan cycle loop. Returns after max_cycles or on error.
     /// VM internally so callers don't have to juggle borrows.
-    /// `cycle_time` is the minimum interval between I/O updates for this device;
-    /// `None` means every scan cycle.
-    pub fn register_comm_device(
-        &mut self,
-        device: Box<dyn st_comm_api::CommDevice>,
-        instance_name: &str,
-        cycle_time: Option<std::time::Duration>,
-    ) {
-        self.comm
-            .register_device(device, instance_name, &self.vm, cycle_time);
-    }
-
-    /// Read-only access to the communication manager.
-    pub fn comm(&self) -> &CommManager {
-        &self.comm
-    }
-
     /// Run the scan cycle loop. Returns after max_cycles or on error.
     /// If `EngineConfig.cycle_time` is set, sleeps after each cycle so the
     /// total cycle period (execution + sleep) matches the target. If a single
@@ -278,24 +252,15 @@ impl Engine {
         // continue execution from where it paused. Otherwise start a
         // fresh scan cycle with I/O read → execute → I/O write.
         if self.vm.call_depth() > 0 {
-            // Resuming a debug-paused cycle — skip I/O read (already done)
+            // Resuming a debug-paused cycle
             self.vm.continue_execution()?;
-            // Write outputs after the cycle completes
-            self.comm.write_outputs(&self.vm);
         } else {
-            // Normal fresh cycle
-            // 1. Read all device inputs into VM globals
-            self.comm.read_inputs(&mut self.vm);
-
-            // 2. Execute the user's program
+            // Normal fresh cycle — native FBs handle I/O inside execute()
             self.vm.scan_cycle(&self.program_name)?;
 
-            // 2b. Apply forced values to PROGRAM locals (retained_locals).
+            // Apply forced values to PROGRAM locals (retained_locals).
             // Globals are enforced via forced_global_slots in set_global_by_slot.
             self.vm.enforce_retained_locals();
-
-            // 3. Write VM globals out to device outputs
-            self.comm.write_outputs(&self.vm);
         }
 
         let elapsed = start.elapsed();

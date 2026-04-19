@@ -286,6 +286,8 @@ pub fn handle_dap_attach(
     let mut seq_counter: i64 = 1;
     let mut is_paused = false;
     let mut stop_on_entry = false;
+    let mut fb_children: std::collections::HashMap<u32, Vec<serde_json::Value>> = std::collections::HashMap::new();
+    let mut next_var_ref: u32 = 2000;
 
     while let Ok(input) = input_rx.recv() {
 
@@ -302,6 +304,8 @@ pub fn handle_dap_attach(
                     &input_rx,
                     &mut stop_on_entry,
                     &mut path_mapper,
+                    &mut fb_children,
+                    &mut next_var_ref,
                 );
                 let command = msg["command"].as_str().unwrap_or("");
                 if command == "disconnect" {
@@ -346,6 +350,8 @@ fn handle_dap_request(
     input_rx: &std::sync::mpsc::Receiver<Input>,
     stop_on_entry: &mut bool,
     path_mapper: &mut PathMapper,
+    fb_children: &mut std::collections::HashMap<u32, Vec<serde_json::Value>>,
+    next_var_ref: &mut u32,
 ) {
     let req_seq = msg["seq"].as_i64().unwrap_or(0);
     let command = msg["command"].as_str().unwrap_or("");
@@ -561,31 +567,40 @@ fn handle_dap_request(
         "variables" => {
             let var_ref = msg["arguments"]["variablesReference"].as_i64().unwrap_or(0);
             if *is_paused {
-                let scope = if var_ref == 1001 {
-                    st_engine::DebugScopeKind::Globals
+                // Check if this is a child expansion request (ref >= 2000)
+                if var_ref >= 2000 {
+                    if let Some(children) = fb_children.get(&(var_ref as u32)) {
+                        send_dap_response(writer, req_seq, "variables", serde_json::json!({
+                            "variables": children,
+                        }));
+                    } else {
+                        send_dap_response(writer, req_seq, "variables", serde_json::json!({
+                            "variables": [],
+                        }));
+                    }
                 } else {
-                    st_engine::DebugScopeKind::Locals
-                };
-                let _ = cmd_tx.send(st_engine::DebugCommand::GetVariables { scope });
-                let resp = wait_for_engine_response(input_rx, seq, is_paused, writer,
-                    |r| matches!(r, st_engine::DebugResponse::Variables { .. }),
-                );
-                if let Some(st_engine::DebugResponse::Variables { vars }) = resp {
-                    let variables: Vec<serde_json::Value> = vars.iter()
-                        .map(|v| serde_json::json!({
-                            "name": v.name,
-                            "value": v.value,
-                            "type": v.ty,
-                            "variablesReference": 0,
-                        }))
-                        .collect();
-                    send_dap_response(writer, req_seq, "variables", serde_json::json!({
-                        "variables": variables,
-                    }));
-                } else {
-                    send_dap_response(writer, req_seq, "variables", serde_json::json!({
-                        "variables": [],
-                    }));
+                    let scope = if var_ref == 1001 {
+                        st_engine::DebugScopeKind::Globals
+                    } else {
+                        st_engine::DebugScopeKind::Locals
+                    };
+                    let _ = cmd_tx.send(st_engine::DebugCommand::GetVariables { scope });
+                    let resp = wait_for_engine_response(input_rx, seq, is_paused, writer,
+                        |r| matches!(r, st_engine::DebugResponse::Variables { .. }),
+                    );
+                    if let Some(st_engine::DebugResponse::Variables { vars }) = resp {
+                        // Build hierarchical tree from flat dotted names.
+                        // e.g., "filler.start" → parent "filler" with child "start"
+                        fb_children.clear();
+                        let variables = build_variable_tree(&vars, next_var_ref, fb_children);
+                        send_dap_response(writer, req_seq, "variables", serde_json::json!({
+                            "variables": variables,
+                        }));
+                    } else {
+                        send_dap_response(writer, req_seq, "variables", serde_json::json!({
+                            "variables": [],
+                        }));
+                    }
                 }
             } else {
                 send_dap_response(writer, req_seq, "variables", serde_json::json!({
@@ -986,4 +1001,94 @@ mod tests {
         assert_eq!(m.to_local("/some/other/file.st"), "/some/other/file.st");
         assert_eq!(m.to_remote("/some/other/file.st"), "/some/other/file.st");
     }
+}
+
+/// Build a hierarchical variable tree from a flat list of dotted names.
+///
+/// Variables like `filler.start`, `filler.target_fill`, `cycle` are grouped:
+/// - `filler` becomes a parent with `variablesReference > 0`
+/// - `filler.start` and `filler.target_fill` become children
+/// - `cycle` stays as a leaf with `variablesReference: 0`
+fn build_variable_tree(
+    vars: &[st_engine::debug::VariableInfo],
+    next_ref: &mut u32,
+    children_map: &mut std::collections::HashMap<u32, Vec<serde_json::Value>>,
+) -> Vec<serde_json::Value> {
+    use std::collections::BTreeMap;
+
+    // Group by first segment: "filler.start" → key "filler", child "start"
+    let mut groups: BTreeMap<String, Vec<&st_engine::debug::VariableInfo>> = BTreeMap::new();
+    let mut scalars: Vec<&st_engine::debug::VariableInfo> = Vec::new();
+
+    for v in vars {
+        if let Some(dot) = v.name.find('.') {
+            let parent = &v.name[..dot];
+            groups.entry(parent.to_string()).or_default().push(v);
+        } else {
+            scalars.push(v);
+        }
+    }
+
+    let mut result = Vec::new();
+
+    // Emit grouped variables as expandable parents
+    for (parent_name, children) in &groups {
+        let ref_id = *next_ref;
+        *next_ref += 1;
+
+        // Build summary value: "field1=val1, field2=val2, ..."
+        let summary: String = children.iter().take(4)
+            .map(|v| {
+                let short_name = v.name.rsplit('.').next().unwrap_or(&v.name);
+                format!("{}={}", short_name, v.value)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let summary = if children.len() > 4 {
+            format!("{summary}, ...")
+        } else {
+            summary
+        };
+
+        // Build child variable entries
+        let child_entries: Vec<serde_json::Value> = children.iter()
+            .map(|v| {
+                let short_name = v.name.rsplit('.').next().unwrap_or(&v.name);
+                serde_json::json!({
+                    "name": short_name,
+                    "value": v.value,
+                    "type": v.ty,
+                    "variablesReference": 0,
+                })
+            })
+            .collect();
+
+        children_map.insert(ref_id, child_entries);
+
+        // Infer type from first child's prefix pattern
+        let parent_type = if children.iter().any(|v| v.ty == "FB_INSTANCE") {
+            "FB_INSTANCE"
+        } else {
+            "STRUCT"
+        };
+
+        result.push(serde_json::json!({
+            "name": parent_name,
+            "value": summary,
+            "type": parent_type,
+            "variablesReference": ref_id,
+        }));
+    }
+
+    // Emit scalar (non-dotted) variables
+    for v in &scalars {
+        result.push(serde_json::json!({
+            "name": v.name,
+            "value": v.value,
+            "type": v.ty,
+            "variablesReference": 0,
+        }));
+    }
+
+    result
 }

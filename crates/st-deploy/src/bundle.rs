@@ -102,8 +102,6 @@ pub struct ProgramBundle {
     pub sources: Vec<(String, Vec<u8>)>,
     /// Project YAML contents.
     pub project_yaml: Option<Vec<u8>>,
-    /// I/O map contents (_io_map.st).
-    pub io_map: Option<Vec<u8>>,
     /// Device profile files: (filename, contents).
     pub profiles: Vec<(String, Vec<u8>)>,
 }
@@ -240,7 +238,6 @@ pub fn create_bundle(
     let profile_names: Vec<String> = profiles.iter().map(|(name, _)| name.clone()).collect();
 
     // Read I/O map
-    let io_map = read_optional_file(&project_root.join("_io_map.st"));
 
     // Build manifest
     let manifest = BundleManifest {
@@ -262,7 +259,6 @@ pub fn create_bundle(
         debug_map: debug_map_bytes,
         sources: source_entries,
         project_yaml,
-        io_map,
         profiles,
     })
 }
@@ -292,10 +288,6 @@ pub fn write_bundle(bundle: &ProgramBundle, output: &Path) -> Result<u64, String
         append_bytes(&mut tar, "plc-project.yaml", yaml)?;
     }
 
-    // _io_map.st
-    if let Some(ref io_map) = bundle.io_map {
-        append_bytes(&mut tar, "_io_map.st", io_map)?;
-    }
 
     // source/ directory (development mode only)
     for (rel_path, content) in &bundle.sources {
@@ -394,7 +386,6 @@ pub fn extract_bundle(path: &Path) -> Result<ProgramBundle, String> {
     let mut debug_map: Option<Vec<u8>> = None;
     let mut sources: Vec<(String, Vec<u8>)> = Vec::new();
     let mut project_yaml: Option<Vec<u8>> = None;
-    let mut io_map: Option<Vec<u8>> = None;
     let mut profiles: Vec<(String, Vec<u8>)> = Vec::new();
 
     for entry in archive.entries().map_err(|e| format!("Tar read error: {e}"))? {
@@ -429,7 +420,7 @@ pub fn extract_bundle(path: &Path) -> Result<ProgramBundle, String> {
                 project_yaml = Some(content);
             }
             "_io_map.st" => {
-                io_map = Some(content);
+                // Legacy — ignored
             }
             p if p.starts_with("source/") => {
                 let rel = p.strip_prefix("source/").unwrap().to_string();
@@ -463,7 +454,6 @@ pub fn extract_bundle(path: &Path) -> Result<ProgramBundle, String> {
         debug_map,
         sources,
         project_yaml,
-        io_map,
         profiles,
     })
 }
