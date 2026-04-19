@@ -5,6 +5,7 @@
 //! serial(port := '/dev/ttyUSB0', baud := 9600, parity := 'N', data_bits := 8, stop_bits := 1);
 //! ```
 
+use crate::shared::TransportMap;
 use crate::transport::{ParityMode, SerialConfig, SerialTransport};
 use st_comm_api::native_fb::*;
 use st_comm_api::FieldDataType;
@@ -30,8 +31,13 @@ const SLOT_ERROR_CODE: usize = 6;
 pub struct SerialLinkNativeFb {
     layout: NativeFbLayout,
     transport: Arc<Mutex<SerialTransport>>,
+    /// Shared transport map — when a port is opened, its transport is
+    /// registered here so device FBs can find it by port path.
+    transport_map: Arc<TransportMap>,
     /// Whether the port has been opened (latched on first call).
     initialized: Mutex<bool>,
+    /// The port path used to register in the transport map.
+    port_path: Mutex<String>,
 }
 
 impl Default for SerialLinkNativeFb {
@@ -41,7 +47,8 @@ impl Default for SerialLinkNativeFb {
 }
 
 impl SerialLinkNativeFb {
-    pub fn new() -> Self {
+    /// Create with a shared transport map for link-device binding.
+    pub fn with_transport_map(transport_map: Arc<TransportMap>) -> Self {
         let layout = NativeFbLayout {
             type_name: "SerialLink".to_string(),
             fields: vec![
@@ -88,8 +95,15 @@ impl SerialLinkNativeFb {
         Self {
             layout,
             transport: Arc::new(Mutex::new(SerialTransport::new(SerialConfig::default()))),
+            transport_map,
             initialized: Mutex::new(false),
+            port_path: Mutex::new(String::new()),
         }
+    }
+
+    /// Create with a new empty transport map (for standalone testing).
+    pub fn new() -> Self {
+        Self::with_transport_map(crate::new_transport_map())
     }
 
     /// Get a shared handle to the underlying serial transport.
@@ -132,7 +146,7 @@ impl NativeFb for SerialLinkNativeFb {
             }
 
             let config = SerialConfig {
-                port,
+                port: port.clone(),
                 baud_rate: if baud > 0 { baud } else { 9600 },
                 parity: ParityMode::parse(&parity_str),
                 data_bits: if data_bits == 7 { 7 } else { 8 },
@@ -147,6 +161,12 @@ impl NativeFb for SerialLinkNativeFb {
                     fields[SLOT_CONNECTED] = Value::Bool(true);
                     fields[SLOT_ERROR_CODE] = Value::Int(0);
                     *initialized = true;
+                    // Register in the shared transport map so device FBs can find it
+                    *self.port_path.lock().unwrap() = port.clone();
+                    drop(transport); // release lock before map lock
+                    if let Ok(mut map) = self.transport_map.lock() {
+                        map.insert(port, Arc::clone(&self.transport));
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("SerialLink: failed to open port: {e}");

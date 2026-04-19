@@ -4,6 +4,8 @@
 //! NativeFbRegistry, and starts web UIs for simulated devices.
 
 use st_comm_api::{DeviceProfile, EngineProjectConfig, NativeFbRegistry};
+use st_comm_modbus::device_fb::ModbusRtuDeviceNativeFb;
+use st_comm_serial::SerialLinkNativeFb;
 use st_comm_sim::SimulatedNativeFb;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -59,6 +61,10 @@ pub fn load_native_fbs_for_project(project_root: &Path) -> Result<Option<NativeC
 
     let mut registry = NativeFbRegistry::new();
     let mut device_states = Vec::new();
+    let mut has_modbus_rtu = false;
+
+    // Shared transport map for serial link-device binding
+    let transport_map = st_comm_serial::new_transport_map();
 
     for profile in profiles {
         let protocol = profile.protocol.as_deref().unwrap_or("simulated");
@@ -73,6 +79,14 @@ pub fn load_native_fbs_for_project(project_root: &Path) -> Result<Option<NativeC
                 });
                 registry.register(Box::new(sim_fb));
             }
+            "modbus-rtu" => {
+                let modbus_fb = ModbusRtuDeviceNativeFb::new(
+                    profile.clone(),
+                    Arc::clone(&transport_map),
+                );
+                registry.register(Box::new(modbus_fb));
+                has_modbus_rtu = true;
+            }
             other => {
                 eprintln!(
                     "[COMM] Profile '{}' uses unsupported protocol '{}', skipping",
@@ -80,6 +94,13 @@ pub fn load_native_fbs_for_project(project_root: &Path) -> Result<Option<NativeC
                 );
             }
         }
+    }
+
+    // Auto-register SerialLink if any Modbus RTU devices were found
+    if has_modbus_rtu {
+        registry.register(Box::new(SerialLinkNativeFb::with_transport_map(
+            Arc::clone(&transport_map),
+        )));
     }
 
     if registry.is_empty() {

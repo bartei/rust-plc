@@ -1,0 +1,35 @@
+name: TestModbusIO
+vendor: Test
+protocol: modbus-rtu
+description: "Test I/O module for Modbus RTU integration testing"
+
+fields:
+  - name: DI_0
+    type: BOOL
+    direction: input
+    register: { address: 0, kind: discrete_input }
+
+  - name: DI_1
+    type: BOOL
+    direction: input
+    register: { address: 1, kind: discrete_input }
+
+  - name: AI_0
+    type: INT
+    direction: input
+    register: { address: 0, kind: input_register }
+
+  - name: DO_0
+    type: BOOL
+    direction: output
+    register: { address: 0, kind: coil }
+
+  - name: DO_1
+    type: BOOL
+    direction: output
+    register: { address: 1, kind: coil }
+
+  - name: AO_0
+    type: INT
+    direction: output
+    register: { address: 0, kind: holding_register }

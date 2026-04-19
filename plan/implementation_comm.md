@@ -148,8 +148,15 @@
 ### Remaining
 
 - [ ] Register grouping optimizer (merge consecutive registers into multi-read/write)
-- [ ] Wire SerialLink + ModbusRtuDevice through NativeFbRegistry for ST-level usage
 - [ ] Retry logic (1 retry on timeout)
+
+### Wiring (COMPLETED)
+
+- [x] SerialLink auto-registered when modbus-rtu profiles are present
+- [x] ModbusRtuDevice takes port/baud/parity params directly (self-contained)
+- [x] Shared transport map for link-device binding (multiple devices share same port)
+- [x] Full-stack test: ST code → compile → VM → Modbus RTU → socat → slave → verify
+- [x] Playground: `playground/modbus_demo/` with TestModbusIO profile
 - [ ] E2E test: QEMU VM with `socat` virtual serial + Modbus slave emulator
 - [ ] Raspberry Pi test: real RS-485 adapter + WAGO I/O module
 

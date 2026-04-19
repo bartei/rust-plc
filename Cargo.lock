@@ -2377,6 +2377,8 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "st-comm-api",
+ "st-comm-modbus",
+ "st-comm-serial",
  "st-comm-sim",
  "st-compiler",
  "st-dap",
