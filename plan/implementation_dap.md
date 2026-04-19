@@ -157,6 +157,15 @@
 - [x] Live cycle stats display
 - [x] Tests: `test_watch_list_flow`, `test_var_catalog_emitted_on_launch`
 
+### Known issues
+
+- [ ] Monitor panel: scan cycle stats not updating when watch list is empty.
+  The DAP server emits `plc/cycleStats` events every ~500ms with full stats
+  regardless of the watch list, but the VS Code extension panel appears inactive
+  when the `variables` array in the event payload is empty. Fix needed in the
+  extension's webview JS — cycle stats should render independently of the
+  watched variables section.
+
 ### Hierarchical FB instance display
 
 - [x] DAP: FB locals with `variablesReference > 0` for tree expansion
