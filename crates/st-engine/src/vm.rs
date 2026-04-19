@@ -1643,6 +1643,29 @@ impl Vm {
                     native_fb.execute(&mut locals);
                 }
             }
+            // Re-apply forced values. Native execute() doesn't know about the
+            // force system and may overwrite forced fields (e.g., an input field
+            // forced to TRUE gets overwritten by execute() reading from hardware).
+            // Find the caller program name so we can check forced_variables with
+            // the fully-qualified path (e.g., "Main.io.DI_0").
+            if !self.forced_variables.is_empty() {
+                if let Some(caller_frame) = self.call_stack.last() {
+                    let prog_func = &self.module.functions[caller_frame.func_index as usize];
+                    // Find the local variable name for this instance_slot
+                    if let Some(slot_def) = prog_func.locals.slots.get(instance_slot as usize) {
+                        let instance_name = &slot_def.name;
+                        let fb_func = &self.module.functions[func_index as usize];
+                        for (fi, fb_slot) in fb_func.locals.slots.iter().enumerate() {
+                            let qualified = format!("{}.{}.{}", prog_func.name, instance_name, fb_slot.name);
+                            if let Some(forced_val) = self.forced_variables.get(&qualified.to_uppercase()) {
+                                if fi < locals.len() {
+                                    locals[fi] = forced_val.clone();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             // Save instance state back (same as normal FB return path)
             self.fb_instances.insert(instance_key, locals);
             return Ok(());

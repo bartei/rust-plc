@@ -190,3 +190,54 @@ END_PROGRAM
     assert_eq!(vm.get_global("ra"), Some(&Value::Int(3)));
     assert_eq!(vm.get_global("rb"), Some(&Value::Int(15)));
 }
+
+#[test]
+fn native_fb_force_survives_execute() {
+    // Force a native FB field, run a cycle, verify the forced value persists
+    // even though execute() would normally overwrite it.
+    let mut reg = st_comm_api::NativeFbRegistry::new();
+    reg.register(Box::new(CounterFb::new()));
+
+    let source = r#"
+VAR_GLOBAL
+    result : INT := 0;
+END_VAR
+
+PROGRAM Main
+VAR
+    c : Counter;
+END_VAR
+    c();
+    result := c.count;
+END_PROGRAM
+"#;
+
+    let stdlib = st_syntax::multi_file::builtin_stdlib();
+    let mut all: Vec<&str> = stdlib;
+    all.push(source);
+    let parse_result = st_syntax::multi_file::parse_multi(&all);
+    let module = st_compiler::compile_with_native_fbs(&parse_result.source_file, Some(&reg))
+        .unwrap();
+
+    let arc_reg = Arc::new(reg);
+    let mut vm = st_engine::vm::Vm::new_with_native_fbs(
+        module,
+        st_engine::vm::VmConfig::default(),
+        Some(arc_reg),
+    );
+    let _ = vm.run_global_init();
+
+    // Run 1 cycle to initialize the FB instance
+    vm.scan_cycle("Main").unwrap();
+    assert_eq!(vm.get_global("result"), Some(&Value::Int(1)));
+
+    // Force the count field to 999
+    vm.force_variable("Main.c.count", Value::Int(999));
+
+    // Run another cycle — execute() would normally set count to count+1,
+    // but the force should override it back to 999 after execute()
+    vm.scan_cycle("Main").unwrap();
+
+    // The program reads c.count AFTER the FB call, so result should be 999
+    assert_eq!(vm.get_global("result"), Some(&Value::Int(999)));
+}
