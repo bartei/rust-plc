@@ -14,9 +14,8 @@ VAR
     io : DemoIo;
     cycle : INT := 0;
 END_VAR
-
     cycle := cycle + 1;
-
+    
     (* Call the device FB — this triggers native execute() *)
     io(refresh_rate := T#10ms);
 

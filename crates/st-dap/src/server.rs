@@ -398,6 +398,8 @@ struct DapSession {
     file_virtual_offsets: std::collections::HashMap<String, usize>,
     /// Comm setup data (config, profiles, generated source) loaded from plc-project.yaml.
     comm_setup: Option<comm_setup::CommSetup>,
+    /// Cached native FB registry for compilation and VM creation.
+    native_fb_registry: Option<std::sync::Arc<st_comm_api::NativeFbRegistry>>,
     /// Live scan cycle statistics (populated by the DAP run loop).
     cycle_stats: CycleStats,
     /// Instant the *currently in-flight* scan cycle started, or `None` between
@@ -465,6 +467,7 @@ impl DapSession {
             comm: CommManager::new(),
             file_virtual_offsets: std::collections::HashMap::new(),
             comm_setup: None,
+            native_fb_registry: None,
             cycle_stats: CycleStats {
                 min_cycle_time: Duration::MAX,
                 min_cycle_period: Duration::MAX,
@@ -695,6 +698,63 @@ impl DapSession {
 
     /// Load and parse the project — detects multi-file projects by walking
     /// up from the source file to find plc-project.yaml.
+    /// Build a native FB registry from device profiles discovered in the project.
+    /// Caches the result in `self.native_fb_registry` for reuse by both compile and VM.
+    fn build_native_fb_registry(&mut self) -> Option<st_comm_api::NativeFbRegistry> {
+        let path = std::path::Path::new(&self.source_path);
+        let start = if path.is_file() { path.parent().unwrap_or(path) } else { path };
+        let mut check = start.to_path_buf();
+        let project_root = loop {
+            if check.join("plc-project.yaml").exists() || check.join("plc-project.yml").exists() {
+                break Some(check);
+            }
+            if !check.pop() { break None; }
+        };
+
+        let root = project_root?;
+        let profiles_dir = root.join("profiles");
+        if !profiles_dir.is_dir() {
+            return None;
+        }
+
+        let mut registry = st_comm_api::NativeFbRegistry::new();
+        let entries = std::fs::read_dir(&profiles_dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext != "yaml" && ext != "yml" { continue; }
+            if let Ok(profile) = st_comm_api::DeviceProfile::from_file(&path) {
+                let name = profile.name.clone();
+                registry.register(Box::new(
+                    st_comm_sim::SimulatedNativeFb::new(&name, profile),
+                ));
+            }
+        }
+
+        if registry.is_empty() {
+            None
+        } else {
+            let arc = std::sync::Arc::new(registry);
+            self.native_fb_registry = Some(std::sync::Arc::clone(&arc));
+            // Return a fresh registry for compile (can't return &Arc contents across borrow).
+            // Rebuild cheaply from the same profiles — only happens once per debug session.
+            let mut reg2 = st_comm_api::NativeFbRegistry::new();
+            let entries2 = std::fs::read_dir(root.join("profiles")).ok()?;
+            for entry in entries2.flatten() {
+                let path = entry.path();
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if ext != "yaml" && ext != "yml" { continue; }
+                if let Ok(profile) = st_comm_api::DeviceProfile::from_file(&path) {
+                    let name = profile.name.clone();
+                    reg2.register(Box::new(
+                        st_comm_sim::SimulatedNativeFb::new(&name, profile),
+                    ));
+                }
+            }
+            Some(reg2)
+        }
+    }
+
     fn load_project(&mut self) -> Result<st_syntax::lower::LowerResult, String> {
         let path = std::path::Path::new(&self.source_path);
 
@@ -853,7 +913,12 @@ impl DapSession {
             return err(seq, &msg);
         }
 
-        let module = match st_compiler::compile(&parse_result.source_file) {
+        // Build native FB registry from device profiles (if any).
+        let native_registry = self.build_native_fb_registry();
+        let module = match st_compiler::compile_with_native_fbs(
+            &parse_result.source_file,
+            native_registry.as_ref(),
+        ) {
             Ok(m) => m,
             Err(e) => return err(seq, &format!("Compilation error: {e}")),
         };
@@ -917,7 +982,7 @@ impl DapSession {
             max_instructions: 100_000_000,
             ..Default::default()
         };
-        let mut vm = Vm::new(module, config);
+        let mut vm = Vm::new_with_native_fbs(module, config, self.native_fb_registry.clone());
         vm.debug_mut().resume(StepMode::StepIn, 0);
 
         // Register simulated devices and start their web UIs (if a comm setup

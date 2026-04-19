@@ -35,3 +35,7 @@ fields:
     type: INT
     direction: output
     register: { address: 30, kind: virtual }
+  - name: TEST_0
+    type: INT
+    direction: output
+    register: { address: 40, kind: virtual }

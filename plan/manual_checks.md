@@ -5,36 +5,36 @@ Manual Verification Checklist
 
 Open playground/native_fb_demo/main.st in your JetBrains IDE and verify:
 
-- io. triggers dot-completion showing: refresh_rate, connected, error_code, io_cycles, last_response_ms, DI_0..DI_3, AI_0, DO_0, DO_1, AO_0
-- Hover over io shows FUNCTION_BLOCK DemoIo(refresh_rate) => (connected, error_code, ...)
-- Hover over io.DI_0 shows type BOOL
-- Typing io.NONEXISTENT produces a red squiggly / "no member" diagnostic
-- No false errors on the existing program — the file should show zero problems
+- [X] io. triggers dot-completion showing: refresh_rate, connected, error_code, io_cycles, last_response_ms, DI_0..DI_3, AI_0, DO_0, DO_1, AO_0
+- [X] Hover over io shows FUNCTION_BLOCK DemoIo(refresh_rate) => (connected, error_code, ...)
+- [ ] Hover over io.DI_0 shows type BOOL - NOT WORKING
+- [X] Typing io.NONEXISTENT produces a red squiggly / "no member" diagnostic
+- [X] No false errors on the existing program — the file should show zero problems
 
 2. CLI Run
 
 cargo run -p st-cli -- run playground/native_fb_demo -n 10
 
-- Compiles without errors
-- Reports "Loaded 3 native FB type(s) from profiles" (or similar)
-- Runs 10 cycles and reports execution stats
-- Web UI starts on port 8090+ (open http://localhost:8090 in browser)
+- [X] Compiles without errors
+- [X] Reports "Loaded 3 native FB type(s) from profiles" (or similar)
+- [X] Runs 10 cycles and reports execution stats
+- [X] Web UI starts on port 8090+ (open http://localhost:8090 in browser)
 
 3. CLI Check
 
 cargo run -p st-cli -- check playground/native_fb_demo
 
-- Reports "OK" with no errors
+- [X] Reports "OK" with no errors
 
 4. Debugger (DAP)
 
 Open playground/native_fb_demo/ in VS Code with the ST extension, set a breakpoint on io.DO_0 := io.DI_0;, and launch the debugger:
 
-- Program stops at the breakpoint
-- Variables panel shows io as an expandable FB instance
-- Expanding io shows all fields: refresh_rate, connected, DI_0, DO_0, etc.
-- Field values update when stepping (e.g., cycle increments)
-- Can write to io.DI_0 via the debug console or watch panel
+- [X] Program stops at the breakpoint
+- [ ] Variables panel shows io as an expandable FB instance -> not working shows "io = 0"
+- [ ] Expanding io shows all fields: refresh_rate, connected, DI_0, DO_0, etc. -> Not expandable
+- [ ] Field values update when stepping (e.g., cycle increments) -> not testable due to the above
+- [ ] Can write to io.DI_0 via the debug console or watch panel -> not testable due to the above
 
 5. Existing Projects Still Work
 

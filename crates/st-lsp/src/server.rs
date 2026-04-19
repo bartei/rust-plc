@@ -143,6 +143,108 @@ impl Backend {
         }
     }
 
+    /// Try to produce a hover for a member access expression (e.g., `io.DI_0`).
+    /// Returns `Some(Hover)` if the cursor is on a member name after a dot.
+    fn try_member_hover(&self, doc: &Document, offset: usize) -> Option<Hover> {
+        use st_semantics::scope::SymbolKind;
+        use st_semantics::types::Ty;
+
+        let bytes = doc.source.as_bytes();
+        if offset >= bytes.len() {
+            return None;
+        }
+
+        // Find the word under cursor
+        let mut start = offset;
+        while start > 0
+            && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
+        {
+            start -= 1;
+        }
+        let mut end = offset;
+        while end < bytes.len()
+            && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+        {
+            end += 1;
+        }
+        if start == end || start == 0 || bytes[start - 1] != b'.' {
+            return None; // Not a member access
+        }
+
+        let member_name = std::str::from_utf8(&bytes[start..end]).ok()?;
+        let dot_pos = start - 1;
+
+        // Find the parent variable name before the dot
+        let mut pstart = dot_pos;
+        while pstart > 0
+            && (bytes[pstart - 1].is_ascii_alphanumeric() || bytes[pstart - 1] == b'_')
+        {
+            pstart -= 1;
+        }
+        if pstart >= dot_pos {
+            return None;
+        }
+        let parent_name = std::str::from_utf8(&bytes[pstart..dot_pos]).ok()?;
+
+        let scope_id = self.find_scope_for_offset(doc, offset);
+        let (_sid, parent_sym) = doc.analysis.symbols.resolve(scope_id, parent_name)?;
+
+        // Resolve the member based on the parent's type
+        let member_param = match &parent_sym.ty {
+            Ty::FunctionBlock { name } => {
+                let pou_sym = doc.analysis.symbols.resolve_pou(name)?;
+                if let SymbolKind::FunctionBlock { params, outputs } = &pou_sym.kind {
+                    params
+                        .iter()
+                        .chain(outputs.iter())
+                        .find(|p| p.name.eq_ignore_ascii_case(member_name))
+                        .cloned()
+                } else {
+                    None
+                }
+            }
+            Ty::Class { name } => {
+                let cls_sym = doc.analysis.symbols.resolve_class(name)?;
+                if let SymbolKind::Class { params, outputs, .. } = &cls_sym.kind {
+                    params
+                        .iter()
+                        .chain(outputs.iter())
+                        .find(|p| p.name.eq_ignore_ascii_case(member_name))
+                        .cloned()
+                } else {
+                    None
+                }
+            }
+            Ty::Struct { fields, .. } => fields
+                .iter()
+                .find(|f| f.name.eq_ignore_ascii_case(member_name))
+                .map(|f| st_semantics::scope::ParamDef {
+                    name: f.name.clone(),
+                    ty: f.ty.clone(),
+                    var_kind: st_syntax::ast::VarKind::Var,
+                }),
+            _ => None,
+        };
+
+        let member = member_param?;
+        let type_name = member.ty.display_name();
+        let parent_type = parent_sym.ty.display_name();
+        let markdown = format!(
+            "```st\n{}.{} : {}\n```\n---\nField of {}",
+            parent_name, member.name, type_name, parent_type
+        );
+
+        Some(Hover {
+            contents: tower_lsp::lsp_types::HoverContents::Markup(
+                tower_lsp::lsp_types::MarkupContent {
+                    kind: tower_lsp::lsp_types::MarkupKind::Markdown,
+                    value: markdown,
+                },
+            ),
+            range: None,
+        })
+    }
+
     /// Resolve a symbol's byte range (in VIRTUAL space, from the semantic
     /// analysis) to a Location in a cross-file project. Computes each
     /// project file's virtual offset on the fly and checks if sym_range
@@ -462,6 +564,11 @@ impl LanguageServer for Backend {
         };
 
         let offset = doc.position_to_offset(pos);
+
+        // Check for member access hover (e.g., cursor on `DI_0` in `io.DI_0`).
+        if let Some(hover) = self.try_member_hover(doc, offset) {
+            return Ok(Some(hover));
+        }
 
         if let Some((word, scope_id)) = self.resolve_at_position(doc, offset) {
             if let Some((_sid, sym)) =
