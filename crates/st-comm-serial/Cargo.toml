@@ -1,0 +1,21 @@
+[package]
+name = "st-comm-serial"
+description = "RS-485/RS-232 serial link for PLC communication"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+st-comm-api = { path = "../st-comm-api" }
+st-ir.workspace = true
+serialport = "4"
+tracing.workspace = true
+
+[dev-dependencies]
+st-comm-api = { path = "../st-comm-api" }
+st-ir.workspace = true
+st-syntax = { path = "../st-syntax" }
+st-compiler = { path = "../st-compiler" }
+st-engine = { path = "../st-engine" }
+serialport = "4"
