@@ -335,7 +335,8 @@ async fn test_push_stops_after_unsubscribe() {
         json!({ "method": "unsubscribe", "params": { "variables": ["x"] }}),
     ).await;
 
-    // Push another update — client should NOT receive it
+    // Push another update — client should still receive cycle stats but no
+    // variable data (cycle stats always flow so the monitor panel stays live).
     tokio::time::sleep(Duration::from_millis(100)).await;
     handle.update_variables(
         vec![VariableValue { name: "x".into(), value: "2".into(), var_type: "INT".into(), forced: false }],
@@ -343,7 +344,14 @@ async fn test_push_stops_after_unsubscribe() {
     );
 
     let timeout = tokio::time::timeout(Duration::from_millis(300), ws.next()).await;
-    assert!(timeout.is_err(), "Should not receive pushes after unsubscribe");
+    if let Ok(Some(Ok(msg))) = timeout {
+        let json: serde_json::Value = serde_json::from_str(&msg.to_string()).unwrap();
+        // Should get a variableUpdate with cycle stats but no variable values
+        assert_eq!(json["type"], "variableUpdate");
+        let vars = json["variables"].as_array().expect("variables array");
+        assert!(vars.is_empty(), "Should not receive variable data after unsubscribe, got: {vars:?}");
+    }
+    // Either timeout (no push) or empty-variables push are both acceptable
 }
 
 #[tokio::test]

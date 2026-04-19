@@ -199,31 +199,17 @@ async fn handle_client(
             }
 
             let subs = push_subs.lock().await;
-            if subs.is_empty() {
-                continue;
-            }
 
-            let (ci, vars, snapshot_len) = {
+            let (ci, vars) = {
                 let st = push_state.read().unwrap();
                 let ci = st.cycle_info.clone();
                 let vars: Vec<VariableValue> = subs
                     .iter()
                     .filter_map(|name| st.variables.get(name).cloned())
                     .collect();
-                let len = st.variables.len();
-                (ci, vars, len)
+                (ci, vars)
             };
             drop(subs);
-
-            if vars.is_empty() {
-                if push_count == 0 {
-                    tracing::debug!(
-                        "Monitor WS: push skip — subscriptions present but 0 matched \
-                         ({snapshot_len} vars in snapshot)"
-                    );
-                }
-                continue;
-            }
 
             let msg = MonitorMessage::VariableUpdate(VariableUpdateData {
                 cycle: ci.cycle_count,
