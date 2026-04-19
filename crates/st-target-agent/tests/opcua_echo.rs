@@ -109,7 +109,7 @@ async fn opcua_echo_int() {
 
     state
         .runtime_manager
-        .start(module, name, Some(Duration::from_millis(10)), test_meta())
+        .start(module, name, Some(Duration::from_millis(10)), test_meta(), None)
         .await
         .unwrap();
 
@@ -178,7 +178,7 @@ async fn opcua_echo_bool() {
 
     state
         .runtime_manager
-        .start(module, name, Some(Duration::from_millis(10)), test_meta())
+        .start(module, name, Some(Duration::from_millis(10)), test_meta(), None)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -229,7 +229,7 @@ async fn opcua_echo_real() {
 
     state
         .runtime_manager
-        .start(module, name, Some(Duration::from_millis(10)), test_meta())
+        .start(module, name, Some(Duration::from_millis(10)), test_meta(), None)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;

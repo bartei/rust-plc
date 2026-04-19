@@ -153,16 +153,6 @@ devices:
 # from this section automatically:
 #   { "type": "st", "request": "attach", "target": "line1-plc" }
 
-targets:
-  # Production PLC on the shop floor
-  - name: line1-plc
-    host: 192.168.1.50
-    user: plc                        # SSH username (default: plc)
-    # auth: key                      # SSH key auth (default, only option)
-    # os: linux                      # Target OS (default: linux)
-    # arch: x86_64                   # CPU architecture (default: x86_64)
-    agent_port: 4840                 # Agent HTTP API port (default: 4840)
-                                     # DAP debug port is always agent_port + 1
 
   # ARM64 target (Raspberry Pi, etc.)
   # - name: line2-plc

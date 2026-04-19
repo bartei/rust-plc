@@ -1,6 +1,0 @@
-name: NativeFbDemo
-version: "1.0.0"
-entryPoint: Main
-
-engine:
-  cycle_time: 10ms

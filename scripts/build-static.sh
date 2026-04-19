@@ -1,19 +1,24 @@
 #!/bin/bash
-# Build static musl binary of st-runtime for target deployment.
+# Build static musl binaries for target deployment.
 #
-# Produces a fully statically linked ELF binary with zero runtime dependencies.
-# Runs on any Linux distro (Debian, Ubuntu, Alpine, etc.) regardless of glibc version.
+# Produces fully statically linked ELF binaries with zero runtime dependencies.
+# Runs on any Linux distro (Debian, Ubuntu, Alpine, etc.) regardless of glibc.
+#
+# The .cargo/config.toml linker wrappers automatically invoke nix-shell to
+# get the musl cross-compiler, so this script just needs to enter a nix-shell
+# with the CC compiler available (for tree-sitter C code compilation).
 #
 # Usage:
 #   ./scripts/build-static.sh              # Build x86_64 (default)
 #   ./scripts/build-static.sh aarch64      # Build aarch64 (ARM64)
 #
 # Prerequisites:
-#   - Rust with musl target: rustup target add x86_64-unknown-linux-musl
-#   - Nix package manager (for musl cross-compiler)
+#   - Rust musl targets: rustup target add x86_64-unknown-linux-musl
+#   - Nix package manager (provides musl cross-compiler)
 #
 # Output:
-#   target/x86_64-unknown-linux-musl/release-static/st-runtime
+#   target/<target>/release-static/st-target-agent
+#   target/<target>/release-static/st-cli
 
 set -euo pipefail
 
@@ -35,8 +40,6 @@ case "$ARCH" in
         NIX_PKG="pkgsCross.aarch64-multiplatform-musl.stdenv.cc"
         CC_VAR="CC_aarch64_unknown_linux_musl"
         CC_BIN="aarch64-unknown-linux-musl-gcc"
-        # aarch64 cross-build needs the linker set explicitly (host ld can't link aarch64 objects)
-        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="aarch64-unknown-linux-musl-gcc"
         ;;
     *)
         echo "Usage: $0 [x86_64|aarch64]"
@@ -44,31 +47,28 @@ case "$ARCH" in
         ;;
 esac
 
-echo "Building st-runtime for ${TARGET}..."
+echo "Building for ${TARGET}..."
 echo "  Profile: release-static (opt-level=s, LTO, strip, panic=abort)"
 
 # Ensure the musl target is installed
 rustup target add "$TARGET" 2>/dev/null || true
 
-# Build with nix-provided musl cross-compiler
+# Build inside nix-shell so both the CC compiler and the linker (via
+# .cargo/config.toml wrapper) have the musl toolchain available.
 nix-shell -p "$NIX_PKG" --run \
     "${CC_VAR}=${CC_BIN} cargo build \
-        -p st-runtime \
+        -p st-target-agent -p st-cli \
         --target ${TARGET} \
         --profile release-static"
 
-BINARY="target/${TARGET}/release-static/st-runtime"
-
-if [ -f "$BINARY" ]; then
-    SIZE=$(ls -lh "$BINARY" | awk '{print $5}')
-    FILE_INFO=$(file "$BINARY" | grep -oE "static(-pie)? linked" || echo "WARNING: not static!")
-    echo ""
-    echo "Success: ${BINARY}"
-    echo "  Size: ${SIZE}"
-    echo "  Type: ${FILE_INFO}"
-    echo ""
-    echo "Deploy with: st-cli target install user@host"
-else
-    echo "ERROR: Binary not found at ${BINARY}"
-    exit 1
-fi
+echo ""
+for BIN_NAME in st-target-agent st-cli; do
+    BINARY="target/${TARGET}/release-static/${BIN_NAME}"
+    if [ -f "$BINARY" ]; then
+        SIZE=$(ls -lh "$BINARY" | awk '{print $5}')
+        FILE_INFO=$(file "$BINARY" | grep -oE "static(-pie)? linked" || echo "WARNING: not static!")
+        echo "  ${BIN_NAME}: ${SIZE} (${FILE_INFO})"
+    fi
+done
+echo ""
+echo "Deploy with: st-cli target install user@host"

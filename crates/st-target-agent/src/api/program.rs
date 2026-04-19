@@ -85,12 +85,48 @@ pub async fn start(State(state): State<Arc<AppState>>) -> Result<Json<serde_json
         Some(from_project.unwrap_or(std::time::Duration::from_millis(10)))
     };
 
+    // Build native FB registry from device profiles persisted in the bundle.
+    // This enables NativeFb::execute() to run on the target, bridging device
+    // I/O between the simulated web UI and the FB instance fields.
+    let native_fbs = {
+        let profiles_dir = state.program_store.read().unwrap().profiles_dir();
+        build_native_fb_registry(&profiles_dir)
+    };
+    if let Some(ref reg) = native_fbs {
+        tracing::info!("Native FB registry: {} type(s) from bundled profiles", reg.len());
+    }
+
     state
         .runtime_manager
-        .start(module, program_name, cycle_time, program_meta)
+        .start(module, program_name, cycle_time, program_meta, native_fbs.map(std::sync::Arc::new))
         .await?;
 
     Ok(Json(serde_json::json!({ "success": true, "status": "starting" })))
+}
+
+/// Build a [`NativeFbRegistry`] from YAML profiles in the given directory.
+fn build_native_fb_registry(
+    profiles_dir: &std::path::Path,
+) -> Option<st_comm_api::NativeFbRegistry> {
+    if !profiles_dir.is_dir() {
+        return None;
+    }
+    let entries = std::fs::read_dir(profiles_dir).ok()?;
+    let mut registry = st_comm_api::NativeFbRegistry::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext != "yaml" && ext != "yml" {
+            continue;
+        }
+        if let Ok(profile) = st_comm_api::DeviceProfile::from_file(&path) {
+            let name = profile.name.clone();
+            registry.register(Box::new(
+                st_comm_sim::SimulatedNativeFb::new(&name, profile),
+            ));
+        }
+    }
+    if registry.is_empty() { None } else { Some(registry) }
 }
 
 /// POST /api/v1/program/stop — stop the PLC runtime.

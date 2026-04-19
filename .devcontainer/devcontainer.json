@@ -31,5 +31,8 @@
     "ghcr.io/devcontainers/features/node:1": {
       "version": "22"
     }
-  }
+  },
+  "mounts": [
+    "source=nix-store-${devcontainerId},target=/nix,type=volume"
+  ]
 }

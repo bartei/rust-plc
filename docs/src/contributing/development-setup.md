@@ -5,10 +5,15 @@ This guide covers how to build, run, and develop the rust-plc project.
 ## Prerequisites
 
 - **Rust 1.85+** (edition 2024). Install via [rustup](https://rustup.rs/).
-- **Node.js LTS** (for the VSCode extension). The devcontainer installs this
-  automatically.
-- **C compiler** (for building tree-sitter). Usually available by default on
-  Linux/macOS; on Windows use MSVC.
+- **Nix package manager** — provides reproducible cross-compilation toolchains
+  and any CLI tools needed. Install via
+  [Determinate Systems installer](https://install.determinate.systems/nix).
+- **Node.js LTS** (for the VSCode extension). Available via `nix-shell -p nodejs`
+  or installed by the devcontainer automatically.
+- **C compiler** (for tree-sitter). Usually available by default on Linux/macOS.
+
+The devcontainer includes all prerequisites. For a native workstation setup,
+install Rust and Nix, then everything else is handled by nix-shell on demand.
 
 ## Clone and Build
 
@@ -26,6 +31,40 @@ cargo build --workspace
 The primary binary is `st-cli`, which serves as both the command-line tool and
 the LSP server process.
 
+## Cross-Compilation (Static Binaries)
+
+Target deployment requires statically linked musl binaries. The project uses
+nix-provided cross-compilers configured in `.cargo/config.toml`:
+
+```bash
+# Add musl targets (one-time)
+rustup target add x86_64-unknown-linux-musl
+rustup target add aarch64-unknown-linux-musl
+
+# Build static binaries (nix provides the cross-compiler automatically)
+./scripts/build-static.sh              # x86_64
+./scripts/build-static.sh aarch64      # ARM64
+```
+
+The `.cargo/config.toml` linker wrappers (`scripts/nix-musl-cc-*.sh`) handle
+nix-shell invocation transparently. If you're already inside a nix-shell with
+the right toolchain, the wrapper uses it directly (no overhead). Otherwise it
+spawns a nix-shell per linker invocation.
+
+For faster iterative cross-builds, enter a nix-shell first:
+
+```bash
+# x86_64 musl
+nix-shell -p pkgsCross.musl64.stdenv.cc --run \
+  "CC_x86_64_unknown_linux_musl=x86_64-unknown-linux-musl-gcc \
+   cargo build -p st-target-agent --target x86_64-unknown-linux-musl --profile release-static"
+
+# aarch64 musl
+nix-shell -p pkgsCross.aarch64-multiplatform-musl.stdenv.cc --run \
+  "CC_aarch64_unknown_linux_musl=aarch64-unknown-linux-musl-gcc \
+   cargo build -p st-target-agent --target aarch64-unknown-linux-musl --profile release-static"
+```
+
 ## Run Tests
 
 ```bash
@@ -40,102 +79,104 @@ cargo test -p st-semantics
 cargo test -p st-engine test_arithmetic
 ```
 
+For QEMU end-to-end tests, see [Testing](testing.md).
+
+## Using Nix for Tools
+
+Any command-line tool needed during development can be obtained via nix-shell
+without installing it system-wide:
+
+```bash
+# QEMU for e2e tests
+nix-shell -p qemu --run "qemu-system-aarch64 --version"
+
+# Node.js for extension development
+nix-shell -p nodejs --run "npm run compile"
+
+# mdBook for documentation
+nix-shell -p mdbook --run "mdbook build docs"
+
+# Multiple tools at once
+nix-shell -p qemu nodejs mdbook
+```
+
+This ensures all developers use the same tool versions regardless of their
+host OS or package manager.
+
 ## Project Structure
 
 ```
 rust-plc/
-  Cargo.toml                  Workspace root (10 members)
+  Cargo.toml                  Workspace root (17 members)
+  .cargo/config.toml          Cross-compilation linker wrappers
   crates/
     st-grammar/               Tree-sitter parser wrapper
-      src/lib.rs              language(), kind constants, grammar tests
     st-syntax/                AST definitions + CST-to-AST lowering
-      src/ast.rs              Typed AST nodes (SourceFile, Statement, Expr...)
-      src/lower.rs            Tree-sitter walk -> AST construction
-      src/lib.rs              parse() convenience function
-      tests/
-        lower_tests.rs        AST lowering tests
-        coverage_gaps.rs      Additional coverage tests
-    st-semantics/             Semantic analysis
-      src/analyze.rs          Two-pass analyzer
-      src/scope.rs            Hierarchical symbol table
-      src/types.rs            Ty enum, coercion rules, numeric ranking
-      src/diagnostic.rs       Diagnostic codes and severities
-      src/lib.rs              check() convenience function
-      tests/
-        end_to_end_tests.rs   Full parse-analyze round trips
-        type_tests.rs         Type checking
-        scope_tests.rs        Scope resolution
-        call_tests.rs         Function/FB call validation
-        control_flow_tests.rs IF/FOR/WHILE/CASE checks
-        struct_array_tests.rs UDT tests
-        warning_tests.rs      Unused variable warnings etc.
-        coverage_gaps.rs      Additional coverage
-        test_helpers.rs       Shared test utilities
-    st-ir/                    Intermediate representation
-      src/lib.rs              Module, Function, Instruction, Value, MemoryLayout
+    st-semantics/             Semantic analysis, type checking
+    st-ir/                    Intermediate representation (bytecode)
     st-compiler/              AST -> IR compilation
-      src/compile.rs          ModuleCompiler + FunctionCompiler
-      src/lib.rs              compile() public API
-      tests/
-        compile_tests.rs      Compilation tests
     st-engine/                Bytecode VM + scan-cycle engine
-      src/vm.rs               Vm, CallFrame, fetch-decode-execute loop
-      src/engine.rs           Engine, CycleStats, watchdog
-      src/lib.rs              Public re-exports
-      tests/
-        vm_tests.rs           VM execution tests
     st-lsp/                   Language Server Protocol
-      src/server.rs           tower-lsp Backend implementation
-      src/document.rs         Per-document state (tree, AST, analysis)
-      src/completion.rs       Completion provider
-      src/semantic_tokens.rs  Semantic token encoding
-      src/lib.rs              run_stdio()
-      tests/
-        lsp_integration.rs    Subprocess-based LSP tests (13 tests)
-        unit_tests.rs         In-process LSP tests (41 tests)
-    st-dap/                   Debug Adapter Protocol (placeholder)
-      src/lib.rs
-    st-monitor/               WebSocket live monitoring (placeholder)
-      src/lib.rs
-    st-cli/                   CLI entry point
-      src/main.rs             serve, check, run commands
+    st-dap/                   Debug Adapter Protocol server
+    st-monitor/               WebSocket live monitoring
+    st-cli/                   CLI entry point (check, run, bundle, serve)
+    st-comm-api/              Communication framework (NativeFb trait, profiles)
+    st-comm-sim/              Simulated device with web UI
+    st-deploy/                Program bundler and deployment
+    st-target-agent/          Remote deployment agent
+    st-runtime/               Unified runtime binary for targets
+    st-opcua-server/          OPC-UA server integration
   editors/
-    vscode/                   VSCode extension
-      package.json            Extension manifest
-      src/extension.ts        Thin client: launches st-cli serve
-      syntaxes/               TextMate grammar for highlighting
-      language-configuration.json
-  docs/                       mdBook documentation (you are here)
-  .devcontainer/              Development container definition
-  playground/                 Example .st files for testing
+    vscode/                   VSCode extension (LSP client + PLC monitor panel)
+  profiles/                   Device profile YAML files
+  stdlib/                     IEC 61131-3 standard library (.st files)
+  docs/                       mdBook documentation
+  scripts/
+    build-static.sh           Build static musl binaries via nix
+    nix-musl-cc-x86_64.sh    Linker wrapper for x86_64-musl
+    nix-musl-cc-aarch64.sh   Linker wrapper for aarch64-musl
+  tests/
+    e2e-deploy/               QEMU VM end-to-end tests
+  playground/                 Example projects
+  .devcontainer/              Devcontainer (Rust + Nix + Node.js)
 ```
 
 ## Using the Devcontainer
 
-The project includes a devcontainer configuration in `.devcontainer/`:
-
-- **Dockerfile** builds an image with Rust and Node.js.
-- **devcontainer.json** configures VSCode with rust-analyzer and ST file
-  associations.
-- **post-create.sh** runs after container creation to install dependencies.
-
-To use it:
+The project includes a devcontainer in `.devcontainer/` with Rust, Nix, and
+Node.js pre-installed:
 
 1. Install the "Dev Containers" extension in VSCode.
 2. Open the project folder.
 3. VSCode will prompt "Reopen in Container" -- accept.
-4. The container will build and configure itself automatically.
+4. The container builds and configures itself (installs dependencies, builds
+   the CLI, sets up the VSCode extension).
+
+The devcontainer includes Nix, so cross-compilation and all nix-shell
+commands work out of the box.
+
+## Native Workstation Setup (Without Devcontainer)
+
+If you prefer to develop without a devcontainer (e.g., using CLion/RustRover
+or a native terminal):
+
+1. Install Rust 1.85+ via [rustup](https://rustup.rs/)
+2. Install Nix via [Determinate Systems](https://install.determinate.systems/nix)
+3. Add musl targets: `rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl`
+4. Clone and build: `cargo build --workspace`
+
+Nix handles everything else — cross-compilers, QEMU, Node.js, mdBook.
+No system packages need to be installed manually.
 
 ## Launching the Extension Development Host
 
 To test the VSCode extension with the LSP server:
 
 1. Open the project in VSCode.
-2. Make sure the Rust binary is built: `cargo build -p st-cli`.
-3. Open the `editors/vscode/` folder in VSCode (or use the workspace).
+2. Build the CLI: `cargo build -p st-cli`.
+3. Build the extension: `cd editors/vscode && nix-shell -p nodejs --run "npm install && npm run compile"`
 4. Press **F5** to launch the Extension Development Host.
-5. In the new VSCode window, open a `.st` file. The extension will launch
-   `st-cli serve` and connect to it over stdio.
+5. Open a `.st` file in the new window. The extension launches `st-cli serve`.
 
 The server path is configured via `structured-text.serverPath` in settings.
 The devcontainer sets this to `${workspaceFolder}/target/debug/st-cli`.
@@ -143,33 +184,35 @@ The devcontainer sets this to `${workspaceFolder}/target/debug/st-cli`.
 ## Useful Commands
 
 ```bash
-# Type check without running
-cargo build --workspace 2>&1 | head -20
-
 # Check a Structured Text file for errors
-cargo run -p st-cli -- check playground/example.st
+cargo run -p st-cli -- check playground/01_hello.st
 
 # Run a Structured Text program for 10 scan cycles
-cargo run -p st-cli -- run playground/example.st -n 10
+cargo run -p st-cli -- run playground/sim_project -n 10
 
 # Start the LSP server manually (for debugging)
 cargo run -p st-cli -- serve
+
+# Build static binaries for deployment
+./scripts/build-static.sh              # x86_64
+./scripts/build-static.sh aarch64      # ARM64
 
 # Format all code
 cargo fmt --all
 
 # Run clippy lints
-cargo clippy --workspace
+cargo clippy --workspace -- -D warnings
 
-# Build in release mode
-cargo build --workspace --release
+# Build documentation
+nix-shell -p mdbook --run "mdbook build docs"
 ```
 
 ## IDE Support
 
-- **CLion / RustRover** -- Open the workspace `Cargo.toml`. The IDE will
-  index all 10 crates automatically.
-- **VSCode with rust-analyzer** -- Same; open the root folder. The
-  devcontainer pre-configures this.
+- **CLion / RustRover** — Open the workspace `Cargo.toml`. The IDE indexes
+  all crates automatically. For cross-compilation, ensure Nix is in your
+  PATH so the `.cargo/config.toml` linker wrappers work.
+- **VSCode with rust-analyzer** — Open the root folder. The devcontainer
+  pre-configures everything. For native setups, install rust-analyzer.
 - The workspace uses `resolver = "3"` (Rust 2024 edition) so all crates
   share a single dependency graph.

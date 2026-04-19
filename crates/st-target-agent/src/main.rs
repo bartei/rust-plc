@@ -69,6 +69,27 @@ async fn main() {
 
     info!("Agent ready, listening on {bind_addr}");
 
+    // Auto-start the deployed program if configured
+    if state.config.runtime.auto_start {
+        let auto_state = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let has_program = {
+                let store = auto_state.program_store.read().unwrap();
+                store.current_program().is_some()
+            };
+            if has_program {
+                info!("Auto-starting deployed program...");
+                match auto_start_program(&auto_state).await {
+                    Ok(()) => info!("Auto-start: program running"),
+                    Err(e) => tracing::warn!("Auto-start failed: {e}"),
+                }
+            } else {
+                info!("No program deployed — skipping auto-start");
+            }
+        });
+    }
+
     // Spawn DAP proxy on a separate port
     // Find st-cli binary (co-located or in PATH)
     let st_cli_path = std::env::current_exe()
@@ -103,4 +124,65 @@ async fn main() {
         });
 
     info!("Agent stopped");
+}
+
+/// Auto-start the deployed program (mirrors the /api/v1/program/start logic).
+async fn auto_start_program(
+    state: &std::sync::Arc<st_target_agent::server::AppState>,
+) -> Result<(), String> {
+    let (module, program_name) = {
+        let store = state.program_store.read().unwrap();
+        store.load_module().map_err(|e| format!("{e}"))?
+    };
+    let program_meta = {
+        let store = state.program_store.read().unwrap();
+        store.current_program().cloned()
+            .ok_or_else(|| "No program deployed".to_string())?
+    };
+
+    // Parse cycle_time from the bundled plc-project.yaml
+    let cycle_time = {
+        let yaml_path = state.program_store.read().unwrap().project_yaml_path();
+        let from_project = std::fs::read_to_string(&yaml_path)
+            .ok()
+            .and_then(|yaml| {
+                let cfg = st_comm_api::config::EngineProjectConfig::from_project_yaml(&yaml).ok()?;
+                info!("Auto-start: cycle_time from plc-project.yaml: {:?}", cfg.cycle_time);
+                cfg.cycle_time
+            });
+        if from_project.is_none() {
+            info!("Auto-start: no cycle_time in plc-project.yaml, using default 10ms");
+        }
+        Some(from_project.unwrap_or(std::time::Duration::from_millis(10)))
+    };
+
+    // Build native FB registry from bundled profiles
+    let native_fbs = {
+        let profiles_dir = state.program_store.read().unwrap().profiles_dir();
+        build_registry(&profiles_dir)
+    };
+    if let Some(ref reg) = native_fbs {
+        info!("Auto-start: native FB registry: {} type(s)", reg.len());
+    }
+
+    state.runtime_manager
+        .start(module, program_name, cycle_time, program_meta, native_fbs.map(std::sync::Arc::new))
+        .await
+        .map_err(|e| format!("{e}"))
+}
+
+fn build_registry(profiles_dir: &std::path::Path) -> Option<st_comm_api::NativeFbRegistry> {
+    if !profiles_dir.is_dir() { return None; }
+    let entries = std::fs::read_dir(profiles_dir).ok()?;
+    let mut registry = st_comm_api::NativeFbRegistry::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext != "yaml" && ext != "yml" { continue; }
+        if let Ok(profile) = st_comm_api::DeviceProfile::from_file(&path) {
+            let name = profile.name.clone();
+            registry.register(Box::new(st_comm_sim::SimulatedNativeFb::new(&name, profile)));
+        }
+    }
+    if registry.is_empty() { None } else { Some(registry) }
 }

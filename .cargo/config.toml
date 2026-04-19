@@ -1,0 +1,14 @@
+# Cross-compilation linker configuration.
+#
+# These linker wrappers use nix-shell to provide the musl cross-compiler
+# toolchain on demand. This means `cargo build --target x86_64-unknown-linux-musl`
+# works without manually entering a nix-shell first.
+#
+# Prerequisites: Nix package manager installed (see .devcontainer/Dockerfile
+# or https://install.determinate.systems/nix).
+
+[target.x86_64-unknown-linux-musl]
+linker = "scripts/nix-musl-cc-x86_64.sh"
+
+[target.aarch64-unknown-linux-musl]
+linker = "scripts/nix-musl-cc-aarch64.sh"

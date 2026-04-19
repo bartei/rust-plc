@@ -9,3 +9,14 @@ exclude:
 
 engine:
   cycle_time: 100ms
+
+targets:
+  # Production PLC on the shop floor
+  - name: plc.internal.provvedo.com
+    host: 10.1.2.193
+    user: default                    # SSH username (default: plc)
+    # auth: key                      # SSH key auth (default, only option)
+    # os: linux                      # Target OS (default: linux)
+    # arch: x86_64                   # CPU architecture (default: x86_64)
+    agent_port: 4840                 # Agent HTTP API port (default: 4840)
+                                     # DAP debug port is always agent_port + 1

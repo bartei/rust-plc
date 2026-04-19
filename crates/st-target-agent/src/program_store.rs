@@ -149,6 +149,23 @@ impl ProgramStore {
             None
         };
 
+        // Persist device profiles to disk so the runtime can build a
+        // NativeFbRegistry when starting the program. Without this, native
+        // FB execute() is never called and device I/O doesn't flow on the target.
+        let profiles_dir = self.program_dir.join("current_profiles");
+        let _ = fs::remove_dir_all(&profiles_dir);
+        if !bundle.profiles.is_empty() {
+            let _ = fs::create_dir_all(&profiles_dir);
+            for (filename, content) in &bundle.profiles {
+                let _ = fs::write(profiles_dir.join(filename), content);
+            }
+            tracing::info!(
+                "Persisted {} device profile(s) to {}",
+                bundle.profiles.len(),
+                profiles_dir.display(),
+            );
+        }
+
         // Always persist plc-project.yaml separately (not just inside current_source)
         // so that engine.cycle_time is available even for release bundles.
         if let Some(ref yaml) = bundle.project_yaml {
@@ -203,6 +220,12 @@ impl ProgramStore {
         self.current
             .as_ref()
             .and_then(|s| s.source_dir.clone())
+    }
+
+    /// Get the path to the persisted device profiles directory.
+    /// Contains YAML profile files extracted from the bundle.
+    pub fn profiles_dir(&self) -> PathBuf {
+        self.program_dir.join("current_profiles")
     }
 
     /// Load the compiled Module from the current program's bytecode.

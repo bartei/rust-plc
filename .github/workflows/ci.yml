@@ -85,6 +85,100 @@ jobs:
         with:
           command: check advisories sources
 
+  # ── E2E tests (QEMU x86_64) ─────────────────────────────────────────
+  e2e-x86_64:
+    name: E2E (x86_64)
+    runs-on: ubuntu-latest
+    needs: [build]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Install QEMU and tools
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 genisoimage
+
+      - name: Build static agent + CLI (x86_64 musl)
+        run: |
+          nix-shell -p pkgsCross.musl64.stdenv.cc --run \
+            "CC_x86_64_unknown_linux_musl=x86_64-unknown-linux-musl-gcc \
+             cargo build -p st-target-agent -p st-cli \
+             --target x86_64-unknown-linux-musl --profile release-static"
+
+      - name: Setup VM images
+        run: |
+          cd tests/e2e-deploy/vm
+          ./setup-images.sh x86_64
+
+      - name: Run x86_64 E2E tests
+        run: |
+          ST_E2E_QEMU=1 cargo test -p st-target-agent --test e2e_qemu \
+            -- --test-threads=1
+        env:
+          ST_E2E_QEMU: "1"
+
+      - name: Upload VM serial log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vm-serial-x86_64
+          path: tests/e2e-deploy/vm/images/serial-x86_64.log
+
+  # ── E2E tests (QEMU aarch64) ──────────────────────────────────────
+  e2e-aarch64:
+    name: E2E (aarch64)
+    runs-on: ubuntu-latest
+    needs: [build]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Install QEMU aarch64 and tools
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm qemu-efi-aarch64 genisoimage
+
+      - name: Build static agent + CLI (aarch64 musl)
+        run: |
+          nix-shell -p pkgsCross.aarch64-multiplatform-musl.stdenv.cc --run \
+            "CC_aarch64_unknown_linux_musl=aarch64-unknown-linux-musl-gcc \
+             CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-unknown-linux-musl-gcc \
+             cargo build -p st-target-agent -p st-cli \
+             --target aarch64-unknown-linux-musl --profile release-static"
+
+      - name: Setup VM images
+        run: |
+          cd tests/e2e-deploy/vm
+          ./setup-images.sh aarch64
+          # Copy UEFI firmware from system package
+          for f in /usr/share/qemu-efi-aarch64/QEMU_EFI.fd /usr/share/AAVMF/AAVMF_CODE.fd; do
+            if [ -f "$f" ]; then cp "$f" images/QEMU_EFI.fd; break; fi
+          done
+
+      - name: Run aarch64 E2E tests
+        run: |
+          ST_E2E_QEMU=1 ST_E2E_AARCH64=1 cargo test -p st-target-agent --test e2e_qemu \
+            e2e_aarch64 -- --test-threads=1 --nocapture
+        env:
+          ST_E2E_QEMU: "1"
+          ST_E2E_AARCH64: "1"
+
+      - name: Upload VM serial log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vm-serial-aarch64
+          path: tests/e2e-deploy/vm/images/serial-aarch64.log
+
   # ── Documentation build ─────────────────────────────────────────────
   docs:
     name: Docs

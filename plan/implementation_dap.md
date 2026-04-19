@@ -157,12 +157,6 @@
 - [x] Live cycle stats display
 - [x] Tests: `test_watch_list_flow`, `test_var_catalog_emitted_on_launch`
 
-### Known issues
-
-- [x] Monitor panel: scan cycle stats not updating when watch list is empty.
-  Root cause: WebSocket push loop skipped entirely when no subscriptions.
-  Fix: always send `variableUpdate` with cycle stats, even with empty variables.
-  (Fixed in st-monitor/src/server.rs)
 
 ### Hierarchical FB instance display
 

@@ -61,7 +61,7 @@
 - [x] `start_native_web_uis()` — spawns web UIs for native FB devices
 - [x] `run` command: passes registry to analyze, compile, and engine
 - [x] `check` command: passes registry to analyze
-- [ ] `bundle` command: pass registry to compile (currently uses legacy path)
+- [x] `bundle` command: pass registry to compile
 - [ ] `compile` command: pass registry to compile
 - [ ] `fmt` command: pass registry to analyze
 
@@ -76,13 +76,18 @@
 
 ### DAP (`st-dap`)
 
-- [ ] Pass registry to `compile_with_native_fbs()` in `handle_launch()`
+- [x] Pass registry to `compile_with_native_fbs()` in `handle_launch()`
 - [x] Variable expansion works for native FB instances (automatic — same MemoryLayout)
 - [x] FB summary display works (automatic — same `fb_summary_value()` path)
 
 ### Runtime (`st-runtime`)
 
-- [ ] Pass registry to analyze/compile/engine in target agent
+- [x] Pass registry to analyze/compile/engine in target agent
+- [x] Persist profiles from bundle to disk (`current_profiles/`)
+- [x] Build NativeFbRegistry at program start from persisted profiles
+- [x] Bundle includes profiles from parent directories (workspace root pattern)
+- [x] E2E verified: execute() runs on QEMU target, connected=TRUE, io_cycles advances
+- [x] E2E verified: force DI_0→DO_0 I/O flow through program logic on target
 
 ---
 
@@ -97,9 +102,8 @@
 
 ## Playground Examples
 
-- [x] `playground/native_fb_demo/` — native FB demo with DemoIo profile
-- [x] Compiles and runs with `st-cli run` and `st-cli check`
-- [ ] Convert `playground/sim_project/` to native FB syntax (currently uses legacy path)
+- [x] `playground/sim_project/` — converted to native FB syntax (Sim8DI4AI4DO2AO + SimVfd)
+- [x] Merged `native_fb_demo/` into `sim_project/` (removed redundant playground)
 
 ---
 

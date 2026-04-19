@@ -1237,3 +1237,324 @@ fn e2e_x86_64_native_fb_deploy_and_run() {
     let (stop_status, _) = agent_post(&vm, "/api/v1/program/stop");
     assert_eq!(stop_status, 200);
 }
+
+/// End-to-end test: deploy the sim_project (Sim8DI4AI4DO2AO + SimVfd native FBs),
+/// verify that NativeFb::execute() actually runs on the target by checking that
+/// the `connected` diagnostic field becomes TRUE and `io_cycles` advances.
+/// Then force DI_0=TRUE via the variables API and verify DO_0 becomes TRUE
+/// (program logic: io_rack.DO_0 := io_rack.DI_0).
+#[test]
+fn e2e_x86_64_native_fb_execute_on_target() {
+    if !qemu_enabled() {
+        eprintln!("Skipping (set ST_E2E_QEMU=1)");
+        return;
+    }
+
+    let vm = boot_vm("x86_64");
+    deploy_agent(&vm);
+
+    // Bundle the sim_project (uses native FB syntax with profiles from workspace root)
+    let fixture_dir = project_root().join("playground/sim_project");
+    let bundle = {
+        let b = st_deploy::bundle::create_bundle(
+            &fixture_dir,
+            &st_deploy::bundle::BundleOptions::default(),
+        )
+        .expect("Failed to bundle sim_project");
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        st_deploy::bundle::write_bundle(&b, tmp.path()).unwrap();
+        std::fs::read(tmp.path()).unwrap()
+    };
+
+    // Upload
+    let (upload_status, upload_body) = agent_upload(&vm, &bundle);
+    assert_eq!(upload_status, 200, "Upload failed: {upload_body}");
+    assert_eq!(upload_body["program"]["name"].as_str(), Some("SimulatedIO"));
+
+    // Start
+    let (start_status, _) = agent_post(&vm, "/api/v1/program/start");
+    assert_eq!(start_status, 200);
+
+    // Wait for cycles
+    std::thread::sleep(Duration::from_millis(1000));
+
+    // Verify running
+    let (_, status_body) = agent_get(&vm, "/api/v1/status");
+    assert_eq!(status_body["status"], "running");
+
+    // === KEY: verify execute() is running on the target ===
+    // connected and io_cycles are only set by NativeFb::execute().
+    let (_, vars) = agent_get(&vm, "/api/v1/variables");
+    let var_list = vars["variables"].as_array().expect("variables array");
+
+    let find_var = |list: &[serde_json::Value], name: &str| -> Option<String> {
+        list.iter()
+            .find(|v| v["name"].as_str().map(|n| n.eq_ignore_ascii_case(name)).unwrap_or(false))
+            .and_then(|v| v["value"].as_str().map(|s| s.to_string()))
+    };
+
+    let connected = find_var(var_list, "Main.io_rack.connected");
+    assert_eq!(
+        connected.as_deref(), Some("TRUE"),
+        "io_rack.connected should be TRUE (proves execute() ran). Got: {connected:?}",
+    );
+
+    let io_cycles = find_var(var_list, "Main.io_rack.io_cycles");
+    let io_cycles_val: u64 = io_cycles.as_deref().unwrap_or("0").parse().unwrap_or(0);
+    assert!(io_cycles_val > 0, "io_rack.io_cycles should be > 0. Got: {io_cycles_val}");
+
+    // === Verify I/O flow: force DI_0=TRUE → DO_0=TRUE ===
+    // Program logic: io_rack.DO_0 := io_rack.DI_0
+    let url = vm.agent_url("/api/v1/variables/force");
+    let body = serde_json::json!({ "name": "Main.io_rack.DI_0", "value": "TRUE" });
+    let output = Command::new("curl")
+        .args(["-s", "-X", "POST", "-H", "Content-Type: application/json",
+               "-d", &serde_json::to_string(&body).unwrap(), &url])
+        .output().unwrap();
+    assert!(output.status.success(), "Force curl failed");
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    let (_, vars2) = agent_get(&vm, "/api/v1/variables");
+    let var_list2 = vars2["variables"].as_array().expect("variables array");
+    let do_0 = find_var(var_list2, "Main.io_rack.DO_0");
+    assert_eq!(
+        do_0.as_deref(), Some("TRUE"),
+        "DO_0 should be TRUE after forcing DI_0=TRUE. Got: {do_0:?}",
+    );
+
+    // Unforce → DO_0 should revert to FALSE
+    let url = vm.agent_url("/api/v1/variables/force/Main.io_rack.DI_0");
+    let _ = Command::new("curl").args(["-s", "-X", "DELETE", &url]).output();
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    let (_, vars3) = agent_get(&vm, "/api/v1/variables");
+    let var_list3 = vars3["variables"].as_array().expect("variables array");
+    let do_0_after = find_var(var_list3, "Main.io_rack.DO_0");
+    assert_eq!(
+        do_0_after.as_deref(), Some("FALSE"),
+        "DO_0 should revert to FALSE after unforcing DI_0. Got: {do_0_after:?}",
+    );
+
+    let (stop_status, _) = agent_post(&vm, "/api/v1/program/stop");
+    assert_eq!(stop_status, 200);
+}
+
+/// End-to-end test: deploy sim_project, reboot the QEMU VM, and verify that
+/// the program auto-starts with the correct cycle_time from plc-project.yaml,
+/// NativeFb::execute() runs (connected=TRUE, io_cycles>0), and force/unforce
+/// works after reboot. Proves full persistence: bundle profiles, project YAML,
+/// bytecode, and auto-start all survive a reboot.
+#[test]
+fn e2e_x86_64_native_fb_survives_reboot() {
+    if !qemu_enabled() {
+        eprintln!("Skipping (set ST_E2E_QEMU=1)");
+        return;
+    }
+
+    let vm = boot_vm("x86_64");
+
+    // --- Deploy agent as a systemd service (survives reboot) ---
+    let bin = agent_binary(&vm.arch);
+    assert!(bin.exists(), "Static agent binary required");
+
+    let output = vm.scp_to(&bin, "/tmp/st-target-agent").output().unwrap();
+    assert!(output.status.success(), "SCP failed");
+
+    // Install binary, config with auto_start:true, and systemd unit
+    let setup_script = r#"
+        sudo cp /tmp/st-target-agent /usr/local/bin/st-target-agent
+        sudo chmod +x /usr/local/bin/st-target-agent
+        sudo mkdir -p /etc/st-agent /var/lib/st-agent/programs /var/log/st-agent
+
+        sudo tee /etc/st-agent/agent.yaml > /dev/null << 'CONF'
+agent:
+  name: reboot-test
+network:
+  bind: 0.0.0.0
+  port: 4840
+runtime:
+  auto_start: true
+  restart_on_crash: true
+  max_restarts: 3
+storage:
+  program_dir: /var/lib/st-agent/programs
+  log_dir: /var/log/st-agent
+CONF
+
+        sudo tee /etc/systemd/system/st-agent.service > /dev/null << 'UNIT'
+[Unit]
+Description=ST PLC Agent
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/st-target-agent --config /etc/st-agent/agent.yaml
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+        sudo systemctl daemon-reload
+        sudo systemctl enable st-agent
+        sudo systemctl start st-agent
+    "#;
+
+    let output = vm.ssh_cmd(setup_script).output().unwrap();
+    assert!(
+        output.status.success(),
+        "Service setup failed: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Wait for agent to become ready
+    let url = vm.agent_url("/api/v1/health");
+    for i in 1..=30 {
+        let out = Command::new("curl")
+            .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "--connect-timeout", "2", &url])
+            .output().unwrap();
+        if String::from_utf8_lossy(&out.stdout).trim() == "200" {
+            eprintln!("Agent ready after {i}s");
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    // --- Upload and start the sim_project ---
+    let fixture_dir = project_root().join("playground/sim_project");
+    let bundle = {
+        let b = st_deploy::bundle::create_bundle(
+            &fixture_dir,
+            &st_deploy::bundle::BundleOptions::default(),
+        ).expect("Failed to bundle sim_project");
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        st_deploy::bundle::write_bundle(&b, tmp.path()).unwrap();
+        std::fs::read(tmp.path()).unwrap()
+    };
+
+    let (upload_status, _) = agent_upload(&vm, &bundle);
+    assert_eq!(upload_status, 200, "Upload failed");
+
+    let (start_status, _) = agent_post(&vm, "/api/v1/program/start");
+    assert_eq!(start_status, 200);
+
+    std::thread::sleep(Duration::from_millis(500));
+    let (_, pre_status) = agent_get(&vm, "/api/v1/status");
+    assert_eq!(pre_status["status"], "running", "Not running before reboot");
+    eprintln!("Pre-reboot: program running OK");
+
+    // --- REBOOT the VM ---
+    eprintln!("Rebooting VM...");
+    let _ = vm.ssh_cmd("sudo reboot").output();
+
+    // Wait for SSH to drop and come back
+    std::thread::sleep(Duration::from_secs(5));
+
+    let ssh_key = ssh_key_path();
+    for i in 1..=60 {
+        let out = Command::new("ssh")
+            .args(["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+                   "-o", "ConnectTimeout=3", "-o", "BatchMode=yes",
+                   "-i", ssh_key.to_str().unwrap(),
+                   "-p", &vm.ssh_port.to_string(), "plc@127.0.0.1", "true"])
+            .output().unwrap();
+        if out.status.success() {
+            eprintln!("VM back after reboot ({i}s)");
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    // Wait for agent + auto-start
+    eprintln!("Waiting for agent + auto-start...");
+    let mut agent_ready = false;
+    for i in 1..=45 {
+        let out = Command::new("curl")
+            .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "--connect-timeout", "2",
+                   &vm.agent_url("/api/v1/health")])
+            .output().unwrap();
+        if String::from_utf8_lossy(&out.stdout).trim() == "200" {
+            eprintln!("Agent ready after reboot ({i}s)");
+            agent_ready = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    assert!(agent_ready, "Agent did not come back after reboot");
+
+    // Give auto-start time to kick in
+    std::thread::sleep(Duration::from_secs(3));
+
+    // --- Verify auto-started program ---
+    let (_, status_body) = agent_get(&vm, "/api/v1/status");
+    assert_eq!(
+        status_body["status"], "running",
+        "Program should auto-start after reboot. Status: {status_body}",
+    );
+
+    // Verify cycle_time is honored (10ms = 10000us from plc-project.yaml)
+    let target_us = status_body["cycle_stats"]["target_cycle_us"].as_u64().unwrap_or(0);
+    assert_eq!(
+        target_us, 10000,
+        "cycle_time should be 10ms (10000us) from plc-project.yaml, got {target_us}us",
+    );
+
+    // Verify execute() runs after reboot
+    let (_, vars) = agent_get(&vm, "/api/v1/variables");
+    let var_list = vars["variables"].as_array().expect("variables array");
+
+    let find_var = |list: &[serde_json::Value], name: &str| -> Option<String> {
+        list.iter()
+            .find(|v| v["name"].as_str().map(|n| n.eq_ignore_ascii_case(name)).unwrap_or(false))
+            .and_then(|v| v["value"].as_str().map(|s| s.to_string()))
+    };
+
+    let connected = find_var(var_list, "Main.io_rack.connected");
+    assert_eq!(
+        connected.as_deref(), Some("TRUE"),
+        "connected should be TRUE after reboot. Got: {connected:?}",
+    );
+
+    let io_cycles = find_var(var_list, "Main.io_rack.io_cycles");
+    let io_cycles_val: u64 = io_cycles.as_deref().unwrap_or("0").parse().unwrap_or(0);
+    assert!(io_cycles_val > 0, "io_cycles should be > 0 after reboot. Got: {io_cycles_val}");
+
+    // Force DI_0=TRUE → DO_0=TRUE after reboot
+    let url = vm.agent_url("/api/v1/variables/force");
+    let body = serde_json::json!({ "name": "Main.io_rack.DI_0", "value": "TRUE" });
+    let _ = Command::new("curl")
+        .args(["-s", "-X", "POST", "-H", "Content-Type: application/json",
+               "-d", &serde_json::to_string(&body).unwrap(), &url])
+        .output().unwrap();
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    let (_, vars2) = agent_get(&vm, "/api/v1/variables");
+    let var_list2 = vars2["variables"].as_array().expect("variables array");
+    let do_0 = find_var(var_list2, "Main.io_rack.DO_0");
+    assert_eq!(
+        do_0.as_deref(), Some("TRUE"),
+        "DO_0 should be TRUE after forcing DI_0 post-reboot. Got: {do_0:?}",
+    );
+
+    // Unforce
+    let url = vm.agent_url("/api/v1/variables/force/Main.io_rack.DI_0");
+    let _ = Command::new("curl").args(["-s", "-X", "DELETE", &url]).output();
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    let (_, vars3) = agent_get(&vm, "/api/v1/variables");
+    let var_list3 = vars3["variables"].as_array().expect("variables array");
+    let do_0_after = find_var(var_list3, "Main.io_rack.DO_0");
+    assert_eq!(
+        do_0_after.as_deref(), Some("FALSE"),
+        "DO_0 should revert to FALSE after unforcing post-reboot. Got: {do_0_after:?}",
+    );
+
+    let (stop_status, _) = agent_post(&vm, "/api/v1/program/stop");
+    assert_eq!(stop_status, 200);
+
+    eprintln!("Reboot test PASSED: auto-start, cycle_time, execute(), force/unforce all verified");
+}

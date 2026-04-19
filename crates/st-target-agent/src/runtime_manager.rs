@@ -134,6 +134,9 @@ pub struct StartParams {
     pub program_name: String,
     pub cycle_time: Option<Duration>,
     pub program_meta: ProgramMetadata,
+    /// Native FB registry for Rust-backed function blocks (device I/O).
+    /// If None, native FB execute() is not called (fields stay at defaults).
+    pub native_fbs: Option<std::sync::Arc<st_comm_api::NativeFbRegistry>>,
 }
 
 /// Manages the PLC runtime lifecycle in a dedicated thread.
@@ -229,6 +232,7 @@ impl RuntimeManager {
         program_name: String,
         cycle_time: Option<Duration>,
         program_meta: ProgramMetadata,
+        native_fbs: Option<std::sync::Arc<st_comm_api::NativeFbRegistry>>,
     ) -> Result<(), ApiError> {
         let current_status = self.state.read().unwrap().status;
         if current_status == RuntimeStatus::Running || current_status == RuntimeStatus::Starting {
@@ -241,6 +245,7 @@ impl RuntimeManager {
                 program_name,
                 cycle_time,
                 program_meta,
+                native_fbs,
             })))
             .await
             .map_err(|_| ApiError::internal("Runtime thread not responding"))?;
@@ -323,7 +328,7 @@ fn runtime_thread(
                 // Already idle, ignore
             }
             RuntimeCommand::Start(params) => {
-                let StartParams { module, program_name, cycle_time, program_meta } = *params;
+                let StartParams { module, program_name, cycle_time, program_meta, native_fbs } = *params;
                 tracing::info!(
                     "Engine starting: program={}, cycle_time={:?}",
                     program_name,
@@ -351,9 +356,11 @@ fn runtime_thread(
                     ..Default::default()
                 };
 
-                // Construct engine inside this thread (avoids Send issues)
-                let mut engine =
-                    st_engine::Engine::new(module, program_name, engine_config);
+                // Construct engine inside this thread (avoids Send issues).
+                // Pass native FB registry so device execute() is called each cycle.
+                let mut engine = st_engine::Engine::new_with_native_fbs(
+                    module, program_name, engine_config, native_fbs,
+                );
 
                 // Populate variable catalog in shared state (set once).
                 {
@@ -958,7 +965,7 @@ mod tests {
             has_debug_map: false,
         };
 
-        mgr.start(module, name, Some(Duration::from_millis(10)), meta)
+        mgr.start(module, name, Some(Duration::from_millis(10)), meta, None)
             .await
             .unwrap();
 
@@ -1002,12 +1009,12 @@ mod tests {
             has_debug_map: false,
         };
 
-        mgr.start(module.clone(), name.clone(), Some(Duration::from_millis(10)), meta.clone())
+        mgr.start(module.clone(), name.clone(), Some(Duration::from_millis(10)), meta.clone(), None)
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let result = mgr.start(module, name, Some(Duration::from_millis(10)), meta).await;
+        let result = mgr.start(module, name, Some(Duration::from_millis(10)), meta, None).await;
         assert!(result.is_err());
 
         mgr.stop().await.unwrap();
@@ -1030,7 +1037,7 @@ mod tests {
             has_debug_map: false,
         };
 
-        mgr.start(module, name, Some(Duration::from_millis(5)), meta)
+        mgr.start(module, name, Some(Duration::from_millis(5)), meta, None)
             .await
             .unwrap();
 

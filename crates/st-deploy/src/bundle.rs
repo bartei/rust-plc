@@ -481,25 +481,42 @@ fn read_optional_file(path: &Path) -> Option<Vec<u8>> {
 }
 
 fn collect_profiles(project_root: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let profiles_dir = project_root.join("profiles");
-    if !profiles_dir.is_dir() {
-        return Ok(Vec::new());
+    // Search for profiles in the project's profiles/ directory and parent
+    // directories (workspace root pattern), matching the registry builder.
+    let mut search_dirs = vec![project_root.join("profiles")];
+    let mut cur = project_root.to_path_buf();
+    for _ in 0..6 {
+        if let Some(parent) = cur.parent() {
+            let candidate = parent.join("profiles");
+            if candidate.is_dir() && candidate != project_root.join("profiles") {
+                search_dirs.push(candidate);
+            }
+            cur = parent.to_path_buf();
+        } else {
+            break;
+        }
     }
 
     let mut result = BTreeMap::new();
-    let entries = std::fs::read_dir(&profiles_dir)
-        .map_err(|e| format!("Cannot read profiles/: {e}"))?;
+    for profiles_dir in &search_dirs {
+        if !profiles_dir.is_dir() {
+            continue;
+        }
+        let entries = std::fs::read_dir(profiles_dir)
+            .map_err(|e| format!("Cannot read {}: {e}", profiles_dir.display()))?;
 
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("Profile dir entry error: {e}"))?;
-        let path = entry.path();
-        if path.is_file() {
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if ext == "yaml" || ext == "yml" {
-                let filename = path.file_name().unwrap().to_string_lossy().to_string();
-                let content = std::fs::read(&path)
-                    .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
-                result.insert(filename, content);
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("Profile dir entry error: {e}"))?;
+            let path = entry.path();
+            if path.is_file() {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if ext == "yaml" || ext == "yml" {
+                    let filename = path.file_name().unwrap().to_string_lossy().to_string();
+                    // Don't overwrite — first found wins (local profiles take priority)
+                    result.entry(filename).or_insert_with(|| {
+                        std::fs::read(&path).unwrap_or_default()
+                    });
+                }
             }
         }
     }

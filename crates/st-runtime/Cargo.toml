@@ -24,6 +24,7 @@ st-compiler = { path = "../st-compiler" }
 st-ir = { path = "../st-ir" }
 st-engine = { path = "../st-engine" }
 st-comm-api = { path = "../st-comm-api" }
+st-comm-sim = { path = "../st-comm-sim" }
 
 # CLI framework
 clap = { version = "4", features = ["derive"] }
