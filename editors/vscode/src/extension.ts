@@ -584,6 +584,9 @@ function getTargetsFromConfig(): TargetEntry[] {
       const lines = text.split("\n");
       let inTargets = false;
       let current: Partial<TargetEntry> = {};
+      /** Strip YAML inline comments and surrounding quotes/whitespace. */
+      const cleanVal = (raw: string) =>
+        raw.replace(/\s+#.*$/, "").trim().replace(/^["']|["']$/g, "");
       for (const line of lines) {
         if (/^targets:/.test(line)) { inTargets = true; continue; }
         if (inTargets && /^\S/.test(line)) { inTargets = false; }
@@ -598,15 +601,15 @@ function getTargetsFromConfig(): TargetEntry[] {
               user: current.user || "plc",
             });
           }
-          current = { name: nameMatch[1].trim().replace(/["']/g, "") };
+          current = { name: cleanVal(nameMatch[1]) };
           continue;
         }
         const hostMatch = line.match(/host:\s*(.+)/);
-        if (hostMatch) current.host = hostMatch[1].trim().replace(/["']/g, "");
+        if (hostMatch) current.host = cleanVal(hostMatch[1]);
         const portMatch = line.match(/agent_port:\s*(\d+)/);
         if (portMatch) current.agentPort = parseInt(portMatch[1], 10);
         const userMatch = line.match(/user:\s*(.+)/);
-        if (userMatch) current.user = userMatch[1].trim().replace(/["']/g, "");
+        if (userMatch) current.user = cleanVal(userMatch[1]);
       }
       if (current.name && current.host) {
         targets.push({
