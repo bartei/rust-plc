@@ -449,37 +449,46 @@ export function activate(context: vscode.ExtensionContext) {
 
   // ── Deployment toolbar commands ──────────────────────────────────
   context.subscriptions.push(
-    vscode.commands.registerCommand("structured-text.targetInstall", async () => {
-      const target = await resolveActiveTargetFull("Install PLC Runtime");
+    vscode.commands.registerCommand("structured-text.targetInstall", async (arg?: { host: string; port: number }) => {
+      const target = arg
+        ? await resolveTargetFromArg(arg)
+        : await resolveActiveTargetFull("Install PLC Runtime");
       if (!target) return;
       const sshTarget = `${target.user}@${target.host}`;
-      const terminal = vscode.window.createTerminal("PLC Install");
+      vscode.window.showInformationMessage(`Installing PLC runtime on ${target.name} (${target.host})...`);
+      const terminal = vscode.window.createTerminal(`PLC Install — ${target.name}`);
       terminal.show();
       terminal.sendText(
         `st-cli target install ${sshTarget} && echo "\\n--- Rebooting ${target.host} ---" && ssh ${sshTarget} "sudo reboot"`
       );
     }),
 
-    vscode.commands.registerCommand("structured-text.targetUpload", async () => {
-      const host = await resolveActiveTarget("Upload PLC Program");
-      if (!host) return;
-      const terminal = vscode.window.createTerminal("PLC Upload");
+    vscode.commands.registerCommand("structured-text.targetUpload", async (arg?: { host: string; port: number }) => {
+      const resolved = arg
+        ? { host: arg.host, port: arg.port }
+        : await resolveActiveTargetWithPort("Upload PLC Program");
+      if (!resolved) return;
+      vscode.window.showInformationMessage(`Uploading to ${resolved.host}:${resolved.port}...`);
+      const terminal = vscode.window.createTerminal(`PLC Upload — ${resolved.host}`);
       terminal.show();
-      terminal.sendText(`st-cli bundle && curl -X POST -F "file=@$(ls -t *.st-bundle | head -1)" http://${host}:4840/api/v1/program/upload`);
+      terminal.sendText(`st-cli bundle && curl -X POST -F "file=@$(ls -t *.st-bundle | head -1)" http://${resolved.host}:${resolved.port}/api/v1/program/upload`);
     }),
 
-    vscode.commands.registerCommand("structured-text.targetOnlineUpdate", async () => {
-      const host = await resolveActiveTarget("Online Update");
-      if (!host) return;
-      // Build, stop, upload, start — with online change prompt if needed
-      const terminal = vscode.window.createTerminal("PLC Online Update");
+    vscode.commands.registerCommand("structured-text.targetOnlineUpdate", async (arg?: { host: string; port: number }) => {
+      const resolved = arg
+        ? { host: arg.host, port: arg.port }
+        : await resolveActiveTargetWithPort("Online Update");
+      if (!resolved) return;
+      const { host, port } = resolved;
+      vscode.window.showInformationMessage(`Online update to ${host}:${port}...`);
+      const terminal = vscode.window.createTerminal(`PLC Online Update — ${host}`);
       terminal.show();
       terminal.sendText([
         "st-cli bundle",
-        `curl -sf -X POST http://${host}:4840/api/v1/program/stop 2>/dev/null || true`,
-        `curl -sf -X POST -F "file=@$(ls -t *.st-bundle | head -1)" http://${host}:4840/api/v1/program/upload`,
-        `curl -sf -X POST http://${host}:4840/api/v1/program/start`,
-        `echo "Update complete" && curl -sf http://${host}:4840/api/v1/status`,
+        `curl -sf -X POST http://${host}:${port}/api/v1/program/stop 2>/dev/null || true`,
+        `curl -sf -X POST -F "file=@$(ls -t *.st-bundle | head -1)" http://${host}:${port}/api/v1/program/upload`,
+        `curl -sf -X POST http://${host}:${port}/api/v1/program/start`,
+        `echo "Update complete" && curl -sf http://${host}:${port}/api/v1/status`,
       ].join(" && "));
     }),
 
@@ -624,6 +633,16 @@ function resolveTarget(targetName: string): { host: string; dapPort: number } | 
   const t = targets.find(t => t.name === targetName);
   if (!t) return undefined;
   return { host: t.host, dapPort: t.agentPort + 1 };
+}
+
+/**
+ * Resolve a target from an explicit arg (passed by the monitor panel toolbar).
+ * Matches against configured targets to get the user/name, or falls back to defaults.
+ */
+async function resolveTargetFromArg(arg: { host: string; port: number }): Promise<TargetEntry> {
+  const targets = getTargetsFromConfig();
+  const match = targets.find((t: TargetEntry) => t.host === arg.host);
+  return match || { name: arg.host, host: arg.host, agentPort: arg.port, user: "plc" };
 }
 
 /**

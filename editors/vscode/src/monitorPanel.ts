@@ -154,13 +154,34 @@ export class MonitorPanel {
 
       // ── Deployment toolbar commands ──────────────────────────
       case "tb:install":
-        vscode.commands.executeCommand("structured-text.targetInstall");
+        if (this.selectedTargetHost) {
+          vscode.commands.executeCommand("structured-text.targetInstall", {
+            host: this.selectedTargetHost,
+            port: this.selectedTargetPort,
+          });
+        } else {
+          vscode.commands.executeCommand("structured-text.targetInstall");
+        }
         break;
       case "tb:upload":
-        vscode.commands.executeCommand("structured-text.targetUpload");
+        if (this.selectedTargetHost) {
+          vscode.commands.executeCommand("structured-text.targetUpload", {
+            host: this.selectedTargetHost,
+            port: this.selectedTargetPort,
+          });
+        } else {
+          vscode.commands.executeCommand("structured-text.targetUpload");
+        }
         break;
       case "tb:onlineUpdate":
-        vscode.commands.executeCommand("structured-text.targetOnlineUpdate");
+        if (this.selectedTargetHost) {
+          vscode.commands.executeCommand("structured-text.targetOnlineUpdate", {
+            host: this.selectedTargetHost,
+            port: this.selectedTargetPort,
+          });
+        } else {
+          vscode.commands.executeCommand("structured-text.targetOnlineUpdate");
+        }
         break;
       case "tb:run":
         vscode.commands.executeCommand("structured-text.targetRun");
@@ -183,6 +204,9 @@ export class MonitorPanel {
         break;
       case "tb:refreshTargets":
         vscode.commands.executeCommand("structured-text.refreshMonitorTargets");
+        break;
+      case "tb:fetchTargetInfo":
+        this.fetchTargetInfo();
         break;
     }
   }
@@ -447,6 +471,84 @@ export class MonitorPanel {
       clearInterval(this.statusPollTimer);
       this.statusPollTimer = undefined;
     }
+  }
+
+  /** Fetch target information (agent, program, status) and display in the info panel. */
+  public async fetchTargetInfo() {
+    if (!this.selectedTargetHost) {
+      this.panel.webview.postMessage({
+        command: "updateTargetInfo",
+        info: { error: "No target selected. Choose a target from the dropdown." },
+      });
+      return;
+    }
+
+    const host = this.selectedTargetHost;
+    const port = this.selectedTargetPort;
+    const base = `http://${host}:${port}`;
+    const info: any = {};
+
+    // 1. Health check — is the agent reachable?
+    try {
+      const healthResp = await fetch(`${base}/api/v1/health`, {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!healthResp.ok) {
+        this.panel.webview.postMessage({
+          command: "updateTargetInfo",
+          info: { error: `Agent returned HTTP ${healthResp.status}. Runtime may need reinstalling.` },
+        });
+        return;
+      }
+    } catch {
+      this.panel.webview.postMessage({
+        command: "updateTargetInfo",
+        info: {
+          error: `Cannot reach ${host}:${port}. The PLC runtime is not installed or the target is offline.`,
+        },
+      });
+      return;
+    }
+
+    // 2. Target info — OS, arch, version
+    try {
+      const tiResp = await fetch(`${base}/api/v1/target-info`, {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (tiResp.ok) {
+        info.agent = await tiResp.json();
+      }
+    } catch {
+      // Non-fatal — older agents may not have this endpoint
+    }
+
+    // 3. Program info — what's deployed?
+    try {
+      const progResp = await fetch(`${base}/api/v1/program/info`, {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (progResp.ok) {
+        info.program = await progResp.json();
+      }
+      // 404 = no program deployed (expected, not an error)
+    } catch {
+      // Non-fatal
+    }
+
+    // 4. Runtime status
+    try {
+      const statusResp = await fetch(`${base}/api/v1/status`, {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (statusResp.ok) {
+        const body = (await statusResp.json()) as any;
+        info.status = body.status || "unknown";
+      }
+    } catch {
+      // Non-fatal
+    }
+
+    this.panel.webview.postMessage({ command: "updateTargetInfo", info });
   }
 
   /** Populate the target dropdown from plc-project.yaml targets. */
@@ -765,6 +867,48 @@ export class MonitorPanel {
     .tb-dot.stopped { background: var(--vscode-descriptionForeground); }
     .tb-dot.error   { background: var(--vscode-charts-red, #f44336); }
     .tb-dot.offline { background: var(--vscode-descriptionForeground); opacity: 0.4; }
+    /* ── Target Info Panel ─────────────────────────────────── */
+    .target-info {
+      display: none;
+      padding: 8px 12px;
+      margin-bottom: 10px;
+      background: var(--vscode-editorWidget-background);
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 4px;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .target-info.visible { display: block; }
+    .target-info .ti-row {
+      display: flex;
+      gap: 8px;
+    }
+    .target-info .ti-label {
+      color: var(--vscode-descriptionForeground);
+      min-width: 110px;
+    }
+    .target-info .ti-value {
+      color: var(--vscode-foreground);
+      font-family: var(--vscode-editor-font-family), monospace;
+    }
+    .target-info .ti-ok { color: var(--vscode-charts-green, #4caf50); }
+    .target-info .ti-warn { color: var(--vscode-charts-yellow, #ffb300); }
+    .target-info .ti-err { color: var(--vscode-charts-red, #f44336); }
+    .target-info .ti-title {
+      font-weight: bold;
+      margin-bottom: 4px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .target-info .ti-close {
+      cursor: pointer;
+      color: var(--vscode-descriptionForeground);
+      font-size: 14px;
+      background: none;
+      border: none;
+      padding: 0 4px;
+    }
   </style>
 </head>
 <body>
@@ -798,8 +942,16 @@ export class MonitorPanel {
         <option value="">-- No target --</option>
       </select>
       <button onclick="tbRefreshTargets()" title="Reload targets from plc-project.yaml" style="background:none;border:none;color:var(--vscode-descriptionForeground);cursor:pointer;font-size:12px;padding:0 2px;">&#x21BB;</button>
+      <button onclick="tbFetchTargetInfo()" id="tb-info-btn" title="Fetch target information (agent version, program, OS)" style="font-size:11px;padding:3px 8px;">&#x2139; Info</button>
       <span id="tb-status-text"></span>
     </div>
+  </div>
+  <div class="target-info" id="target-info-panel">
+    <div class="ti-title">
+      <span>Target Information</span>
+      <button class="ti-close" onclick="closeTargetInfo()">&#x2715;</button>
+    </div>
+    <div id="target-info-content">Fetching...</div>
   </div>
 
   <h2>
@@ -1223,6 +1375,69 @@ export class MonitorPanel {
     function tbRefreshTargets() {
       vscode.postMessage({ command: "tb:refreshTargets" });
     }
+    function tbFetchTargetInfo() {
+      const panel = document.getElementById("target-info-panel");
+      const content = document.getElementById("target-info-content");
+      if (panel) panel.classList.add("visible");
+      if (content) content.innerHTML = "Fetching target information...";
+      vscode.postMessage({ command: "tb:fetchTargetInfo" });
+    }
+    function closeTargetInfo() {
+      const panel = document.getElementById("target-info-panel");
+      if (panel) panel.classList.remove("visible");
+    }
+    function renderTargetInfo(info) {
+      const panel = document.getElementById("target-info-panel");
+      const content = document.getElementById("target-info-content");
+      if (!panel || !content) return;
+      panel.classList.add("visible");
+
+      if (info.error) {
+        content.innerHTML =
+          '<div class="ti-row"><span class="ti-value ti-err">' + info.error + '</span></div>';
+        return;
+      }
+
+      var html = "";
+      // Agent info
+      if (info.agent) {
+        html += '<div class="ti-row"><span class="ti-label">Agent:</span>'
+          + '<span class="ti-value ti-ok">' + info.agent.agent_name
+          + ' v' + info.agent.agent_version + '</span></div>';
+        html += '<div class="ti-row"><span class="ti-label">Platform:</span>'
+          + '<span class="ti-value">' + info.agent.os + ' / ' + info.agent.arch + '</span></div>';
+        html += '<div class="ti-row"><span class="ti-label">Uptime:</span>'
+          + '<span class="ti-value">' + fmtUptime(info.agent.uptime_secs) + '</span></div>';
+      }
+      // Program info
+      if (info.program) {
+        html += '<div class="ti-row"><span class="ti-label">Program:</span>'
+          + '<span class="ti-value">' + info.program.name + ' v' + info.program.version + '</span></div>';
+        html += '<div class="ti-row"><span class="ti-label">Mode:</span>'
+          + '<span class="ti-value">' + info.program.mode + '</span></div>';
+        html += '<div class="ti-row"><span class="ti-label">Deployed:</span>'
+          + '<span class="ti-value">' + info.program.deployed_at + '</span></div>';
+      } else if (info.agent) {
+        html += '<div class="ti-row"><span class="ti-label">Program:</span>'
+          + '<span class="ti-value ti-warn">No program deployed</span></div>';
+      }
+      // Runtime status
+      if (info.status) {
+        var cls = info.status === "running" ? "ti-ok"
+          : info.status === "error" ? "ti-err" : "";
+        html += '<div class="ti-row"><span class="ti-label">Status:</span>'
+          + '<span class="ti-value ' + cls + '">' + info.status + '</span></div>';
+      }
+
+      content.innerHTML = html || '<span class="ti-value ti-warn">No information available</span>';
+    }
+    function fmtUptime(secs) {
+      if (secs < 60) return secs + "s";
+      if (secs < 3600) return Math.floor(secs / 60) + "m " + (secs % 60) + "s";
+      var h = Math.floor(secs / 3600);
+      var m = Math.floor((secs % 3600) / 60);
+      return h + "h " + m + "m";
+    }
 
     /** Handle target dropdown change. */
     function onTargetChange(select) {
@@ -1384,6 +1599,8 @@ export class MonitorPanel {
         updateToolbarStatus(msg.status, msg.targetName);
       } else if (msg.command === "setTargets") {
         populateTargets(msg.targets || []);
+      } else if (msg.command === "updateTargetInfo") {
+        renderTargetInfo(msg.info);
       }
     });
 
