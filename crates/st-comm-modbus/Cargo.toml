@@ -1,0 +1,18 @@
+[package]
+name = "st-comm-modbus"
+description = "Modbus RTU protocol for PLC communication"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+st-comm-api = { path = "../st-comm-api" }
+st-comm-serial = { path = "../st-comm-serial" }
+st-ir.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+st-syntax = { path = "../st-syntax" }
+st-compiler = { path = "../st-compiler" }
+st-engine = { path = "../st-engine" }
