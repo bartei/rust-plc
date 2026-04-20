@@ -50,10 +50,10 @@ fn run_slave(port_path: &str, stop: Arc<std::sync::atomic::AtomicBool>) {
         .expect("Slave: failed to open");
 
     // Slave state: 8 discrete inputs, 8 coils, 8 input regs, 8 holding regs
-    let mut discrete_inputs = vec![false; 8];
-    let mut coils = vec![false; 8];
-    let mut input_registers = vec![0u16; 8];
-    let mut holding_registers = vec![0u16; 8];
+    let mut discrete_inputs = [false; 8];
+    let mut coils = [false; 8];
+    let mut input_registers = [0u16; 8];
+    let mut holding_registers = [0u16; 8];
 
     // Set some test values
     discrete_inputs[0] = true;  // DI_0 = TRUE

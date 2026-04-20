@@ -2112,10 +2112,8 @@ fn collect_call_ranges_in_stmts(
 ) {
     for stmt in stmts {
         match stmt {
-            ast::Statement::FunctionCall(fc) => {
-                if fc.name.as_str().eq_ignore_ascii_case(target_name) {
+            ast::Statement::FunctionCall(fc) if fc.name.as_str().eq_ignore_ascii_case(target_name) => {
                     ranges.push(doc.text_range_to_lsp(fc.range));
-                }
             }
             ast::Statement::Assignment(a) => {
                 collect_call_ranges_in_expr(&a.value, target_name, doc, ranges);

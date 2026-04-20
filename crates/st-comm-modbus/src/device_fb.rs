@@ -404,7 +404,8 @@ fn value_to_register(
     reg: &st_comm_api::profile::RegisterMapping,
 ) -> u16 {
     let raw_f64 = match value {
-        Value::Bool(b) => if *b { 1.0 } else { 0.0 },
+        Value::Bool(true) => 1.0,
+        Value::Bool(false) => 0.0,
         Value::Int(i) => *i as f64,
         Value::UInt(u) => *u as f64,
         Value::Real(r) => *r,

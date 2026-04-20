@@ -293,6 +293,7 @@ fn run_slave(
 
 // ── Tests ───────────────────────────────────────────────────────────────
 
+#[allow(clippy::type_complexity)]
 fn setup_test() -> Option<(Child, Arc<Mutex<ModbusSlave>>, Arc<std::sync::atomic::AtomicBool>, Arc<Mutex<SerialTransport>>, std::thread::JoinHandle<()>)> {
     if !socat_available() {
         eprintln!("Skipping (socat not available)");

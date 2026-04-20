@@ -271,8 +271,7 @@ fn add_pous(doc: &Document, prefix: &str, items: &mut Vec<CompletionItem>) {
     let global = doc.analysis.symbols.scope(doc.analysis.symbols.global_scope_id());
     for sym in global.symbols() {
         match &sym.kind {
-            scope::SymbolKind::Function { return_type, params } => {
-                if matches_prefix(&sym.name, prefix) {
+            scope::SymbolKind::Function { return_type, params } if matches_prefix(&sym.name, prefix) => {
                     let param_list = params
                         .iter()
                         .map(|p| format!("{} : {}", p.name, p.ty.display_name()))
@@ -300,27 +299,22 @@ fn add_pous(doc: &Document, prefix: &str, items: &mut Vec<CompletionItem>) {
                         insert_text_format: Some(InsertTextFormat::SNIPPET),
                         ..Default::default()
                     });
-                }
             }
-            scope::SymbolKind::FunctionBlock { .. } => {
-                if matches_prefix(&sym.name, prefix) {
+            scope::SymbolKind::FunctionBlock { .. } if matches_prefix(&sym.name, prefix) => {
                     items.push(CompletionItem {
                         label: sym.name.clone(),
                         kind: Some(CompletionItemKind::CLASS),
                         detail: Some("FUNCTION_BLOCK".to_string()),
                         ..Default::default()
                     });
-                }
             }
-            scope::SymbolKind::Program { .. } => {
-                if matches_prefix(&sym.name, prefix) {
+            scope::SymbolKind::Program { .. } if matches_prefix(&sym.name, prefix) => {
                     items.push(CompletionItem {
                         label: sym.name.clone(),
                         kind: Some(CompletionItemKind::MODULE),
                         detail: Some("PROGRAM".to_string()),
                         ..Default::default()
                     });
-                }
             }
             _ => {}
         }

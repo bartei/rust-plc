@@ -1,3 +1,4 @@
+#![allow(clippy::approx_constant)]
 //! End-to-end OPC-UA echo test.
 //!
 //! Full round-trip: compile ST program → start RuntimeManager → start OPC-UA

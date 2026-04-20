@@ -1415,11 +1415,9 @@ impl Vm {
                                 }
                             }
                         }
-                        Value::Ref(1, slot) => {
+                        Value::Ref(1, slot) if (slot as usize) < self.globals.len() => {
                             // Legacy: tag=1 as global
-                            if (slot as usize) < self.globals.len() {
-                                self.globals[slot as usize] = val;
-                            }
+                            self.globals[slot as usize] = val;
                         }
                         _ => {} // null deref is a no-op
                     }
@@ -1738,10 +1736,8 @@ impl Vm {
                 Instruction::LoadConst(dst, val) => {
                     registers[*dst as usize] = val.clone();
                 }
-                Instruction::StoreLocal(slot, src) => {
-                    if (*slot as usize) < class_var_count && (*slot as usize) < locals.len() {
-                        locals[*slot as usize] = registers[*src as usize].clone();
-                    }
+                Instruction::StoreLocal(slot, src) if (*slot as usize) < class_var_count && (*slot as usize) < locals.len() => {
+                    locals[*slot as usize] = registers[*src as usize].clone();
                 }
                 Instruction::RetVoid | Instruction::Ret(_) => break,
                 _ => {}

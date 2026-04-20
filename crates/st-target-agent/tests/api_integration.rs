@@ -805,7 +805,7 @@ async fn test_watch_empty_returns_empty() {
         .unwrap();
     let vars = body["variables"].as_array().unwrap();
     assert!(
-        vars.len() >= 1,
+        !vars.is_empty(),
         "Empty watch should return all variables (got {})",
         vars.len()
     );
@@ -821,7 +821,7 @@ async fn test_watch_empty_returns_empty() {
         .unwrap();
     let vars = body["variables"].as_array().unwrap();
     assert!(
-        vars.len() >= 1,
+        !vars.is_empty(),
         "No watch param should return all variables (got {})",
         vars.len()
     );

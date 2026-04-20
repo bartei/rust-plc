@@ -162,25 +162,17 @@ impl<'a> LowerCtx<'a> {
             "case_statement" => {
                 return "syntax error in CASE statement — check END_CASE".to_string();
             }
-            "program_declaration" => {
-                if next_sibling.is_none() {
-                    return "expected END_PROGRAM".to_string();
-                }
+            "program_declaration" if next_sibling.is_none() => {
+                return "expected END_PROGRAM".to_string();
             }
-            "function_declaration" => {
-                if next_sibling.is_none() {
-                    return "expected END_FUNCTION".to_string();
-                }
+            "function_declaration" if next_sibling.is_none() => {
+                return "expected END_FUNCTION".to_string();
             }
-            "function_block_declaration" => {
-                if next_sibling.is_none() {
-                    return "expected END_FUNCTION_BLOCK".to_string();
-                }
+            "function_block_declaration" if next_sibling.is_none() => {
+                return "expected END_FUNCTION_BLOCK".to_string();
             }
-            "class_declaration" => {
-                if next_sibling.is_none() {
-                    return "expected END_CLASS".to_string();
-                }
+            "class_declaration" if next_sibling.is_none() => {
+                return "expected END_CLASS".to_string();
             }
             "var_block" => {
                 return "syntax error in variable declaration — check END_VAR".to_string();

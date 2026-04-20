@@ -330,6 +330,7 @@ mod tests {
     // ── Float parsing ──────────────────────────────────────────────
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn parse_real() {
         let v = parse_value_to_variant("3.140000", "REAL");
         if let Variant::Float(f) = v {
@@ -340,6 +341,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn parse_lreal() {
         let v = parse_value_to_variant("3.141593", "LREAL");
         if let Variant::Double(d) = v {

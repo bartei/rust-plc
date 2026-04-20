@@ -1,3 +1,4 @@
+#![allow(clippy::await_holding_lock)]
 //! Integration test: start an OPC-UA server with a mock PlcDataProvider,
 //! connect with an async-opcua client, browse, read, and write variables.
 

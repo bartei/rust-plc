@@ -907,6 +907,96 @@ fn find_source_content(source_files: &[(String, String)], path: &str) -> String 
     String::new()
 }
 
+/// Build a hierarchical variable tree from a flat list of dotted names.
+///
+/// Variables like `filler.start`, `filler.target_fill`, `cycle` are grouped:
+/// - `filler` becomes a parent with `variablesReference > 0`
+/// - `filler.start` and `filler.target_fill` become children
+/// - `cycle` stays as a leaf with `variablesReference: 0`
+fn build_variable_tree(
+    vars: &[st_engine::debug::VariableInfo],
+    next_ref: &mut u32,
+    children_map: &mut std::collections::HashMap<u32, Vec<serde_json::Value>>,
+) -> Vec<serde_json::Value> {
+    use std::collections::BTreeMap;
+
+    // Group by first segment: "filler.start" → key "filler", child "start"
+    let mut groups: BTreeMap<String, Vec<&st_engine::debug::VariableInfo>> = BTreeMap::new();
+    let mut scalars: Vec<&st_engine::debug::VariableInfo> = Vec::new();
+
+    for v in vars {
+        if let Some(dot) = v.name.find('.') {
+            let parent = &v.name[..dot];
+            groups.entry(parent.to_string()).or_default().push(v);
+        } else {
+            scalars.push(v);
+        }
+    }
+
+    let mut result = Vec::new();
+
+    // Emit grouped variables as expandable parents
+    for (parent_name, children) in &groups {
+        let ref_id = *next_ref;
+        *next_ref += 1;
+
+        // Build summary value: "field1=val1, field2=val2, ..."
+        let summary: String = children.iter().take(4)
+            .map(|v| {
+                let short_name = v.name.rsplit('.').next().unwrap_or(&v.name);
+                format!("{}={}", short_name, v.value)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let summary = if children.len() > 4 {
+            format!("{summary}, ...")
+        } else {
+            summary
+        };
+
+        // Build child variable entries
+        let child_entries: Vec<serde_json::Value> = children.iter()
+            .map(|v| {
+                let short_name = v.name.rsplit('.').next().unwrap_or(&v.name);
+                serde_json::json!({
+                    "name": short_name,
+                    "value": v.value,
+                    "type": v.ty,
+                    "variablesReference": 0,
+                })
+            })
+            .collect();
+
+        children_map.insert(ref_id, child_entries);
+
+        // Infer type from first child's prefix pattern
+        let parent_type = if children.iter().any(|v| v.ty == "FB_INSTANCE") {
+            "FB_INSTANCE"
+        } else {
+            "STRUCT"
+        };
+
+        result.push(serde_json::json!({
+            "name": parent_name,
+            "value": summary,
+            "type": parent_type,
+            "variablesReference": ref_id,
+        }));
+    }
+
+    // Emit scalar (non-dotted) variables
+    for v in &scalars {
+        result.push(serde_json::json!({
+            "name": v.name,
+            "value": v.value,
+            "type": v.ty,
+            "variablesReference": 0,
+        }));
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1001,94 +1091,4 @@ mod tests {
         assert_eq!(m.to_local("/some/other/file.st"), "/some/other/file.st");
         assert_eq!(m.to_remote("/some/other/file.st"), "/some/other/file.st");
     }
-}
-
-/// Build a hierarchical variable tree from a flat list of dotted names.
-///
-/// Variables like `filler.start`, `filler.target_fill`, `cycle` are grouped:
-/// - `filler` becomes a parent with `variablesReference > 0`
-/// - `filler.start` and `filler.target_fill` become children
-/// - `cycle` stays as a leaf with `variablesReference: 0`
-fn build_variable_tree(
-    vars: &[st_engine::debug::VariableInfo],
-    next_ref: &mut u32,
-    children_map: &mut std::collections::HashMap<u32, Vec<serde_json::Value>>,
-) -> Vec<serde_json::Value> {
-    use std::collections::BTreeMap;
-
-    // Group by first segment: "filler.start" → key "filler", child "start"
-    let mut groups: BTreeMap<String, Vec<&st_engine::debug::VariableInfo>> = BTreeMap::new();
-    let mut scalars: Vec<&st_engine::debug::VariableInfo> = Vec::new();
-
-    for v in vars {
-        if let Some(dot) = v.name.find('.') {
-            let parent = &v.name[..dot];
-            groups.entry(parent.to_string()).or_default().push(v);
-        } else {
-            scalars.push(v);
-        }
-    }
-
-    let mut result = Vec::new();
-
-    // Emit grouped variables as expandable parents
-    for (parent_name, children) in &groups {
-        let ref_id = *next_ref;
-        *next_ref += 1;
-
-        // Build summary value: "field1=val1, field2=val2, ..."
-        let summary: String = children.iter().take(4)
-            .map(|v| {
-                let short_name = v.name.rsplit('.').next().unwrap_or(&v.name);
-                format!("{}={}", short_name, v.value)
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let summary = if children.len() > 4 {
-            format!("{summary}, ...")
-        } else {
-            summary
-        };
-
-        // Build child variable entries
-        let child_entries: Vec<serde_json::Value> = children.iter()
-            .map(|v| {
-                let short_name = v.name.rsplit('.').next().unwrap_or(&v.name);
-                serde_json::json!({
-                    "name": short_name,
-                    "value": v.value,
-                    "type": v.ty,
-                    "variablesReference": 0,
-                })
-            })
-            .collect();
-
-        children_map.insert(ref_id, child_entries);
-
-        // Infer type from first child's prefix pattern
-        let parent_type = if children.iter().any(|v| v.ty == "FB_INSTANCE") {
-            "FB_INSTANCE"
-        } else {
-            "STRUCT"
-        };
-
-        result.push(serde_json::json!({
-            "name": parent_name,
-            "value": summary,
-            "type": parent_type,
-            "variablesReference": ref_id,
-        }));
-    }
-
-    // Emit scalar (non-dotted) variables
-    for v in &scalars {
-        result.push(serde_json::json!({
-            "name": v.name,
-            "value": v.value,
-            "type": v.ty,
-            "variablesReference": 0,
-        }));
-    }
-
-    result
 }

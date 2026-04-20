@@ -133,28 +133,24 @@ impl<'a> TokenBuilder<'a> {
 
         // Check the field name if available
         match parent_kind {
-            "program_declaration" | "function_declaration" | "function_block_declaration" => {
-                if parent.child_by_field_name("name").map(|n| n.id()) == Some(node.id()) {
+            "program_declaration" | "function_declaration" | "function_block_declaration"
+                if parent.child_by_field_name("name").map(|n| n.id()) == Some(node.id()) => {
                     return TT_FUNCTION;
-                }
             }
-            "type_definition" => {
-                if parent.child_by_field_name("name").map(|n| n.id()) == Some(node.id()) {
+            "type_definition"
+                if parent.child_by_field_name("name").map(|n| n.id()) == Some(node.id()) => {
                     return TT_TYPE;
-                }
             }
             "variable_declaration" => {
                 return TT_VARIABLE;
             }
-            "struct_field" => {
-                if parent.child_by_field_name("name").map(|n| n.id()) == Some(node.id()) {
+            "struct_field"
+                if parent.child_by_field_name("name").map(|n| n.id()) == Some(node.id()) => {
                     return TT_VARIABLE;
-                }
             }
-            "named_argument" => {
-                if parent.child_by_field_name("name").map(|n| n.id()) == Some(node.id()) {
+            "named_argument"
+                if parent.child_by_field_name("name").map(|n| n.id()) == Some(node.id()) => {
                     return TT_PARAMETER;
-                }
             }
             "enum_value" => {
                 return TT_ENUM_MEMBER;
@@ -163,10 +159,9 @@ impl<'a> TokenBuilder<'a> {
                 // First identifier in a function_call's name is the function name
                 return TT_FUNCTION;
             }
-            "for_statement" => {
-                if parent.child_by_field_name("variable").map(|n| n.id()) == Some(node.id()) {
+            "for_statement"
+                if parent.child_by_field_name("variable").map(|n| n.id()) == Some(node.id()) => {
                     return TT_VARIABLE;
-                }
             }
             "variable_access" => {
                 return TT_VARIABLE;
