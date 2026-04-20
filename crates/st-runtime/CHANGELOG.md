@@ -7,35 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.2](https://github.com/bartei/rust-plc/compare/st-engine-v0.1.1...st-engine-v0.1.2) - 2026-04-20
+## [0.1.2](https://github.com/bartei/rust-plc/compare/st-runtime-v0.1.1...st-runtime-v0.1.2) - 2026-04-20
 
 ### Added
 
-- two-layer comm architecture with non-blocking async I/O
-- legacy comm cleanup, hover for FB types, remote debug variable tree
-- native function block communication layer
-- multi-rate I/O scheduling — per-device cycle_time enforcement
-- fix remote debug attach — source mapping, breakpoints, force, retain
-- unified WebSocket-based PLC Monitor panel
-- Phase 17C — debug command channel for attach-to-running-engine
-- Phase 16 — RETAIN/PERSISTENT variable persistence
+- CI e2e tests for x86_64 and aarch64, nix-based cross-compilation
+- Phase 17A — singleton enforcement via PID file + flock
 - add struct variable support + rename st-runtime/st-plc-runtime crates
-
-### Fixed
-
-- resolve all clippy warnings for Rust 1.95 and fix CI test ordering
-- forced values on native FB fields survive execute() calls
-- critical state bugs in debug attach/detach lifecycle
-
-### Other
-
-- add comprehensive README.md for all 16 crates
-- update all references after st-runtime/st-plc-runtime rename
-
-## [0.1.1](https://github.com/bartei/rust-plc/compare/st-engine-v0.1.0...st-engine-v0.1.1) - 2026-04-06
-
-### Added
-
+- LSP features, multi-file diagnostic fix, FB debugger tree, UI test framework
+- *(phase13a.2/3)* cycle-time control, jitter, live monitor + watch list
+- *(phase13a)* simulated device, web UI, and on-disk I/O symbol map
+- implement IEC 61131-3 partial variable access (.%X, .%B, .%W, .%D)
+- *(lsp)* method go-to-definition and snippet parameter completion
+- *(phase12)* implement IEC 61131-3 OOP extensions (Classes)
 - implement REF_TO pointers with ^ dereference and NULL
 - real-time timers using SYSTEM_TIME() and TIME values
 - add trig/math intrinsic functions (SQRT, SIN, COS, TAN, ASIN, ACOS, ATAN, LN, LOG, EXP)
@@ -47,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- three issues — status field mismatch, auto-start, debug session
+- resolve clippy warnings across test files
+- resolve all clippy 1.94 warnings (abs_diff, is_some_and, format args, while let)
+- *(vm)* SINT/INT/DINT wrap on overflow + literal context typing + monitor polish
+- *(dap)* replace unreliable byte-offset filter with name-based matching
+- *(dap)* breakpoints now work in multi-file projects
+- *(dap)* breakpoints now work in multi-file projects
+- add multi-file project support to DAP debugger and LSP
 - *(ci)* resolve all clippy warnings for -Dwarnings
 - continue runs across multiple scan cycles until breakpoint hit
 - debugger breakpoint off-by-one and re-trigger bugs
@@ -55,4 +47,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- add comprehensive README.md for all 16 crates
+- release v0.1.1
 - add 7 local variable retention tests for scan cycle behavior
