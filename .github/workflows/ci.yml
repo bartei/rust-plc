@@ -67,7 +67,9 @@ jobs:
       # Build st-cli first (needed by LSP integration tests)
       - run: cargo build -p st-cli
       - name: Run all tests
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude st-comm-modbus
+      - name: Run Modbus RTU tests (serial — shared socat ports)
+        run: cargo test -p st-comm-modbus -- --test-threads=1
         env:
           ST_CLI_BIN: ${{ github.workspace }}/target/debug/st-cli
 
