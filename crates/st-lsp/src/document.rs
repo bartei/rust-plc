@@ -249,15 +249,47 @@ impl Document {
             if ext != "yaml" && ext != "yml" {
                 continue;
             }
-            if let Ok(profile) = st_comm_api::DeviceProfile::from_file(&path) {
-                let protocol = profile.protocol.as_deref().unwrap_or("simulated");
-                if protocol == "simulated" {
-                    let name = profile.name.clone();
+            match st_comm_api::DeviceProfile::from_file(&path) {
+                Ok(profile) => {
+                    // Register all profiles for type information in the LSP.
+                    // We use SimulatedNativeFb as the backing impl since the LSP
+                    // only needs the struct shape, not runtime behaviour.
+                    // For modbus-rtu profiles we use the modbus layout which
+                    // includes serial config fields (port, baud, etc.).
+                    let protocol = profile.protocol.as_deref().unwrap_or("simulated");
+                    let layout = match protocol {
+                        "modbus-rtu" => profile.to_modbus_rtu_device_layout(),
+                        _ => profile.to_native_fb_layout(),
+                    };
                     registry.register(Box::new(
-                        st_comm_sim::SimulatedNativeFb::new(&name, profile),
+                        st_comm_sim::LayoutOnlyNativeFb::new(layout),
                     ));
                 }
+                Err(e) => {
+                    eprintln!("[LSP] warning: failed to load device profile {}: {e}", path.display());
+                }
             }
+        }
+
+        // Always register SerialLink for completions when any modbus-rtu
+        // profiles exist (devices reference it via `link := serial.port`).
+        let has_modbus = !registry.is_empty();
+        if has_modbus {
+            let serial_link_layout = st_comm_api::NativeFbLayout {
+                type_name: "SerialLink".to_string(),
+                fields: vec![
+                    st_comm_api::NativeFbField { name: "port".into(), data_type: st_comm_api::FieldDataType::String, var_kind: st_comm_api::NativeFbVarKind::VarInput },
+                    st_comm_api::NativeFbField { name: "baud".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::VarInput },
+                    st_comm_api::NativeFbField { name: "parity".into(), data_type: st_comm_api::FieldDataType::String, var_kind: st_comm_api::NativeFbVarKind::VarInput },
+                    st_comm_api::NativeFbField { name: "data_bits".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::VarInput },
+                    st_comm_api::NativeFbField { name: "stop_bits".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::VarInput },
+                    st_comm_api::NativeFbField { name: "connected".into(), data_type: st_comm_api::FieldDataType::Bool, var_kind: st_comm_api::NativeFbVarKind::Var },
+                    st_comm_api::NativeFbField { name: "error_code".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::Var },
+                ],
+            };
+            registry.register(Box::new(
+                st_comm_sim::LayoutOnlyNativeFb::new(serial_link_layout),
+            ));
         }
 
         if registry.is_empty() {

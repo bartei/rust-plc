@@ -54,8 +54,17 @@ pub fn load_native_fbs_for_project(project_root: &Path) -> Result<Option<NativeC
         parse_profile_dirs(&yaml_text, project_root)
     };
 
-    let profiles = discover_all_profiles(&profile_dirs);
+    let (profiles, profile_errors) = discover_all_profiles(&profile_dirs);
+    for err in &profile_errors {
+        eprintln!("[COMM] error: failed to load device profile: {err}");
+    }
     if profiles.is_empty() {
+        if !profile_errors.is_empty() {
+            return Err(format!(
+                "{} device profile(s) failed to load (see errors above)",
+                profile_errors.len()
+            ));
+        }
         return Ok(None);
     }
 
@@ -63,8 +72,11 @@ pub fn load_native_fbs_for_project(project_root: &Path) -> Result<Option<NativeC
     let mut device_states = Vec::new();
     let mut has_modbus_rtu = false;
 
-    // Shared transport map for serial link-device binding
+    // Shared transport map for serial link-device binding.
+    // SerialLink opens the port and registers it here; the BusManager
+    // looks up transports by port path for background I/O threads.
     let transport_map = st_comm_serial::new_transport_map();
+    let bus_manager = Arc::new(st_comm_serial::BusManager::new(Arc::clone(&transport_map)));
 
     for profile in profiles {
         let protocol = profile.protocol.as_deref().unwrap_or("simulated");
@@ -82,7 +94,7 @@ pub fn load_native_fbs_for_project(project_root: &Path) -> Result<Option<NativeC
             "modbus-rtu" => {
                 let modbus_fb = ModbusRtuDeviceNativeFb::new(
                     profile.clone(),
-                    Arc::clone(&transport_map),
+                    Arc::clone(&bus_manager),
                 );
                 registry.register(Box::new(modbus_fb));
                 has_modbus_rtu = true;
@@ -119,8 +131,11 @@ pub fn load_native_fbs_for_project(project_root: &Path) -> Result<Option<NativeC
 }
 
 /// Discover all device profile YAML files in the given search directories.
-fn discover_all_profiles(search_dirs: &[PathBuf]) -> Vec<DeviceProfile> {
+/// Returns successfully parsed profiles and a list of error messages for files
+/// that failed to parse.
+fn discover_all_profiles(search_dirs: &[PathBuf]) -> (Vec<DeviceProfile>, Vec<String>) {
     let mut profiles = Vec::new();
+    let mut errors = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
 
     for dir in search_dirs {
@@ -136,14 +151,19 @@ fn discover_all_profiles(search_dirs: &[PathBuf]) -> Vec<DeviceProfile> {
             if ext != "yaml" && ext != "yml" {
                 continue;
             }
-            if let Ok(profile) = DeviceProfile::from_file(&path) {
-                if seen_names.insert(profile.name.clone()) {
-                    profiles.push(profile);
+            match DeviceProfile::from_file(&path) {
+                Ok(profile) => {
+                    if seen_names.insert(profile.name.clone()) {
+                        profiles.push(profile);
+                    }
+                }
+                Err(e) => {
+                    errors.push(format!("{}: {e}", path.display()));
                 }
             }
         }
     }
-    profiles
+    (profiles, errors)
 }
 
 /// Start web UIs for native FB device states.

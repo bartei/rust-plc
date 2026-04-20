@@ -13,12 +13,14 @@
 
 Open `playground/modbus_demo/` in your IDE.
 
-- [ ] `TestModbusIO` is recognized as a type — no red squiggles on `io : TestModbusIO`
-- [ ] `io.` triggers dot-completion showing: port, baud, parity, data_bits, stop_bits, slave_id, refresh_rate, connected, error_code, io_cycles, last_response_ms, DI_0, DI_1, AI_0, DO_0, DO_1, AO_0
-- [ ] Hover over `TestModbusIO` shows the FUNCTION_BLOCK signature
-- [ ] Hover over `io.DI_0` shows `BOOL`
-- [ ] `st-cli check playground/modbus_demo` reports OK
-- [ ] `SerialLink` is also available as a type (auto-registered)
+- [x] `WaveshareAnalogInput` is recognized as a type — no red squiggles
+- [x] `input.` triggers dot-completion showing: link, slave_id, refresh_rate, connected, error_code, io_cycles, last_response_ms, AI1..AI8
+- [x] `SerialLink` is recognized as a type — no red squiggles on `serial : SerialLink`
+- [x] `serial.` triggers dot-completion showing: port, baud, parity, data_bits, stop_bits, connected, error_code
+- [x] Hover over `WaveshareAnalogInput` shows the FUNCTION_BLOCK signature
+- [x] Hover over `input.AI1` shows `INT`
+- [x] `st-cli check playground/modbus_demo` reports OK
+- [x] Two-layer syntax: `serial(port := ...); input(link := serial.port, ...)` compiles clean
 
 ---
 
@@ -37,13 +39,14 @@ nix-shell -p socat pkg-config systemdLibs --run \
   "cargo test -p st-comm-modbus --test full_stack_test -- --nocapture"
 ```
 
-- [ ] Full-stack test passes (connected=TRUE, DI_0=TRUE, AI_0=4200)
+- [x] Full-stack test passes (SerialLink + device with link := serial.port, connected=TRUE, DI_0=TRUE, AI_0=4200)
 
 ### Manual socat test
 
 Edit `playground/modbus_demo/main.st` to use the virtual port:
 ```st
-io(port := '/tmp/vpty0', baud := 9600, ...)
+serial(port := '/tmp/vpty0', baud := 9600, parity := 'N', data_bits := 8, stop_bits := 1);
+input(link := serial.port, slave_id := 1, refresh_rate := T#50ms);
 ```
 
 Then run:
@@ -102,14 +105,19 @@ fields:
 ```st
 PROGRAM Main
 VAR
-    dev : MyRealDevice;
+    serial : SerialLink;
+    dev    : MyRealDevice;
 END_VAR
-    dev(
+    serial(
         port := '/dev/ttyUSB0',     (* adjust to your adapter *)
         baud := 9600,                (* match your device *)
         parity := 'E',              (* E for even, N for none, O for odd *)
         data_bits := 8,
-        stop_bits := 1,
+        stop_bits := 1
+    );
+
+    dev(
+        link := serial.port,
         slave_id := 1,              (* match your device's address *)
         refresh_rate := T#100ms
     );
@@ -147,19 +155,20 @@ Connect two Modbus slaves with different addresses. Create profiles for both.
 ```st
 PROGRAM Main
 VAR
-    dev1 : Device1;
-    dev2 : Device2;
+    serial : SerialLink;
+    dev1   : Device1;
+    dev2   : Device2;
 END_VAR
-    dev1(port := '/dev/ttyUSB0', baud := 9600, parity := 'E',
-         data_bits := 8, stop_bits := 1, slave_id := 1, refresh_rate := T#100ms);
-    dev2(port := '/dev/ttyUSB0', baud := 9600, parity := 'E',
-         data_bits := 8, stop_bits := 1, slave_id := 2, refresh_rate := T#100ms);
+    serial(port := '/dev/ttyUSB0', baud := 9600, parity := 'E',
+           data_bits := 8, stop_bits := 1);
+    dev1(link := serial.port, slave_id := 1, refresh_rate := T#100ms);
+    dev2(link := serial.port, slave_id := 2, refresh_rate := T#100ms);
 END_PROGRAM
 ```
 
-- [ ] Both devices show connected=TRUE
-- [ ] Both devices return correct independent values
-- [ ] No bus collisions or CRC errors (shared transport mutex works)
+- [x] Both devices show connected=TRUE
+- [x] Both devices return correct independent values
+- [x] No bus collisions (single bus thread per port, round-robin polling)
 
 ---
 

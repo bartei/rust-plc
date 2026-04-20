@@ -708,42 +708,97 @@ impl DapSession {
             return None;
         }
 
-        let mut registry = st_comm_api::NativeFbRegistry::new();
-        let entries = std::fs::read_dir(&profiles_dir).ok()?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if ext != "yaml" && ext != "yml" { continue; }
-            if let Ok(profile) = st_comm_api::DeviceProfile::from_file(&path) {
-                let name = profile.name.clone();
-                registry.register(Box::new(
-                    st_comm_sim::SimulatedNativeFb::new(&name, profile),
-                ));
-            }
-        }
+        // Shared transport map and bus manager for serial link-device binding
+        let transport_map = st_comm_serial::new_transport_map();
+        let bus_manager = std::sync::Arc::new(st_comm_serial::BusManager::new(
+            std::sync::Arc::clone(&transport_map),
+        ));
 
-        if registry.is_empty() {
-            None
-        } else {
-            let arc = std::sync::Arc::new(registry);
-            self.native_fb_registry = Some(std::sync::Arc::clone(&arc));
-            // Return a fresh registry for compile (can't return &Arc contents across borrow).
-            // Rebuild cheaply from the same profiles — only happens once per debug session.
-            let mut reg2 = st_comm_api::NativeFbRegistry::new();
-            let entries2 = std::fs::read_dir(root.join("profiles")).ok()?;
-            for entry in entries2.flatten() {
+        // Build two registries: one for the VM (self.native_fb_registry) with
+        // real protocol implementations, and one for the compiler (returned)
+        // which only needs the layout/type shape.
+        let build_registry = |bus_mgr: &std::sync::Arc<st_comm_serial::BusManager>, transport_map: &std::sync::Arc<st_comm_serial::TransportMap>, real: bool| -> (st_comm_api::NativeFbRegistry, bool) {
+            let mut registry = st_comm_api::NativeFbRegistry::new();
+            let mut has_modbus_rtu = false;
+            let entries = match std::fs::read_dir(&profiles_dir) {
+                Ok(e) => e,
+                Err(_) => return (registry, false),
+            };
+            for entry in entries.flatten() {
                 let path = entry.path();
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                 if ext != "yaml" && ext != "yml" { continue; }
-                if let Ok(profile) = st_comm_api::DeviceProfile::from_file(&path) {
-                    let name = profile.name.clone();
-                    reg2.register(Box::new(
-                        st_comm_sim::SimulatedNativeFb::new(&name, profile),
+                match st_comm_api::DeviceProfile::from_file(&path) {
+                    Ok(profile) => {
+                        let protocol = profile.protocol.as_deref().unwrap_or("simulated");
+                        match protocol {
+                            "modbus-rtu" => {
+                                if real {
+                                    registry.register(Box::new(
+                                        st_comm_modbus::device_fb::ModbusRtuDeviceNativeFb::new(
+                                            profile, std::sync::Arc::clone(bus_mgr),
+                                        ),
+                                    ));
+                                } else {
+                                    registry.register(Box::new(
+                                        st_comm_sim::LayoutOnlyNativeFb::new(profile.to_modbus_rtu_device_layout()),
+                                    ));
+                                }
+                                has_modbus_rtu = true;
+                            }
+                            _ => {
+                                let name = profile.name.clone();
+                                registry.register(Box::new(
+                                    st_comm_sim::SimulatedNativeFb::new(&name, profile),
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[DAP] warning: failed to load device profile {}: {e}", path.display());
+                    }
+                }
+            }
+            if has_modbus_rtu {
+                if real {
+                    registry.register(Box::new(
+                        st_comm_serial::SerialLinkNativeFb::with_transport_map(
+                            std::sync::Arc::clone(transport_map),
+                        ),
+                    ));
+                } else {
+                    // Compiler registry: layout-only SerialLink for type checking
+                    let serial_layout = st_comm_api::NativeFbLayout {
+                        type_name: "SerialLink".to_string(),
+                        fields: vec![
+                            st_comm_api::NativeFbField { name: "port".into(), data_type: st_comm_api::FieldDataType::String, var_kind: st_comm_api::NativeFbVarKind::VarInput },
+                            st_comm_api::NativeFbField { name: "baud".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::VarInput },
+                            st_comm_api::NativeFbField { name: "parity".into(), data_type: st_comm_api::FieldDataType::String, var_kind: st_comm_api::NativeFbVarKind::VarInput },
+                            st_comm_api::NativeFbField { name: "data_bits".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::VarInput },
+                            st_comm_api::NativeFbField { name: "stop_bits".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::VarInput },
+                            st_comm_api::NativeFbField { name: "connected".into(), data_type: st_comm_api::FieldDataType::Bool, var_kind: st_comm_api::NativeFbVarKind::Var },
+                            st_comm_api::NativeFbField { name: "error_code".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::Var },
+                        ],
+                    };
+                    registry.register(Box::new(
+                        st_comm_sim::LayoutOnlyNativeFb::new(serial_layout),
                     ));
                 }
             }
-            Some(reg2)
+            (registry, has_modbus_rtu)
+        };
+
+        // VM registry: real protocol implementations
+        let (vm_registry, _) = build_registry(&bus_manager, &transport_map, true);
+        if vm_registry.is_empty() {
+            return None;
         }
+        let arc = std::sync::Arc::new(vm_registry);
+        self.native_fb_registry = Some(std::sync::Arc::clone(&arc));
+
+        // Compiler registry: layout-only (no runtime deps needed, just type info)
+        let (compiler_registry, _) = build_registry(&bus_manager, &transport_map, false);
+        Some(compiler_registry)
     }
 
     fn load_project(&mut self) -> Result<st_syntax::lower::LowerResult, String> {

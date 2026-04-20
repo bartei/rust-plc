@@ -7,5 +7,6 @@
 pub mod device;
 pub mod web;
 
+pub use device::LayoutOnlyNativeFb;
 pub use device::SimulatedDevice;
 pub use device::SimulatedNativeFb;

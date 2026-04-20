@@ -177,6 +177,42 @@ impl DeviceProfile {
             fields,
         }
     }
+
+    /// Build a [`NativeFbLayout`] for a Modbus RTU device profile.
+    ///
+    /// The layout follows the two-layer model: the device takes a `link`
+    /// parameter (the serial port path from a SerialLink instance) instead of
+    /// owning serial config fields. This separates transport (link) from
+    /// protocol (device).
+    ///
+    /// Layout: link, slave_id, refresh_rate, diagnostics, profile I/O fields.
+    pub fn to_modbus_rtu_device_layout(&self) -> NativeFbLayout {
+        let mut fields = vec![
+            // -- VAR_INPUT: link binding + protocol parameters --
+            NativeFbField { name: "link".into(), data_type: FieldDataType::String, var_kind: NativeFbVarKind::VarInput },
+            NativeFbField { name: "slave_id".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::VarInput },
+            NativeFbField { name: "refresh_rate".into(), data_type: FieldDataType::Time, var_kind: NativeFbVarKind::VarInput },
+            // -- VAR: diagnostic fields --
+            NativeFbField { name: "connected".into(), data_type: FieldDataType::Bool, var_kind: NativeFbVarKind::Var },
+            NativeFbField { name: "error_code".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::Var },
+            NativeFbField { name: "io_cycles".into(), data_type: FieldDataType::Udint, var_kind: NativeFbVarKind::Var },
+            NativeFbField { name: "last_response_ms".into(), data_type: FieldDataType::Real, var_kind: NativeFbVarKind::Var },
+        ];
+
+        // -- VAR: I/O fields from the profile --
+        for pf in &self.fields {
+            fields.push(NativeFbField {
+                name: pf.name.clone(),
+                data_type: pf.data_type,
+                var_kind: NativeFbVarKind::Var,
+            });
+        }
+
+        NativeFbLayout {
+            type_name: self.name.clone(),
+            fields,
+        }
+    }
 }
 
 /// Map a [`FieldDataType`] to the corresponding [`st_ir::VarType`].

@@ -213,3 +213,83 @@ END_PROGRAM
     );
     assert_eq!(vm.get_global("g_error"), Some(&Value::Int(0)));
 }
+
+/// Verify that a modbus-rtu profile compiled with `to_modbus_rtu_device_layout()`
+/// produces a layout where the compiler and a LayoutOnlyNativeFb agree on
+/// field slot positions. The two-layer model puts `link` at slot 0 (not serial
+/// config fields), followed by slave_id, refresh_rate, diagnostics, then
+/// profile fields.
+#[test]
+fn modbus_rtu_layout_field_slots_match_st_access() {
+    use st_comm_sim::LayoutOnlyNativeFb;
+
+    let profile_yaml = r#"
+name: ModbusTestDev
+protocol: modbus-rtu
+fields:
+  - { name: AI_0, type: INT, direction: input, register: { address: 0, kind: input_register } }
+  - { name: AI_1, type: INT, direction: input, register: { address: 1, kind: input_register } }
+"#;
+    let profile = DeviceProfile::from_yaml(profile_yaml).unwrap();
+    let layout = profile.to_modbus_rtu_device_layout();
+
+    // Verify the layout starts with 'link', not serial config fields.
+    assert_eq!(layout.fields[0].name, "link",
+        "Slot 0 must be 'link', not '{}'. The device takes a link reference, not serial config.", layout.fields[0].name);
+
+    // Build a LayoutOnlyNativeFb (same as LSP/DAP use) and verify it compiles correctly
+    let mut registry = NativeFbRegistry::new();
+    registry.register(Box::new(LayoutOnlyNativeFb::new(layout)));
+
+    let source = r#"
+VAR_GLOBAL
+    g_link_works : BOOL := FALSE;
+    g_ai0 : INT := 0;
+    g_ai1 : INT := 0;
+END_VAR
+
+PROGRAM Main
+VAR
+    dev : ModbusTestDev;
+END_VAR
+    dev(
+        link := '/dev/null',
+        slave_id := 1,
+        refresh_rate := T#50ms
+    );
+    g_ai0 := dev.AI_0;
+    g_ai1 := dev.AI_1;
+    g_link_works := TRUE;
+END_PROGRAM
+"#;
+
+    let stdlib = st_syntax::multi_file::builtin_stdlib();
+    let mut all: Vec<&str> = stdlib;
+    all.push(source);
+    let parse_result = st_syntax::multi_file::parse_multi(&all);
+    assert!(parse_result.errors.is_empty(), "Parse errors: {:?}", parse_result.errors);
+
+    let module = st_compiler::compile_with_native_fbs(&parse_result.source_file, Some(&registry))
+        .expect("Compilation failed");
+
+    // Verify the compiled function's field layout matches the new device layout
+    let fb_func = module.functions.iter().find(|f| f.name == "ModbusTestDev").unwrap();
+    assert_eq!(fb_func.locals.slots[0].name, "link",
+        "Compiled slot 0 must be 'link'.");
+    assert_eq!(fb_func.locals.slots[1].name, "slave_id");
+    assert_eq!(fb_func.locals.slots[2].name, "refresh_rate");
+    assert_eq!(fb_func.locals.slots[3].name, "connected");
+    assert_eq!(fb_func.locals.slots[7].name, "AI_0");
+    assert_eq!(fb_func.locals.slots[8].name, "AI_1");
+
+    // Run and verify the program doesn't crash (execute is no-op for LayoutOnly)
+    let arc_reg = Arc::new(registry);
+    let mut vm = st_engine::vm::Vm::new_with_native_fbs(
+        module,
+        st_engine::vm::VmConfig::default(),
+        Some(arc_reg),
+    );
+    let _ = vm.run_global_init();
+    vm.scan_cycle("Main").unwrap();
+    assert_eq!(vm.get_global("g_link_works"), Some(&Value::Bool(true)));
+}

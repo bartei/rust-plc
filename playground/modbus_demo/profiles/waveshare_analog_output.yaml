@@ -1,0 +1,46 @@
+name: WaveshareAnalogOutput
+vendor: Waveshare
+protocol: modbus-rtu
+description: "Waveshare Analog Output 8CH"
+
+fields:
+  - name: AO1
+    type: UINT
+    direction: output
+    register: { address: 0, kind: holding_register }
+
+  - name: AO2
+    type: UINT
+    direction: output
+    register: { address: 1, kind: holding_register }
+
+  - name: AO3
+    type: UINT
+    direction: output
+    register: { address: 2, kind: holding_register }
+
+  - name: AO4
+    type: UINT
+    direction: output
+    register: { address: 3, kind: holding_register }
+
+  - name: AO5
+    type: UINT
+    direction: output
+    register: { address: 4, kind: holding_register }
+
+  - name: AO6
+    type: UINT
+    direction: output
+    register: { address: 5, kind: holding_register }
+
+  - name: AO7
+    type: UINT
+    direction: output
+    register: { address: 6, kind: holding_register }
+
+  - name: AO8
+    type: UINT
+    direction: output
+    register: { address: 7, kind: holding_register }
+

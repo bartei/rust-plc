@@ -12,7 +12,8 @@
 - [x] `NativeFb` trait: `type_name()`, `layout()`, `execute()`
 - [x] `NativeFbLayout`, `NativeFbField`, `NativeFbVarKind` types
 - [x] `NativeFbRegistry`: register, find (case-insensitive), all, is_empty
-- [x] `DeviceProfile::to_native_fb_layout()` — profile → layout conversion
+- [x] `DeviceProfile::to_native_fb_layout()` — simulated profile → layout conversion
+- [x] `DeviceProfile::to_modbus_rtu_device_layout()` — modbus-rtu profile → layout (link, slave_id, refresh_rate, diagnostics, profile fields)
 - [x] `field_data_type_to_var_type()` / `field_data_type_to_int_width()` helpers
 - [x] `layout_to_memory_layout()` — NativeFbLayout → st_ir::MemoryLayout
 - [x] Unit tests: registry operations, profile-to-layout, type mappings
@@ -94,7 +95,7 @@
 ## Integration Tests
 
 - [x] `native_fb_test.rs`: 5 tests (execute, state persistence, params, field write, multi-instance)
-- [x] `native_fb_integration.rs`: 3 tests (profile roundtrip, multiple devices, diagnostics)
+- [x] `native_fb_integration.rs`: 4 tests (profile roundtrip, multiple devices, diagnostics, modbus-rtu layout slots)
 - [x] Semantic tests: 3 tests (field access, unknown field, undeclared type)
 - [x] Compiler tests: 2 tests (instance compilation, field access)
 
@@ -147,16 +148,26 @@
 
 ### Remaining
 
-- [ ] Register grouping optimizer (merge consecutive registers into multi-read/write)
+- [x] Register grouping optimizer (merge consecutive registers into multi-read/write)
 - [ ] Retry logic (1 retry on timeout)
 
-### Wiring (COMPLETED)
+### Two-Layer Architecture (COMPLETED)
 
 - [x] SerialLink auto-registered when modbus-rtu profiles are present
-- [x] ModbusRtuDevice takes port/baud/parity params directly (self-contained)
-- [x] Shared transport map for link-device binding (multiple devices share same port)
-- [x] Full-stack test: ST code → compile → VM → Modbus RTU → socat → slave → verify
-- [x] Playground: `playground/modbus_demo/` with TestModbusIO profile
+- [x] Two-layer model: SerialLink (transport) + device FB (protocol)
+- [x] Device takes `link : STRING` parameter (port path from SerialLink)
+- [x] `BusManager` in `st-comm-serial/src/bus.rs` — one I/O thread per serial port
+- [x] `BusDeviceIo` trait — protocol-agnostic bus device interface
+- [x] Non-blocking scan cycle: execute() copies cached values, never touches serial port
+- [x] Batched register reads/writes (consecutive registers in single Modbus transaction)
+- [x] Round-robin device polling respecting per-device refresh_rate
+- [x] Multiple devices share one bus thread (no half-duplex contention)
+- [x] SerialLink uses AtomicBool for connection state (no transport lock on scan cycle)
+- [x] Shared transport map for link-device binding
+- [x] SerialLink registered in LSP/DAP for completions, hover, type checking
+- [x] Full-stack test: SerialLink + device with `link := serial.port` → socat → verify
+- [x] Playground: `playground/modbus_demo/` with Waveshare profiles + two-layer ST
+- [x] Manual test: real hardware with two slaves on one RS-485 bus (verified)
 - [ ] E2E test: QEMU VM with `socat` virtual serial + Modbus slave emulator
 - [ ] Raspberry Pi test: real RS-485 adapter + WAGO I/O module
 

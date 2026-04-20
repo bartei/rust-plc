@@ -195,14 +195,18 @@ fields:
 "#;
     let profile = DeviceProfile::from_yaml(profile_yaml).unwrap();
 
-    // Build registry with ModbusRtuDevice + compile + run through VM
+    // Build registry with SerialLink + ModbusRtuDevice (two-layer model)
     let transport_map = st_comm_serial::new_transport_map();
+    let bus_manager = Arc::new(st_comm_serial::BusManager::new(Arc::clone(&transport_map)));
     let mut registry = NativeFbRegistry::new();
+    registry.register(Box::new(st_comm_serial::SerialLinkNativeFb::with_transport_map(
+        Arc::clone(&transport_map),
+    )));
     registry.register(Box::new(ModbusRtuDeviceNativeFb::new(
-        profile, Arc::clone(&transport_map),
+        profile, Arc::clone(&bus_manager),
     )));
 
-    // ST source: use the Modbus device, copy DI_0 → DO_0, AI_0 → AO_0
+    // ST source: SerialLink opens the port, device uses it via link parameter
     let source = format!(r#"
 VAR_GLOBAL
     g_connected : BOOL := FALSE;
@@ -213,14 +217,19 @@ END_VAR
 
 PROGRAM Main
 VAR
-    io : TestIO;
+    serial : SerialLink;
+    io     : TestIO;
 END_VAR
-    io(
+    serial(
         port := '{port_a}',
         baud := 9600,
         parity := 'N',
         data_bits := 8,
-        stop_bits := 1,
+        stop_bits := 1
+    );
+
+    io(
+        link := serial.port,
         slave_id := 1,
         refresh_rate := T#0ms
     );
@@ -252,7 +261,12 @@ END_PROGRAM
     );
     let _ = vm.run_global_init();
 
-    // Run a few cycles — the Modbus device should communicate with the slave
+    // First scan cycle starts the background I/O thread.
+    // Subsequent cycles copy cached values from the I/O thread.
+    // We need to give the background thread time to complete at least one
+    // I/O cycle before checking the results.
+    vm.scan_cycle("Main").expect("First scan cycle failed");
+    std::thread::sleep(Duration::from_millis(500)); // Wait for background I/O
     for _ in 0..3 {
         vm.scan_cycle("Main").expect("Scan cycle failed");
     }

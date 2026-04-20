@@ -29,7 +29,7 @@ END_VAR
            data_bits := 8, stop_bits := 1);
 
     (* Read/write I/O every 50ms *)
-    io_rack(link := serial, slave_id := 1, refresh_rate := T#50ms);
+    io_rack(link := serial.port, slave_id := 1, refresh_rate := T#50ms);
 
     (* Use the I/O fields *)
     io_rack.DO_0 := io_rack.DI_0;

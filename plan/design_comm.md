@@ -18,8 +18,8 @@ VAR
 END_VAR
     serial(port := '/dev/ttyUSB0', baud := 9600, parity := 'N', data_bits := 8, stop_bits := 1);
 
-    io_rack(link := serial, slave_id := 1, refresh_rate := T#50ms);
-    pump_vfd(link := serial, slave_id := 2, refresh_rate := T#100ms);
+    io_rack(link := serial.port, slave_id := 1, refresh_rate := T#50ms);
+    pump_vfd(link := serial.port, slave_id := 2, refresh_rate := T#100ms);
 
     io_rack.DO_0 := io_rack.DI_0;
 
@@ -123,8 +123,8 @@ handle to look up the link's shared transport state.
 
 ```st
 serial(port := '/dev/ttyUSB0', baud := 9600);         (* opens the port *)
-io_rack(link := serial, slave_id := 1);                (* uses serial's transport *)
-pump_vfd(link := serial, slave_id := 2);               (* shares the same port *)
+io_rack(link := serial.port, slave_id := 1);                (* uses serial's transport *)
+pump_vfd(link := serial.port, slave_id := 2);               (* shares the same port *)
 ```
 
 Multiple devices can share a single link. The link's `execute()` manages bus access

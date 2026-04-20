@@ -36,6 +36,8 @@ pub struct SerialLinkNativeFb {
     transport_map: Arc<TransportMap>,
     /// Whether the port has been opened (latched on first call).
     initialized: Mutex<bool>,
+    /// Cached connection state — avoids locking transport on every cycle.
+    connected: std::sync::atomic::AtomicBool,
     /// The port path used to register in the transport map.
     port_path: Mutex<String>,
 }
@@ -97,6 +99,7 @@ impl SerialLinkNativeFb {
             transport: Arc::new(Mutex::new(SerialTransport::new(SerialConfig::default()))),
             transport_map,
             initialized: Mutex::new(false),
+            connected: std::sync::atomic::AtomicBool::new(false),
             port_path: Mutex::new(String::new()),
         }
     }
@@ -126,7 +129,8 @@ impl NativeFb for SerialLinkNativeFb {
         let mut initialized = self.initialized.lock().unwrap();
 
         if !*initialized {
-            // First call: extract config from VAR_INPUT fields and open the port
+            // First call: extract config from VAR_INPUT fields and open the port.
+            // This is the only time we lock the transport from the scan cycle.
             let port = match &fields[SLOT_PORT] {
                 Value::String(s) => s.clone(),
                 _ => String::new(),
@@ -158,6 +162,7 @@ impl NativeFb for SerialLinkNativeFb {
             *transport = SerialTransport::new(config);
             match transport.open() {
                 Ok(()) => {
+                    self.connected.store(true, std::sync::atomic::Ordering::Relaxed);
                     fields[SLOT_CONNECTED] = Value::Bool(true);
                     fields[SLOT_ERROR_CODE] = Value::Int(0);
                     *initialized = true;
@@ -175,26 +180,13 @@ impl NativeFb for SerialLinkNativeFb {
                 }
             }
         } else {
-            // Subsequent calls: verify port is still open, reconnect if needed
-            let transport = self.transport.lock().unwrap();
-            if transport.is_open() {
-                fields[SLOT_CONNECTED] = Value::Bool(true);
-                fields[SLOT_ERROR_CODE] = Value::Int(0);
-            } else {
-                // Port was lost — try to reopen
-                drop(transport);
-                let mut transport = self.transport.lock().unwrap();
-                match transport.open() {
-                    Ok(()) => {
-                        fields[SLOT_CONNECTED] = Value::Bool(true);
-                        fields[SLOT_ERROR_CODE] = Value::Int(0);
-                    }
-                    Err(_) => {
-                        fields[SLOT_CONNECTED] = Value::Bool(false);
-                        fields[SLOT_ERROR_CODE] = Value::Int(3); // Reconnect failed
-                    }
-                }
-            }
+            // Subsequent calls: report cached state without locking the transport.
+            // The transport is shared with the bus thread which may hold the lock
+            // for hundreds of milliseconds during Modbus I/O — we must not block
+            // the scan cycle waiting for it.
+            let is_connected = self.connected.load(std::sync::atomic::Ordering::Relaxed);
+            fields[SLOT_CONNECTED] = Value::Bool(is_connected);
+            fields[SLOT_ERROR_CODE] = Value::Int(if is_connected { 0 } else { 3 });
         }
     }
 }

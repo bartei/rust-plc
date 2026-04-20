@@ -127,7 +127,7 @@ END_VAR
            data_bits := 8, stop_bits := 1);
 
     (* Read analog inputs every 100ms *)
-    analog(link := serial, slave_id := 1, refresh_rate := T#100ms);
+    analog(link := serial.port, slave_id := 1, refresh_rate := T#100ms);
 
     (* Process the analog values *)
     voltage := INT_TO_REAL(IN1 := analog.CH_0);
@@ -232,7 +232,7 @@ VAR
 END_VAR
     serial(port := '/dev/ttyUSB0', baud := 19200, parity := 'E',
            data_bits := 8, stop_bits := 1);
-    vfd(link := serial, slave_id := 2, refresh_rate := T#100ms);
+    vfd(link := serial.port, slave_id := 2, refresh_rate := T#100ms);
 
     (* Start the drive at 30 Hz *)
     IF vfd.READY AND NOT vfd.FAULT THEN
@@ -337,9 +337,9 @@ END_VAR
            data_bits := 8, stop_bits := 1);
 
     (* Each device has a unique slave_id *)
-    io_rack(link := serial, slave_id := 1, refresh_rate := T#50ms);
-    vfd(link := serial, slave_id := 2, refresh_rate := T#100ms);
-    temp(link := serial, slave_id := 3, refresh_rate := T#500ms);
+    io_rack(link := serial.port, slave_id := 1, refresh_rate := T#50ms);
+    vfd(link := serial.port, slave_id := 2, refresh_rate := T#100ms);
+    temp(link := serial.port, slave_id := 3, refresh_rate := T#500ms);
 
     (* Use different refresh rates based on priority:
        - I/O rack: fast (50ms) for responsive digital control

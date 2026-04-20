@@ -180,6 +180,33 @@ impl NativeFb for SimulatedNativeFb {
     }
 }
 
+/// A lightweight `NativeFb` that only provides a layout for type-checking.
+/// Used by the LSP to register device types (e.g. modbus-rtu) without needing
+/// the runtime implementation crate as a dependency.
+pub struct LayoutOnlyNativeFb {
+    layout: NativeFbLayout,
+}
+
+impl LayoutOnlyNativeFb {
+    pub fn new(layout: NativeFbLayout) -> Self {
+        Self { layout }
+    }
+}
+
+impl NativeFb for LayoutOnlyNativeFb {
+    fn type_name(&self) -> &str {
+        &self.layout.type_name
+    }
+
+    fn layout(&self) -> &NativeFbLayout {
+        &self.layout
+    }
+
+    fn execute(&self, _fields: &mut [Value]) {
+        // No-op: this FB is only used for type information in the LSP.
+    }
+}
+
 /// Convert an `IoValue` to an `st_ir::Value`.
 fn io_value_to_vm_value(io: &IoValue) -> Value {
     match io {
