@@ -8,18 +8,21 @@
 
 ---
 
-Write, analyze, compile, run, and debug PLC programs in [Structured Text](https://en.wikipedia.org/wiki/Structured_text) — all from your terminal or VSCode.
+Write, analyze, compile, run, and debug PLC programs in [Structured Text](https://en.wikipedia.org/wiki/Structured_text) — all from your terminal or VSCode. Connect to real hardware via Modbus RTU, deploy to embedded targets, and monitor live variables over WebSocket.
 
 ```st
 PROGRAM TemperatureControl
 VAR
-    sensor : REAL := 22.0;
-    setpoint : REAL := 50.0;
-    heater : BOOL := FALSE;
+    serial  : SerialLink;
+    sensor  : PT100Module;
+    heater  : BOOL := FALSE;
 END_VAR
-    IF sensor < setpoint - 2.0 THEN
+    serial(port := '/dev/ttyUSB0', baud := 9600, parity := 'N', data_bits := 8, stop_bits := 1);
+    sensor(link := serial.port, slave_id := 1, refresh_rate := T#100ms);
+
+    IF sensor.TEMP_0 < 48.0 THEN
         heater := TRUE;
-    ELSIF sensor > setpoint + 2.0 THEN
+    ELSIF sensor.TEMP_0 > 52.0 THEN
         heater := FALSE;
     END_IF;
 END_PROGRAM
@@ -30,14 +33,19 @@ END_PROGRAM
 | Feature | Description |
 |---------|-------------|
 | **Compiler** | Full ST parser with error recovery, 30+ semantic diagnostics, register-based bytecode compiler |
-| **Runtime** | Bytecode VM with PLC scan cycle engine, local/global variable persistence, FB instance state |
+| **Runtime** | Bytecode VM with PLC scan cycle engine, configurable cycle time, global initialization |
 | **Standard Library** | Counters (CTU/CTD/CTUD), timers (TON/TOF/TP), edge detection (R_TRIG/F_TRIG), math, trig, type conversions |
 | **LSP Server** | 16 language features: diagnostics, completion, hover, go-to-def, references, rename, formatting, and more |
-| **DAP Debugger** | Breakpoints, stepping, variable inspection, force/unforce, scan-cycle-aware continue |
+| **DAP Debugger** | Breakpoints, stepping, variable inspection, force/unforce, scan-cycle-aware continue, remote attach |
+| **Device Communication** | Modbus RTU over RS-485/RS-232 with YAML device profiles, batched register I/O, non-blocking async bus threads |
+| **OOP** | Classes, interfaces, properties, inheritance, virtual dispatch — full IEC 61131-3 OOP |
 | **Online Change** | Hot-reload programs without stopping — variable state migrated automatically |
 | **Monitor Server** | WebSocket-based live variable dashboard with force/unforce support |
+| **Remote Deployment** | Bundle, upload, and manage programs on embedded Linux targets (Raspberry Pi, x86_64, aarch64) |
+| **OPC-UA Server** | OPC-UA variable browsing and read/write for SCADA integration |
 | **Multi-file Projects** | Autodiscovery of `.st` files, optional `plc-project.yaml` configuration |
 | **Pointers** | `REF_TO`, `REF()`, `^` dereference, `NULL` — full IEC 61131-3 pointer support |
+| **RETAIN/PERSISTENT** | Variable persistence across power cycles with automatic checkpointing |
 
 ## Quick Start
 
@@ -45,6 +53,7 @@ END_PROGRAM
 
 - [Rust](https://rustup.rs/) 1.85+
 - [Node.js](https://nodejs.org/) 18+ (only for the VSCode extension)
+- `libudev-dev` and `pkg-config` (Linux, for serial port support)
 
 ### Build
 
@@ -107,7 +116,9 @@ Full documentation is available at **[bartei.github.io/rust-plc](https://bartei.
 - [VSCode Tutorial](https://bartei.github.io/rust-plc/getting-started/vscode-tutorial.html)
 - [Language Reference](https://bartei.github.io/rust-plc/language/program-structure.html)
 - [Standard Library](https://bartei.github.io/rust-plc/language/standard-library.html)
+- [Device Communication](https://bartei.github.io/rust-plc/communication/overview.html)
 - [CLI Reference](https://bartei.github.io/rust-plc/cli/commands.html)
+- [Deployment & Remote Management](https://bartei.github.io/rust-plc/deployment/overview.html)
 - [Architecture](https://bartei.github.io/rust-plc/architecture/overview.html)
 
 ## Project Structure
@@ -115,20 +126,31 @@ Full documentation is available at **[bartei.github.io/rust-plc](https://bartei.
 ```
 rust-plc/
 ├── crates/
-│   ├── st-grammar/     Tree-sitter ST parser
-│   ├── st-syntax/      AST types, CST→AST lowering, project discovery
-│   ├── st-semantics/   Type checking, symbol tables, diagnostics
-│   ├── st-ir/          Bytecode instruction set (50+ instructions)
-│   ├── st-compiler/    AST → bytecode compiler
-│   ├── st-engine/      VM, scan cycle engine, online change, debug hooks
-│   ├── st-lsp/         Language Server Protocol (16 features)
-│   ├── st-dap/         Debug Adapter Protocol
-│   ├── st-monitor/     WebSocket monitor server
-│   └── st-cli/         CLI entry point
-├── stdlib/             Standard library (.st files, auto-included)
-├── editors/vscode/     VSCode extension (TypeScript)
-├── playground/         Example programs
-└── docs/               mdBook documentation
+│   ├── st-grammar/        Tree-sitter ST parser
+│   ├── st-syntax/         AST types, CST→AST lowering, project discovery
+│   ├── st-semantics/      Type checking, symbol tables, diagnostics
+│   ├── st-ir/             Bytecode instruction set (50+ instructions)
+│   ├── st-compiler/       AST → bytecode compiler
+│   ├── st-engine/         VM, scan cycle engine, online change, debug hooks
+│   ├── st-lsp/            Language Server Protocol (16 features)
+│   ├── st-dap/            Debug Adapter Protocol (local + remote attach)
+│   ├── st-monitor/        WebSocket monitor server
+│   ├── st-deploy/         Bundle creation and deployment
+│   ├── st-target-agent/   Embedded target agent (program lifecycle, HTTP API)
+│   ├── st-runtime/        Runtime binary for target devices
+│   ├── st-comm-api/       Communication framework API (NativeFb, profiles)
+│   ├── st-comm-serial/    RS-485/RS-232 serial link + bus manager
+│   ├── st-comm-modbus/    Modbus RTU protocol (FC01–FC10, batched I/O)
+│   ├── st-comm-sim/       Simulated devices with web UI
+│   ├── st-opcua-server/   OPC-UA server for SCADA integration
+│   └── st-cli/            CLI entry point (check, run, compile, fmt, bundle)
+├── stdlib/                Standard library (.st files, auto-included)
+├── profiles/              Shared device profiles (Modbus register maps)
+├── editors/vscode/        VSCode extension (TypeScript)
+├── playground/            Example programs and demo projects
+├── tests/                 E2E deployment tests (QEMU x86_64 + aarch64)
+├── schemas/               JSON schemas (device profiles)
+└── docs/                  mdBook documentation
 ```
 
 ## IEC 61131-3 References
@@ -140,7 +162,7 @@ rust-plc/
 ## Testing
 
 ```bash
-# Run all 510+ tests
+# Run all 1170+ tests
 cargo test --workspace
 
 # Run with coverage
