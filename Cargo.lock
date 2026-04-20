@@ -2371,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "st-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -2397,7 +2397,7 @@ dependencies = [
 
 [[package]]
 name = "st-comm-api"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -2409,7 +2409,7 @@ dependencies = [
 
 [[package]]
 name = "st-comm-modbus"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serialport",
  "st-comm-api",
@@ -2423,7 +2423,7 @@ dependencies = [
 
 [[package]]
 name = "st-comm-serial"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serialport",
  "st-comm-api",
@@ -2436,7 +2436,7 @@ dependencies = [
 
 [[package]]
 name = "st-comm-sim"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "futures-util",
  "serde",
@@ -2454,7 +2454,7 @@ dependencies = [
 
 [[package]]
 name = "st-compiler"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "st-comm-api",
  "st-ir",
@@ -2465,7 +2465,7 @@ dependencies = [
 
 [[package]]
 name = "st-dap"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "dap",
  "serde_json",
@@ -2486,7 +2486,7 @@ dependencies = [
 
 [[package]]
 name = "st-deploy"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "flate2",
@@ -2506,7 +2506,7 @@ dependencies = [
 
 [[package]]
 name = "st-engine"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -2523,7 +2523,7 @@ dependencies = [
 
 [[package]]
 name = "st-grammar"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cc",
  "tree-sitter",
@@ -2531,14 +2531,14 @@ dependencies = [
 
 [[package]]
 name = "st-ir"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "st-lsp"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde_json",
  "st-comm-api",
@@ -2554,7 +2554,7 @@ dependencies = [
 
 [[package]]
 name = "st-monitor"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "futures-util",
  "serde",
@@ -2570,7 +2570,7 @@ dependencies = [
 
 [[package]]
 name = "st-opcua-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-opcua-client",
  "async-opcua-core-namespace",
@@ -2588,7 +2588,7 @@ dependencies = [
 
 [[package]]
 name = "st-runtime"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "clap",
@@ -2612,7 +2612,7 @@ dependencies = [
 
 [[package]]
 name = "st-semantics"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "st-comm-api",
  "st-ir",
@@ -2622,7 +2622,7 @@ dependencies = [
 
 [[package]]
 name = "st-syntax"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "glob",
  "serde",
@@ -2634,7 +2634,7 @@ dependencies = [
 
 [[package]]
 name = "st-target-agent"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
