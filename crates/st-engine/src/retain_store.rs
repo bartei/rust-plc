@@ -67,7 +67,7 @@ fn capture_instance_fields(
         // Skip nested composite types for now
         if matches!(
             field.ty,
-            VarType::FbInstance(_) | VarType::ClassInstance(_) | VarType::Struct(_)
+            VarType::FbInstance(_) | VarType::ClassInstance(_) | VarType::Struct(_) | VarType::Array(_)
         ) {
             continue;
         }
@@ -157,7 +157,7 @@ pub fn capture_snapshot(vm: &Vm) -> RetainSnapshot {
                             .unwrap_or(Value::default_for_type(fb_slot.ty));
                         if matches!(
                             fb_slot.ty,
-                            VarType::FbInstance(_) | VarType::ClassInstance(_) | VarType::Struct(_)
+                            VarType::FbInstance(_) | VarType::ClassInstance(_) | VarType::Struct(_) | VarType::Array(_)
                         ) {
                             continue;
                         }
@@ -178,7 +178,7 @@ pub fn capture_snapshot(vm: &Vm) -> RetainSnapshot {
                     }
                     continue;
                 }
-                VarType::ClassInstance(_) => {
+                VarType::ClassInstance(_) | VarType::Array(_) => {
                     continue;
                 }
                 _ => {}

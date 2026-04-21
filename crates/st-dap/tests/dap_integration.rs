@@ -2039,3 +2039,627 @@ END_PROGRAM\n";
         "Error message should direct user to the Problems panel, got: {error_msg}"
     );
 }
+
+// =============================================================================
+// Array variable tests — debug watch & monitor
+// =============================================================================
+
+/// ST program with array variables for watch/monitor testing.
+/// Declares arrays of various types and writes known values.
+const ARRAY_PROGRAM: &str = "\
+PROGRAM Main
+VAR
+    arr : ARRAY[1..5] OF INT;
+    total : INT := 0;
+END_VAR
+    arr[1] := 10;
+    arr[2] := 20;
+    arr[3] := 30;
+    arr[4] := 40;
+    arr[5] := 50;
+    total := arr[1] + arr[2] + arr[3];
+END_PROGRAM
+";
+
+#[test]
+fn test_array_appears_in_locals_with_array_type() {
+    // When an array variable is declared, it must appear in the Locals
+    // scope with a type that indicates it IS an array (e.g.
+    // "ARRAY[1..5] OF INT"), not just a bare "INT".
+    let messages = run_dap_session(
+        ARRAY_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "scopes", Some(json!({ "frameId": 0 }))),
+            dap_request(4, "variables", Some(json!({ "variablesReference": 1000 }))),
+            dap_request(5, "disconnect", None),
+        ],
+    );
+
+    let vars_resp = find_response(&messages, 4).expect("Expected variables response");
+    assert!(vars_resp["success"].as_bool().unwrap_or(false));
+    let vars = vars_resp["body"]["variables"].as_array().unwrap();
+    let var_names: Vec<&str> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+
+    // arr must be present
+    assert!(
+        var_names.iter().any(|n| n.eq_ignore_ascii_case("arr")),
+        "Expected 'arr' in locals, got: {var_names:?}"
+    );
+
+    // Its type must mention ARRAY, not just INT
+    let arr_var = vars
+        .iter()
+        .find(|v| v["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("arr")))
+        .unwrap();
+    let arr_type = arr_var["type"].as_str().unwrap_or("");
+    eprintln!("arr type = {arr_type}");
+    assert!(
+        arr_type.to_uppercase().contains("ARRAY"),
+        "Array variable type should contain 'ARRAY', got '{arr_type}'"
+    );
+}
+
+#[test]
+fn test_array_is_expandable_in_locals() {
+    // Array variables must have variablesReference > 0, making them
+    // expandable in the VS Code Variables panel — just like FB instances.
+    let messages = run_dap_session(
+        ARRAY_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "scopes", Some(json!({ "frameId": 0 }))),
+            dap_request(4, "variables", Some(json!({ "variablesReference": 1000 }))),
+            dap_request(5, "disconnect", None),
+        ],
+    );
+
+    let vars_resp = find_response(&messages, 4).unwrap();
+    let vars = vars_resp["body"]["variables"].as_array().unwrap();
+    let arr_var = vars
+        .iter()
+        .find(|v| v["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("arr")))
+        .expect("Expected 'arr' in locals");
+
+    let arr_ref = arr_var["variablesReference"].as_i64().unwrap_or(0);
+    eprintln!("arr variablesReference = {arr_ref}");
+    assert!(
+        arr_ref > 0,
+        "Array 'arr' should have variablesReference > 0 (expandable), got {arr_ref}"
+    );
+
+    // Scalar 'total' should NOT be expandable
+    let total_var = vars
+        .iter()
+        .find(|v| v["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("total")))
+        .expect("Expected 'total' in locals");
+    let total_ref = total_var["variablesReference"].as_i64().unwrap_or(0);
+    assert_eq!(
+        total_ref, 0,
+        "Scalar 'total' should have variablesReference = 0"
+    );
+}
+
+#[test]
+fn test_array_expansion_shows_indexed_elements() {
+    // Expanding an ARRAY[1..5] OF INT must show 5 children named
+    // [1], [2], [3], [4], [5] — each with type INT and a value.
+    //
+    // After scopes request: locals=1000, globals=1001.
+    // The arr variable in locals gets the next ref (1002).
+    let messages = run_dap_session(
+        ARRAY_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            // Step past the five arr[i] := ... assignments
+            dap_request(4, "next", Some(json!({ "threadId": 1 }))),
+            dap_request(5, "next", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "next", Some(json!({ "threadId": 1 }))),
+            dap_request(7, "next", Some(json!({ "threadId": 1 }))),
+            dap_request(8, "next", Some(json!({ "threadId": 1 }))),
+            // Get locals
+            dap_request(9, "scopes", Some(json!({ "frameId": 0 }))),
+            dap_request(10, "variables", Some(json!({ "variablesReference": 1000 }))),
+            // Expand the array (ref 1002 — after locals=1000, globals=1001)
+            dap_request(11, "variables", Some(json!({ "variablesReference": 1002 }))),
+            dap_request(12, "disconnect", None),
+        ],
+    );
+
+    let children_resp = find_response(&messages, 11).unwrap();
+    assert!(
+        children_resp["success"].as_bool().unwrap_or(false),
+        "Variables request for array expansion should succeed"
+    );
+    let children = children_resp["body"]["variables"].as_array().unwrap();
+    let child_names: Vec<&str> = children
+        .iter()
+        .filter_map(|v| v["name"].as_str())
+        .collect();
+    eprintln!("Array children: {child_names:?}");
+
+    // Must have exactly 5 elements
+    assert_eq!(
+        children.len(),
+        5,
+        "ARRAY[1..5] should have 5 elements, got {}: {child_names:?}",
+        children.len()
+    );
+
+    // Names must be [1]..[5]
+    for i in 1..=5 {
+        let expected = format!("[{i}]");
+        assert!(
+            child_names.iter().any(|n| *n == expected),
+            "Expected element '{expected}' in array children, got: {child_names:?}"
+        );
+    }
+
+    // Each element should have type INT
+    for child in children {
+        let ty = child["type"].as_str().unwrap_or("");
+        assert!(
+            ty.contains("INT"),
+            "Array element type should be INT, got '{ty}'"
+        );
+    }
+
+    // Verify values: arr[1]=10, arr[2]=20, arr[3]=30, arr[4]=40, arr[5]=50
+    for (idx, expected_val) in [(1, "10"), (2, "20"), (3, "30"), (4, "40"), (5, "50")] {
+        let name = format!("[{idx}]");
+        if let Some(el) = children.iter().find(|v| v["name"].as_str() == Some(&name)) {
+            let val = el["value"].as_str().unwrap_or("");
+            assert_eq!(
+                val, expected_val,
+                "arr[{idx}] should be {expected_val}, got '{val}'"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_evaluate_array_element_expression() {
+    // Evaluating "arr[1]" in the Watch panel should return the
+    // element value, not <unknown>.
+    let messages = run_dap_session(
+        ARRAY_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            // Step past arr[1] := 10 and arr[2] := 20
+            dap_request(4, "next", Some(json!({ "threadId": 1 }))),
+            dap_request(5, "next", Some(json!({ "threadId": 1 }))),
+            // Evaluate arr[1]
+            dap_request(6, "evaluate", Some(json!({
+                "expression": "arr[1]",
+                "context": "watch",
+                "frameId": 0
+            }))),
+            // Evaluate arr[2]
+            dap_request(7, "evaluate", Some(json!({
+                "expression": "arr[2]",
+                "context": "watch",
+                "frameId": 0
+            }))),
+            dap_request(8, "disconnect", None),
+        ],
+    );
+
+    let resp1 = find_response(&messages, 6).unwrap();
+    let result1 = resp1["body"]["result"].as_str().unwrap_or("<missing>");
+    eprintln!("arr[1] = {result1}");
+    assert_ne!(
+        result1, "<unknown>",
+        "arr[1] should resolve to a value, not <unknown>"
+    );
+    assert_eq!(result1, "10", "arr[1] should be 10 after assignment");
+
+    let resp2 = find_response(&messages, 7).unwrap();
+    let result2 = resp2["body"]["result"].as_str().unwrap_or("<missing>");
+    eprintln!("arr[2] = {result2}");
+    assert_ne!(
+        result2, "<unknown>",
+        "arr[2] should resolve to a value, not <unknown>"
+    );
+    assert_eq!(result2, "20", "arr[2] should be 20 after assignment");
+}
+
+#[test]
+fn test_evaluate_array_is_expandable_in_watch() {
+    // When the user adds "arr" to the Watch panel, EvaluateResponse must
+    // have variablesReference > 0 so VS Code shows the expand arrow.
+    let messages = run_dap_session(
+        ARRAY_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            // Evaluate "arr" as a Watch expression
+            dap_request(3, "evaluate", Some(json!({
+                "expression": "arr",
+                "context": "watch",
+                "frameId": 0
+            }))),
+            // Evaluate a scalar for comparison
+            dap_request(4, "evaluate", Some(json!({
+                "expression": "total",
+                "context": "watch",
+                "frameId": 0
+            }))),
+            dap_request(5, "disconnect", None),
+        ],
+    );
+
+    // "arr" should be expandable (variablesReference > 0)
+    let arr_resp = find_response(&messages, 3).unwrap();
+    let arr_ref = arr_resp["body"]["variablesReference"].as_i64().unwrap_or(0);
+    let arr_type = arr_resp["body"]["type"].as_str().unwrap_or("");
+    let arr_result = arr_resp["body"]["result"].as_str().unwrap_or("");
+    eprintln!("Watch arr: result={arr_result:?} type={arr_type:?} ref={arr_ref}");
+    assert!(
+        arr_ref > 0,
+        "Evaluate('arr') should return variablesReference > 0 for expandable array, got {arr_ref}"
+    );
+    assert!(
+        arr_type.to_uppercase().contains("ARRAY"),
+        "Type should indicate array, got '{arr_type}'"
+    );
+    assert_ne!(arr_result, "<unknown>", "arr should have a summary value");
+
+    // Scalar "total" should NOT be expandable
+    let total_resp = find_response(&messages, 4).unwrap();
+    let total_ref = total_resp["body"]["variablesReference"].as_i64().unwrap_or(0);
+    assert_eq!(
+        total_ref, 0,
+        "Scalar 'total' should have variablesReference = 0"
+    );
+}
+
+#[test]
+fn test_watch_array_variable_in_telemetry() {
+    // When watching an array prefix like "Main.arr", the plc/cycleStats
+    // telemetry payload must include all array elements — either as flat
+    // entries (Main.arr[1], Main.arr[2], ...) or as a tree node with
+    // children.
+    let messages = run_dap_session(
+        ARRAY_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            // Watch the array
+            dap_request(
+                4,
+                "evaluate",
+                Some(json!({ "expression": "watchVariables Main.arr" })),
+            ),
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "disconnect", None),
+        ],
+    );
+
+    let payloads = find_cycle_stats_payloads(&messages);
+    assert!(!payloads.is_empty(), "Expected telemetry events");
+    let last = payloads.last().unwrap();
+    let vars = last["variables"].as_array().unwrap();
+    let var_names: Vec<&str> = vars
+        .iter()
+        .filter_map(|v| v["name"].as_str())
+        .collect();
+    eprintln!("Telemetry variables: {var_names:?}");
+
+    // Array elements should be present — either as flat "Main.arr[1]" entries
+    // or as a tree with "Main.arr" parent containing children.
+    let flat_elements: Vec<&&str> = var_names
+        .iter()
+        .filter(|n| n.starts_with("Main.arr["))
+        .collect();
+    let tree_parent = vars
+        .iter()
+        .find(|v| {
+            v["name"]
+                .as_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case("Main.arr"))
+        });
+    let has_tree = tree_parent
+        .and_then(|p| p["children"].as_array())
+        .map(|c| !c.is_empty())
+        .unwrap_or(false);
+
+    assert!(
+        flat_elements.len() >= 5 || has_tree,
+        "Expected 5 array element entries (Main.arr[1]..Main.arr[5]) or a tree \
+         node with children, got flat={flat_elements:?}, has_tree={has_tree}"
+    );
+}
+
+#[test]
+fn test_array_in_var_catalog() {
+    // The plc/varCatalog telemetry event should list array elements so
+    // the Monitor panel's autocomplete knows about them.
+    let messages = run_dap_session(
+        ARRAY_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "disconnect", None),
+        ],
+    );
+
+    let catalog_events: Vec<&serde_json::Value> = messages
+        .iter()
+        .filter_map(|m| {
+            if m["type"].as_str() != Some("event")
+                || m["event"].as_str() != Some("output")
+            {
+                return None;
+            }
+            let body = &m["body"];
+            if body["category"].as_str() != Some("telemetry")
+                || body["output"].as_str() != Some("plc/varCatalog")
+            {
+                return None;
+            }
+            Some(&body["data"])
+        })
+        .collect();
+
+    assert!(
+        !catalog_events.is_empty(),
+        "Expected plc/varCatalog telemetry event"
+    );
+    let catalog = catalog_events[0];
+    let vars = catalog["variables"].as_array().unwrap();
+    let names: Vec<&str> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+    eprintln!("Catalog entries: {names:?}");
+
+    // Array elements should appear in the catalog with indexed names.
+    // Either individual entries like "Main.arr[1]" or a parent "Main.arr".
+    let arr_entries: Vec<&&str> = names
+        .iter()
+        .filter(|n| n.to_lowercase().starts_with("main.arr"))
+        .collect();
+    assert!(
+        !arr_entries.is_empty(),
+        "Catalog should contain entries for 'Main.arr', got: {names:?}"
+    );
+
+    // If entries are element-level, there should be at least 5
+    let indexed_entries: Vec<&&str> = names
+        .iter()
+        .filter(|n| n.starts_with("Main.arr["))
+        .collect();
+    if !indexed_entries.is_empty() {
+        assert!(
+            indexed_entries.len() >= 5,
+            "Expected at least 5 indexed array catalog entries, got: {indexed_entries:?}"
+        );
+        // Each should have type INT
+        for idx_name in &indexed_entries {
+            let entry = vars
+                .iter()
+                .find(|v| v["name"].as_str() == Some(**idx_name));
+            if let Some(e) = entry {
+                let ty = e["type"].as_str().unwrap_or("");
+                assert!(
+                    ty.contains("INT"),
+                    "Array element catalog type should be INT, got '{ty}' for {idx_name}"
+                );
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Simulated VS Code Monitor panel — compound-type tree watch
+// =============================================================================
+
+/// ST program with nested FB hierarchy for Monitor panel tree testing.
+const NESTED_FB_PROGRAM: &str = "\
+FUNCTION_BLOCK Inner
+VAR_INPUT x : INT; END_VAR
+VAR_OUTPUT y : INT; END_VAR
+    y := x * 2;
+END_FUNCTION_BLOCK
+
+FUNCTION_BLOCK Outer
+VAR_INPUT cmd : BOOL; END_VAR
+VAR
+    sub : Inner;
+    state : INT := 0;
+END_VAR
+    state := state + 1;
+    sub(x := state);
+END_FUNCTION_BLOCK
+
+PROGRAM Main
+VAR
+    fb : Outer;
+    counter : INT := 0;
+    arr : ARRAY[1..3] OF INT;
+END_VAR
+    fb(cmd := TRUE);
+    counter := counter + 1;
+    arr[1] := 10;
+    arr[2] := 20;
+    arr[3] := 30;
+END_PROGRAM
+";
+
+#[test]
+fn test_vscode_watch_fb_parent_in_telemetry() {
+    // Simulates the VS Code Monitor panel flow:
+    // 1. User adds "Main.fb" to the watch list
+    // 2. Panel sends watchVariables command
+    // 3. On continue, telemetry pushes all descendant fields
+    // 4. Panel renders a collapsible tree
+    let messages = run_dap_session(
+        NESTED_FB_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(
+                4,
+                "evaluate",
+                Some(json!({ "expression": "watchVariables Main.fb" })),
+            ),
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "disconnect", None),
+        ],
+    );
+
+    let payloads = find_cycle_stats_payloads(&messages);
+    assert!(!payloads.is_empty(), "Expected telemetry events");
+    let last = payloads.last().unwrap();
+    let vars = last["variables"].as_array().unwrap();
+    let var_names: Vec<&str> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+    eprintln!("Telemetry variables for Main.fb: {var_names:?}");
+
+    // All descendant flat entries must be present
+    assert!(
+        var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.cmd")),
+        "Should include Main.fb.cmd: {var_names:?}"
+    );
+    assert!(
+        var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.state")),
+        "Should include Main.fb.state: {var_names:?}"
+    );
+    assert!(
+        var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.sub.x")),
+        "Should include nested Main.fb.sub.x: {var_names:?}"
+    );
+    assert!(
+        var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.sub.y")),
+        "Should include nested Main.fb.sub.y: {var_names:?}"
+    );
+    // Unrelated variables must NOT leak
+    assert!(
+        !var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.counter")),
+        "Should NOT include Main.counter: {var_names:?}"
+    );
+
+    // Tree parent should exist with children
+    let fb_entry = vars.iter().find(|v| {
+        v["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("Main.fb"))
+    });
+    assert!(fb_entry.is_some(), "Should have tree parent 'Main.fb': {var_names:?}");
+    let children = fb_entry.unwrap()["children"].as_array();
+    assert!(
+        children.is_some(),
+        "Main.fb should have a 'children' array for tree rendering"
+    );
+    let child_names: Vec<&str> = children
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    eprintln!("Main.fb tree children: {child_names:?}");
+    assert!(
+        child_names.iter().any(|n| n.eq_ignore_ascii_case("cmd")),
+        "Tree children should include 'cmd': {child_names:?}"
+    );
+    assert!(
+        child_names.iter().any(|n| n.eq_ignore_ascii_case("sub")),
+        "Tree children should include nested FB 'sub': {child_names:?}"
+    );
+}
+
+#[test]
+fn test_vscode_watch_entire_main_in_telemetry() {
+    // User watches "Main" — should get everything: scalars, FB fields,
+    // array elements, all nested.
+    let messages = run_dap_session(
+        NESTED_FB_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(
+                4,
+                "evaluate",
+                Some(json!({ "expression": "watchVariables Main" })),
+            ),
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "disconnect", None),
+        ],
+    );
+
+    let payloads = find_cycle_stats_payloads(&messages);
+    assert!(!payloads.is_empty(), "Expected telemetry events");
+    let last = payloads.last().unwrap();
+    let vars = last["variables"].as_array().unwrap();
+    let var_names: Vec<&str> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+    eprintln!("Telemetry variables for Main: {var_names:?}");
+
+    // Scalar
+    assert!(
+        var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.counter")),
+        "Should include scalar Main.counter: {var_names:?}"
+    );
+    // Nested FB fields
+    assert!(
+        var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.state")),
+        "Should include Main.fb.state: {var_names:?}"
+    );
+    assert!(
+        var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.sub.y")),
+        "Should include Main.fb.sub.y: {var_names:?}"
+    );
+    // Array elements
+    assert!(
+        var_names.iter().any(|n| n.starts_with("Main.arr[")),
+        "Should include array elements Main.arr[*]: {var_names:?}"
+    );
+}
+
+#[test]
+fn test_vscode_watch_mixed_fb_and_array() {
+    // Watch both a FB parent and an array parent simultaneously.
+    let messages = run_dap_session(
+        NESTED_FB_PROGRAM,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            dap_request(3, "configurationDone", None),
+            dap_request(
+                4,
+                "evaluate",
+                Some(json!({ "expression": "watchVariables Main.fb,Main.arr" })),
+            ),
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "disconnect", None),
+        ],
+    );
+
+    let payloads = find_cycle_stats_payloads(&messages);
+    assert!(!payloads.is_empty(), "Expected telemetry events");
+    let last = payloads.last().unwrap();
+    let vars = last["variables"].as_array().unwrap();
+    let var_names: Vec<&str> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+    eprintln!("Telemetry for Main.fb + Main.arr: {var_names:?}");
+
+    // FB fields present
+    assert!(
+        var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.state")),
+        "Should include Main.fb.state: {var_names:?}"
+    );
+    // Array elements present
+    assert!(
+        var_names.iter().any(|n| *n == "Main.arr[1]"),
+        "Should include Main.arr[1]: {var_names:?}"
+    );
+    assert!(
+        var_names.iter().any(|n| *n == "Main.arr[3]"),
+        "Should include Main.arr[3]: {var_names:?}"
+    );
+    // Counter excluded (not in watch list)
+    assert!(
+        !var_names.iter().any(|n| n.eq_ignore_ascii_case("Main.counter")),
+        "Should NOT include Main.counter: {var_names:?}"
+    );
+}

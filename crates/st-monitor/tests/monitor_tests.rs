@@ -35,6 +35,7 @@ async fn connect(addr: &str) -> WsStream {
 }
 
 /// Send a JSON request and wait for the next non-push response.
+/// Skips any variableUpdate pushes that arrive in between.
 async fn request(ws: &mut WsStream, req: Value) -> Value {
     ws.send(Message::Text(serde_json::to_string(&req).unwrap()))
         .await
@@ -50,6 +51,29 @@ async fn request(ws: &mut WsStream, req: Value) -> Value {
             // Skip pushed variableUpdate messages
             if val.get("type").and_then(|t| t.as_str()) == Some("variableUpdate") {
                 continue;
+            }
+            return val;
+        }
+    }
+}
+
+/// Receive the next variableUpdate that has a non-empty variables array.
+/// Skips empty pushes from subscribe-triggered broadcasts.
+async fn recv_nonempty(ws: &mut WsStream) -> Value {
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timeout waiting for non-empty variableUpdate")
+            .expect("closed")
+            .expect("error");
+        if let Message::Text(text) = msg {
+            let val: Value = serde_json::from_str(&text).unwrap();
+            if val.get("type").and_then(|t| t.as_str()) == Some("variableUpdate") {
+                let vars = val.get("variables").and_then(|v| v.as_array());
+                if vars.is_some_and(|v| !v.is_empty()) {
+                    return val;
+                }
+                continue; // skip empty pushes
             }
             return val;
         }
@@ -280,16 +304,14 @@ async fn test_push_delivers_subscribed_variables() {
     let (handle, addr) = start_server().await;
     let mut ws = connect(&addr).await;
 
-    // Subscribe to "x"
     request(
         &mut ws,
         json!({ "method": "subscribe", "params": { "variables": ["x"], "interval_ms": 0 }}),
     ).await;
 
-    // Small delay so the push task's broadcast subscription is active
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Wait past the push throttle so the next broadcast isn't skipped
+    tokio::time::sleep(Duration::from_millis(60)).await;
 
-    // Push an update from the "engine"
     handle.update_variables(
         vec![
             VariableValue { name: "x".into(), value: "42".into(), var_type: "INT".into(), forced: false },
@@ -298,8 +320,7 @@ async fn test_push_delivers_subscribed_variables() {
         CycleInfoData { cycle_count: 10, ..Default::default() },
     );
 
-    // Should receive a variableUpdate with only "x" (not "y")
-    let push = recv(&mut ws).await;
+    let push = recv_nonempty(&mut ws).await;
     assert_eq!(push["type"], "variableUpdate");
     assert_eq!(push["cycle"], 10);
     let vars = push["variables"].as_array().unwrap();
@@ -313,20 +334,18 @@ async fn test_push_stops_after_unsubscribe() {
     let (handle, addr) = start_server().await;
     let mut ws = connect(&addr).await;
 
-    // Subscribe
     request(
         &mut ws,
         json!({ "method": "subscribe", "params": { "variables": ["x"], "interval_ms": 0 }}),
     ).await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // Receive one push
     handle.update_variables(
         vec![VariableValue { name: "x".into(), value: "1".into(), var_type: "INT".into(), forced: false }],
         CycleInfoData { cycle_count: 1, ..Default::default() },
     );
-    let push = recv(&mut ws).await;
+
+    let push = recv_nonempty(&mut ws).await;
     assert_eq!(push["type"], "variableUpdate");
 
     // Unsubscribe
@@ -363,16 +382,14 @@ async fn test_push_includes_forced_flag() {
         &mut ws,
         json!({ "method": "subscribe", "params": { "variables": ["x"], "interval_ms": 0 }}),
     ).await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // Push a forced variable
     handle.update_variables(
         vec![VariableValue { name: "x".into(), value: "999".into(), var_type: "INT".into(), forced: true }],
         CycleInfoData { cycle_count: 1, ..Default::default() },
     );
 
-    let push = recv(&mut ws).await;
+    let push = recv_nonempty(&mut ws).await;
     assert_eq!(push["variables"][0]["forced"], true);
 }
 
@@ -492,6 +509,294 @@ fn test_serialize_catalog() {
     } else {
         panic!("Wrong variant");
     }
+}
+
+// ── Compound-type prefix watch tests ──────────────────────────────────
+
+#[tokio::test]
+async fn test_subscribe_fb_parent_pushes_all_fields() {
+    // Subscribing to a parent name like "Main.filler" should push all
+    // descendant fields: "Main.filler.cmd", "Main.filler.state", etc.
+    let (handle, addr) = start_server().await;
+    let mut ws = connect(&addr).await;
+
+    request(
+        &mut ws,
+        json!({ "method": "subscribe", "params": { "variables": ["Main.filler"], "interval_ms": 0 }}),
+    ).await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    handle.update_variables(
+        vec![
+            VariableValue { name: "Main.filler.cmd".into(), value: "TRUE".into(), var_type: "BOOL".into(), forced: false },
+            VariableValue { name: "Main.filler.state".into(), value: "2".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.filler.counter.Q".into(), value: "FALSE".into(), var_type: "BOOL".into(), forced: false },
+            VariableValue { name: "Main.filler.counter.CV".into(), value: "3".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.other".into(), value: "99".into(), var_type: "INT".into(), forced: false },
+        ],
+        CycleInfoData { cycle_count: 1, ..Default::default() },
+    );
+
+    let push = recv_nonempty(&mut ws).await;
+    assert_eq!(push["type"], "variableUpdate");
+    let vars = push["variables"].as_array().unwrap();
+    let names: Vec<&str> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+
+    // All Main.filler.* descendants should be included
+    assert!(names.contains(&"Main.filler.cmd"), "Should include Main.filler.cmd: {names:?}");
+    assert!(names.contains(&"Main.filler.state"), "Should include Main.filler.state: {names:?}");
+    assert!(names.contains(&"Main.filler.counter.Q"), "Should include nested Main.filler.counter.Q: {names:?}");
+    assert!(names.contains(&"Main.filler.counter.CV"), "Should include nested Main.filler.counter.CV: {names:?}");
+    // Unrelated variable should NOT be included
+    assert!(!names.contains(&"Main.other"), "Should NOT include Main.other: {names:?}");
+    assert_eq!(vars.len(), 4, "Expected exactly 4 descendant fields, got {}: {names:?}", vars.len());
+}
+
+#[tokio::test]
+async fn test_subscribe_array_parent_pushes_elements() {
+    let (handle, addr) = start_server().await;
+    let mut ws = connect(&addr).await;
+
+    request(
+        &mut ws,
+        json!({ "method": "subscribe", "params": { "variables": ["Main.arr"], "interval_ms": 0 }}),
+    ).await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    handle.update_variables(
+        vec![
+            VariableValue { name: "Main.arr[1]".into(), value: "10".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.arr[2]".into(), value: "20".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.arr[3]".into(), value: "30".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.total".into(), value: "60".into(), var_type: "INT".into(), forced: false },
+        ],
+        CycleInfoData { cycle_count: 1, ..Default::default() },
+    );
+
+    let push = recv_nonempty(&mut ws).await;
+    assert_eq!(push["type"], "variableUpdate");
+    let vars = push["variables"].as_array().unwrap();
+    let names: Vec<&str> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+
+    assert!(names.contains(&"Main.arr[1]"), "Should include Main.arr[1]: {names:?}");
+    assert!(names.contains(&"Main.arr[2]"), "Should include Main.arr[2]: {names:?}");
+    assert!(names.contains(&"Main.arr[3]"), "Should include Main.arr[3]: {names:?}");
+    assert!(!names.contains(&"Main.total"), "Should NOT include Main.total: {names:?}");
+}
+
+#[tokio::test]
+async fn test_subscribe_mixed_scalar_and_compound() {
+    let (handle, addr) = start_server().await;
+    let mut ws = connect(&addr).await;
+
+    request(
+        &mut ws,
+        json!({ "method": "subscribe", "params": { "variables": ["Main.counter", "Main.fb"], "interval_ms": 0 }}),
+    ).await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    handle.update_variables(
+        vec![
+            VariableValue { name: "Main.counter".into(), value: "42".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.fb.x".into(), value: "1".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.fb.y".into(), value: "2".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.other".into(), value: "99".into(), var_type: "INT".into(), forced: false },
+        ],
+        CycleInfoData { cycle_count: 1, ..Default::default() },
+    );
+
+    let push = recv_nonempty(&mut ws).await;
+    let vars = push["variables"].as_array().unwrap();
+    let names: Vec<&str> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+
+    assert!(names.contains(&"Main.counter"), "Should include scalar Main.counter: {names:?}");
+    assert!(names.contains(&"Main.fb.x"), "Should include Main.fb.x: {names:?}");
+    assert!(names.contains(&"Main.fb.y"), "Should include Main.fb.y: {names:?}");
+    assert!(!names.contains(&"Main.other"), "Should NOT include Main.other: {names:?}");
+    assert_eq!(vars.len(), 3);
+}
+
+#[tokio::test]
+async fn test_read_fb_parent_returns_all_fields() {
+    // A read request for "Main.filler" should return all descendant fields.
+    let (handle, addr) = start_server().await;
+
+    handle.update_variables(
+        vec![
+            VariableValue { name: "Main.filler.cmd".into(), value: "TRUE".into(), var_type: "BOOL".into(), forced: false },
+            VariableValue { name: "Main.filler.state".into(), value: "5".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.scalar".into(), value: "1".into(), var_type: "INT".into(), forced: false },
+        ],
+        CycleInfoData { cycle_count: 1, ..Default::default() },
+    );
+
+    let mut ws = connect(&addr).await;
+    let resp = request(
+        &mut ws,
+        json!({ "method": "read", "params": { "variables": ["Main.filler"] }}),
+    ).await;
+
+    assert_eq!(resp["success"], true);
+    let data = resp["data"].as_array().unwrap();
+    let names: Vec<&str> = data.iter().filter_map(|v| v["name"].as_str()).collect();
+    assert!(names.contains(&"Main.filler.cmd"), "Read should include Main.filler.cmd: {names:?}");
+    assert!(names.contains(&"Main.filler.state"), "Read should include Main.filler.state: {names:?}");
+    assert!(!names.contains(&"Main.scalar"), "Read should NOT include Main.scalar: {names:?}");
+}
+
+#[tokio::test]
+async fn test_push_includes_watch_tree_for_compound_subscription() {
+    let (handle, addr) = start_server().await;
+    let mut ws = connect(&addr).await;
+
+    request(
+        &mut ws,
+        json!({ "method": "subscribe", "params": { "variables": ["Main.fb"], "interval_ms": 0 }}),
+    ).await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    handle.update_variables(
+        vec![
+            VariableValue { name: "Main.fb".into(), value: "".into(), var_type: "Outer".into(), forced: false },
+            VariableValue { name: "Main.fb.cmd".into(), value: "TRUE".into(), var_type: "BOOL".into(), forced: false },
+            VariableValue { name: "Main.fb.state".into(), value: "5".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.fb.sub.x".into(), value: "3".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.fb.sub.y".into(), value: "6".into(), var_type: "INT".into(), forced: false },
+        ],
+        CycleInfoData { cycle_count: 1, ..Default::default() },
+    );
+
+    let push = recv_nonempty(&mut ws).await;
+    assert_eq!(push["type"], "variableUpdate");
+
+    // watch_tree must be present and well-structured
+    let tree = push["watch_tree"].as_array().expect("watch_tree must be an array");
+    assert_eq!(tree.len(), 1, "One root node for Main.fb");
+
+    let root = &tree[0];
+    assert_eq!(root["name"], "Main.fb");
+    assert_eq!(root["fullPath"], "Main.fb");
+    assert_eq!(root["kind"], "fb");
+    assert_eq!(root["type"], "Outer");
+
+    // Root must have children (cmd, state, sub)
+    let children = root["children"].as_array().expect("Root must have children");
+    let child_names: Vec<&str> = children.iter().filter_map(|c| c["name"].as_str()).collect();
+    assert!(child_names.contains(&"cmd"), "Children should include cmd: {child_names:?}");
+    assert!(child_names.contains(&"state"), "Children should include state: {child_names:?}");
+    assert!(child_names.contains(&"sub"), "Children should include sub: {child_names:?}");
+
+    // cmd is a leaf with fullPath and value
+    let cmd = children.iter().find(|c| c["name"].as_str() == Some("cmd")).unwrap();
+    assert_eq!(cmd["fullPath"], "Main.fb.cmd");
+    assert_eq!(cmd["value"], "TRUE");
+    assert_eq!(cmd["type"], "BOOL");
+    assert_eq!(cmd["kind"], "scalar");
+
+    // sub is a nested compound node with its own children
+    let sub = children.iter().find(|c| c["name"].as_str() == Some("sub")).unwrap();
+    assert!(sub["children"].as_array().is_some(), "sub should have children");
+    let sub_children = sub["children"].as_array().unwrap();
+    let sub_child_names: Vec<&str> = sub_children.iter().filter_map(|c| c["name"].as_str()).collect();
+    assert!(sub_child_names.contains(&"x"), "sub children: {sub_child_names:?}");
+    assert!(sub_child_names.contains(&"y"), "sub children: {sub_child_names:?}");
+
+    // x leaf has correct fullPath and value
+    let x = sub_children.iter().find(|c| c["name"].as_str() == Some("x")).unwrap();
+    assert_eq!(x["fullPath"], "Main.fb.sub.x");
+    assert_eq!(x["value"], "3");
+}
+
+#[tokio::test]
+async fn test_push_watch_tree_for_array() {
+    let (handle, addr) = start_server().await;
+    let mut ws = connect(&addr).await;
+
+    request(
+        &mut ws,
+        json!({ "method": "subscribe", "params": { "variables": ["Main.arr"], "interval_ms": 0 }}),
+    ).await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    handle.update_variables(
+        vec![
+            VariableValue { name: "Main.arr".into(), value: "".into(), var_type: "ARRAY[0..2] OF INT".into(), forced: false },
+            VariableValue { name: "Main.arr[0]".into(), value: "10".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.arr[1]".into(), value: "20".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.arr[2]".into(), value: "30".into(), var_type: "INT".into(), forced: false },
+        ],
+        CycleInfoData { cycle_count: 1, ..Default::default() },
+    );
+
+    let push = recv_nonempty(&mut ws).await;
+    let tree = push["watch_tree"].as_array().expect("watch_tree must be present");
+    assert_eq!(tree.len(), 1);
+
+    let root = &tree[0];
+    assert_eq!(root["name"], "Main.arr");
+    assert_eq!(root["kind"], "array");
+    assert_eq!(root["type"], "ARRAY[0..2] OF INT");
+
+    let children = root["children"].as_array().unwrap();
+    assert_eq!(children.len(), 3, "Array should have 3 children");
+
+    // Each child has correct fullPath and value
+    let el0 = children.iter().find(|c| c["name"].as_str() == Some("[0]")).unwrap();
+    assert_eq!(el0["fullPath"], "Main.arr[0]");
+    assert_eq!(el0["value"], "10");
+    assert_eq!(el0["kind"], "scalar");
+
+    let el2 = children.iter().find(|c| c["name"].as_str() == Some("[2]")).unwrap();
+    assert_eq!(el2["fullPath"], "Main.arr[2]");
+    assert_eq!(el2["value"], "30");
+}
+
+#[tokio::test]
+async fn test_watch_tree_intermediate_nodes_have_unique_full_paths() {
+    // Bug regression: intermediate nodes (nested FBs) had empty fullPath,
+    // causing all siblings to expand/collapse together.
+    let (handle, addr) = start_server().await;
+    let mut ws = connect(&addr).await;
+
+    request(
+        &mut ws,
+        json!({ "method": "subscribe", "params": { "variables": ["Main.fb"], "interval_ms": 0 }}),
+    ).await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    handle.update_variables(
+        vec![
+            VariableValue { name: "Main.fb".into(), value: "".into(), var_type: "Outer".into(), forced: false },
+            VariableValue { name: "Main.fb.counter.CU".into(), value: "TRUE".into(), var_type: "BOOL".into(), forced: false },
+            VariableValue { name: "Main.fb.counter.CV".into(), value: "3".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.fb.edge.CLK".into(), value: "FALSE".into(), var_type: "BOOL".into(), forced: false },
+            VariableValue { name: "Main.fb.edge.Q".into(), value: "TRUE".into(), var_type: "BOOL".into(), forced: false },
+            VariableValue { name: "Main.fb.state".into(), value: "5".into(), var_type: "INT".into(), forced: false },
+        ],
+        CycleInfoData { cycle_count: 1, ..Default::default() },
+    );
+
+    let push = recv_nonempty(&mut ws).await;
+    let tree = push["watch_tree"].as_array().unwrap();
+    let root = &tree[0];
+    let children = root["children"].as_array().unwrap();
+
+    // "counter" and "edge" are intermediate nodes — they MUST have distinct fullPaths
+    let counter = children.iter().find(|c| c["name"].as_str() == Some("counter")).unwrap();
+    let edge = children.iter().find(|c| c["name"].as_str() == Some("edge")).unwrap();
+
+    assert_eq!(counter["fullPath"], "Main.fb.counter", "counter must have fullPath");
+    assert_eq!(edge["fullPath"], "Main.fb.edge", "edge must have fullPath");
+    assert_ne!(counter["fullPath"], edge["fullPath"], "counter and edge must differ");
+
+    // Their leaf children should also have correct fullPaths
+    let counter_children = counter["children"].as_array().unwrap();
+    let cu = counter_children.iter().find(|c| c["name"].as_str() == Some("CU")).unwrap();
+    assert_eq!(cu["fullPath"], "Main.fb.counter.CU");
+
+    let edge_children = edge["children"].as_array().unwrap();
+    let clk = edge_children.iter().find(|c| c["name"].as_str() == Some("CLK")).unwrap();
+    assert_eq!(clk["fullPath"], "Main.fb.edge.CLK");
 }
 
 #[test]

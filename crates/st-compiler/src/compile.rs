@@ -256,7 +256,7 @@ impl ModuleCompiler {
         match item {
             TopLevelItem::Program(p) => {
                 let func_idx = self.find_func(&p.name.name)?;
-                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases, &self.type_defs);
+                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases, &mut self.type_defs);
                 fc.compile_var_blocks(&p.var_blocks);
                 let body_start_pc = fc.current_pc();
                 fc.compile_statements(&p.body)?;
@@ -269,7 +269,7 @@ impl ModuleCompiler {
             }
             TopLevelItem::Function(f) => {
                 let func_idx = self.find_func(&f.name.name)?;
-                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases, &self.type_defs);
+                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases, &mut self.type_defs);
                 fc.compile_var_blocks(&f.var_blocks);
                 let ret_ty = Self::var_type_from_ast(&f.return_type);
                 let ret_width = Self::int_width_from_ast(&f.return_type);
@@ -287,7 +287,7 @@ impl ModuleCompiler {
             }
             TopLevelItem::FunctionBlock(fb) => {
                 let func_idx = self.find_func(&fb.name.name)?;
-                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases, &self.type_defs);
+                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases, &mut self.type_defs);
                 fc.compile_var_blocks(&fb.var_blocks);
                 let body_start_pc = fc.current_pc();
                 fc.compile_statements(&fb.body)?;
@@ -301,9 +301,9 @@ impl ModuleCompiler {
             TopLevelItem::Class(cls) => {
                 // Compile the class body (inherited + own var initializers)
                 let func_idx = self.find_func(&cls.name.name)?;
-                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases, &self.type_defs);
-                // Inherited vars (with init, so defaults from parent classes are applied)
+                // Collect inherited var blocks before borrowing type_defs mutably
                 let inherited_for_class = self.collect_inherited_var_blocks(&cls.name.name);
+                let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases, &mut self.type_defs);
                 for vb in &inherited_for_class {
                     fc.compile_var_blocks(std::slice::from_ref(vb));
                 }
@@ -325,7 +325,7 @@ impl ModuleCompiler {
                     }
                     let method_name = format!("{}.{}", cls.name.name, method.name.name);
                     let method_idx = self.find_func(&method_name)?;
-                    let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases, &self.type_defs);
+                    let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases, &mut self.type_defs);
                     // First: register inherited var_blocks (ancestor classes)
                     for vb in &inherited_var_blocks {
                         fc.register_var_blocks(std::slice::from_ref(vb));
@@ -370,7 +370,7 @@ impl ModuleCompiler {
         if self.pending_global_inits.is_empty() {
             return;
         }
-        let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases, &self.type_defs);
+        let mut fc = FunctionCompiler::new(&self.functions, &self.globals, &self.class_bases, &mut self.type_defs);
         // Drain the pending list into a local so we can iterate without
         // holding the borrow on self.
         let pending: Vec<(u16, Expression)> =
@@ -428,7 +428,7 @@ impl ModuleCompiler {
             },
             DataType::String(_) => VarType::String,
             DataType::Ref(_) => VarType::Ref,
-            DataType::Array(_) => VarType::Int, // simplified: arrays handled separately
+            DataType::Array(_) => VarType::Int, // placeholder: resolved in compile_var_blocks_inner
             DataType::UserDefined(_) => VarType::Int, // simplified: resolved at link time
         }
     }
@@ -470,8 +470,9 @@ struct FunctionCompiler<'a> {
     module_functions: &'a [Function],
     /// Reference to global variables.
     globals: &'a MemoryLayout,
-    /// Reference to user-defined type definitions (for struct field resolution).
-    type_defs: &'a [TypeDef],
+    /// Mutable reference to user-defined type definitions (for struct field
+    /// resolution and array type creation).
+    type_defs: &'a mut Vec<TypeDef>,
     /// Loop exit label stack (for EXIT statements).
     loop_exit_labels: Vec<Label>,
     /// Source range to attach to next emitted instruction.
@@ -487,7 +488,7 @@ impl<'a> FunctionCompiler<'a> {
         module_functions: &'a [Function],
         globals: &'a MemoryLayout,
         class_bases: &'a std::collections::HashMap<String, String>,
-        type_defs: &'a [TypeDef],
+        type_defs: &'a mut Vec<TypeDef>,
     ) -> Self {
         Self {
             instructions: Vec::new(),
@@ -566,6 +567,22 @@ impl<'a> FunctionCompiler<'a> {
         self.add_local_with_qualifiers(name, ty, int_width, false, false)
     }
 
+    /// Simple constant evaluation for integer literal expressions (array bounds).
+    fn const_eval_int_expr(expr: &Expression) -> Option<i64> {
+        match expr {
+            Expression::Literal(lit) => match &lit.kind {
+                LiteralKind::Integer(n) => Some(*n),
+                LiteralKind::Bool(true) => Some(1),
+                LiteralKind::Bool(false) => Some(0),
+                _ => None,
+            },
+            Expression::Unary(u) if matches!(u.op, UnaryOp::Neg) => {
+                Self::const_eval_int_expr(&u.operand).map(|v| -v)
+            }
+            _ => None,
+        }
+    }
+
     fn add_local_with_qualifiers(
         &mut self,
         name: &str,
@@ -609,7 +626,7 @@ impl<'a> FunctionCompiler<'a> {
             return Some(idx);
         }
         // Try struct: look up TypeDef::Struct with matching name, then find field
-        for td in self.type_defs {
+        for td in self.type_defs.iter() {
             if let TypeDef::Struct { name, fields } = td {
                 if name.eq_ignore_ascii_case(type_name) {
                     return fields.iter()
@@ -719,6 +736,22 @@ impl<'a> FunctionCompiler<'a> {
                                 VarType::Struct(td_idx as u16);
                         }
                     }
+                    // Resolve array types: create TypeDef::Array and fix VarType
+                    if let DataType::Array(arr) = &decl.ty {
+                        let elem_ty = ModuleCompiler::var_type_from_ast(&arr.element_type);
+                        let dimensions: Vec<(i64, i64)> = arr.ranges.iter().map(|r| {
+                            let lo = Self::const_eval_int_expr(&r.lower).unwrap_or(0);
+                            let hi = Self::const_eval_int_expr(&r.upper).unwrap_or(0);
+                            (lo, hi)
+                        }).collect();
+                        let td_idx = self.type_defs.len() as u16;
+                        self.type_defs.push(TypeDef::Array {
+                            element_type: elem_ty,
+                            dimensions,
+                        });
+                        self.locals.slots[slot as usize].ty = VarType::Array(td_idx);
+                    }
+
                     // Emit initializer if present
                     if emit_init {
                         if let Some(init_expr) = &decl.initial_value {
@@ -794,6 +827,24 @@ impl<'a> FunctionCompiler<'a> {
                 let ptr_reg = self.compile_load_variable(&id.name);
                 self.emit_sourced(Instruction::DerefStore(ptr_reg, val_reg), range);
                 return;
+            }
+        }
+
+        // Check for array store: arr[expr] := value
+        if target.parts.len() >= 2 {
+            if let (Some(AccessPart::Identifier(id)), Some(AccessPart::Index(indices))) =
+                (target.parts.first(), target.parts.get(1))
+            {
+                if let Some(slot) = self.find_local(&id.name) {
+                    if !indices.is_empty() {
+                        let idx_reg = self.compile_expression(&indices[0]);
+                        self.emit_sourced(
+                            Instruction::StoreArray(slot, idx_reg, val_reg),
+                            range,
+                        );
+                        return;
+                    }
+                }
             }
         }
 
@@ -1037,6 +1088,19 @@ impl<'a> FunctionCompiler<'a> {
                         let dst = self.alloc_reg();
                         self.emit(Instruction::Deref(dst, ptr_reg));
                         return dst;
+                    }
+                    // Array indexing: arr[expr]
+                    if let (Some(AccessPart::Identifier(id)), Some(AccessPart::Index(indices))) =
+                        (va.parts.first(), va.parts.get(1))
+                    {
+                        if let Some(slot) = self.find_local(&id.name) {
+                            if !indices.is_empty() {
+                                let idx_reg = self.compile_expression(&indices[0]);
+                                let dst = self.alloc_reg();
+                                self.emit(Instruction::LoadArray(dst, slot, idx_reg));
+                                return dst;
+                            }
+                        }
                     }
                     // Multi-part access: fb_instance.field
                     if let (Some(AccessPart::Identifier(obj)), Some(AccessPart::Identifier(field))) =
