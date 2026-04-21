@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "monitor-test-server"
+path = "src/bin/test_server.rs"
+
 [dev-dependencies]
 st-syntax.workspace = true
 st-compiler.workspace = true

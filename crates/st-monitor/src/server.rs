@@ -138,7 +138,8 @@ pub async fn run_monitor_server(
             tracing::info!("Monitor WS: client connected from {peer}");
             let state = state.clone();
             let update_rx = update_tx.subscribe();
-            tokio::spawn(handle_client(stream, state, update_rx));
+            let tx = update_tx.clone();
+            tokio::spawn(handle_client(stream, state, update_rx, tx));
         }
     });
 
@@ -150,6 +151,7 @@ async fn handle_client(
     stream: tokio::net::TcpStream,
     state: Arc<RwLock<MonitorState>>,
     mut update_rx: broadcast::Receiver<()>,
+    update_tx: broadcast::Sender<()>,
 ) {
     let ws_stream = match tokio_tungstenite::accept_async(stream).await {
         Ok(ws) => ws,
@@ -184,7 +186,8 @@ async fn handle_client(
     let push_subs = subscriptions.clone();
     let push_state = state.clone();
     let push_task = tokio::spawn(async move {
-        let mut last_push = Instant::now();
+        // Initialize to the past so the first push is never throttled.
+        let mut last_push = Instant::now() - Duration::from_secs(1);
         let throttle = Duration::from_millis(50);
         let mut push_count: u64 = 0;
 
@@ -200,14 +203,15 @@ async fn handle_client(
 
             let subs = push_subs.lock().await;
 
-            let (ci, vars) = {
+            let (ci, vars, tree) = {
                 let st = push_state.read().unwrap();
                 let ci = st.cycle_info.clone();
-                let vars: Vec<VariableValue> = subs
-                    .iter()
-                    .filter_map(|name| st.variables.get(name).cloned())
+                let vars: Vec<VariableValue> = collect_watched_variables(&subs, &st.variables);
+                let forced_set: HashSet<String> = st.forced_variables.keys()
+                    .map(|k| k.to_uppercase())
                     .collect();
-                (ci, vars)
+                let tree = build_watch_tree(&subs, &st.variables, &forced_set);
+                (ci, vars, tree)
             };
             drop(subs);
 
@@ -223,6 +227,7 @@ async fn handle_client(
                 max_period_us: ci.max_period_us,
                 jitter_max_us: ci.jitter_max_us,
                 variables: vars.clone(),
+                watch_tree: tree,
             });
             if let Ok(json) = serde_json::to_string(&msg) {
                 if push_out.send(json).await.is_err() {
@@ -278,7 +283,7 @@ async fn handle_client(
             }
         };
 
-        let response = handle_request(request, &state, &subscriptions).await;
+        let response = handle_request(request, &state, &subscriptions, &update_tx).await;
         if let Ok(json) = serde_json::to_string(&response) {
             tracing::debug!("Monitor WS: send → {json}");
             if out_tx.send(json).await.is_err() {
@@ -297,6 +302,7 @@ async fn handle_request(
     request: MonitorRequest,
     state: &Arc<RwLock<MonitorState>>,
     subscriptions: &Arc<Mutex<HashSet<String>>>,
+    update_tx: &broadcast::Sender<()>,
 ) -> MonitorMessage {
     match request {
         MonitorRequest::Subscribe(params) => {
@@ -309,10 +315,15 @@ async fn handle_request(
                 params.variables,
                 subs.len()
             );
+            let count = subs.len();
+            drop(subs);
+            // Trigger immediate push so the client gets current values
+            // without waiting for the next engine cycle.
+            let _ = update_tx.send(());
             MonitorMessage::Response(ResponseData {
                 id: None,
                 success: true,
-                data: Some(serde_json::json!({ "subscribed": subs.len() })),
+                data: Some(serde_json::json!({ "subscribed": count })),
             })
         }
         MonitorRequest::Unsubscribe(params) => {
@@ -333,11 +344,8 @@ async fn handle_request(
         }
         MonitorRequest::Read(params) => {
             let st = state.read().unwrap();
-            let vars: Vec<VariableValue> = params
-                .variables
-                .iter()
-                .filter_map(|name| st.variables.get(name).cloned())
-                .collect();
+            let name_set: HashSet<String> = params.variables.into_iter().collect();
+            let vars: Vec<VariableValue> = collect_watched_variables(&name_set, &st.variables);
             MonitorMessage::Response(ResponseData {
                 id: None,
                 success: true,
@@ -413,6 +421,257 @@ async fn handle_request(
             })
         }
     }
+}
+
+/// Collect variables matching the subscription set from a HashMap.
+/// Public API for external callers (e.g., target-agent WS push task).
+pub fn collect_watched_variables_from_map(
+    subscriptions: &HashSet<String>,
+    variables: &HashMap<String, VariableValue>,
+) -> Vec<VariableValue> {
+    collect_watched_variables(subscriptions, variables)
+}
+
+/// Collect variables matching the subscription set.
+/// Supports exact match AND prefix match: subscribing to "Main.filler"
+/// also yields "Main.filler.cmd", "Main.filler.counter.Q", "Main.arr[1]", etc.
+fn collect_watched_variables(
+    subscriptions: &HashSet<String>,
+    variables: &HashMap<String, VariableValue>,
+) -> Vec<VariableValue> {
+    if subscriptions.is_empty() {
+        return Vec::new();
+    }
+    // Build upper-cased prefix sets once for efficient matching.
+    let exact: HashSet<String> = subscriptions.iter().map(|s| s.to_uppercase()).collect();
+    let prefixes: Vec<(String, String)> = subscriptions
+        .iter()
+        .map(|s| {
+            let u = s.to_uppercase();
+            (format!("{u}."), format!("{u}["))
+        })
+        .collect();
+
+    variables
+        .values()
+        .filter(|v| {
+            let vu = v.name.to_uppercase();
+            exact.contains(&vu)
+                || prefixes
+                    .iter()
+                    .any(|(dot, bracket)| vu.starts_with(dot) || vu.starts_with(bracket))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Build a `WatchNode` tree for each subscription root.
+/// The tree is built entirely server-side so the widget never parses names.
+pub fn build_watch_tree(
+    subscriptions: &HashSet<String>,
+    variables: &HashMap<String, VariableValue>,
+    forced: &HashSet<String>,
+) -> Vec<WatchNode> {
+    let mut roots = Vec::new();
+    for sub_name in subscriptions {
+        let upper = sub_name.to_uppercase();
+        let dot_prefix = format!("{upper}.");
+        let bracket_prefix = format!("{upper}[");
+
+        // Collect all descendants
+        let mut descendants: Vec<&VariableValue> = variables
+            .values()
+            .filter(|v| {
+                let vu = v.name.to_uppercase();
+                vu.starts_with(&dot_prefix) || vu.starts_with(&bracket_prefix)
+            })
+            .collect();
+        descendants.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Look up the parent entry (if it exists in variables)
+        let parent = variables.get(sub_name.as_str())
+            .or_else(|| variables.values().find(|v| v.name.eq_ignore_ascii_case(sub_name)));
+
+        if descendants.is_empty() {
+            // Scalar — leaf node
+            if let Some(v) = parent {
+                roots.push(WatchNode {
+                    name: v.name.clone(),
+                    full_path: v.name.clone(),
+                    kind: "scalar".to_string(),
+                    var_type: v.var_type.clone(),
+                    value: v.value.clone(),
+                    forced: forced.contains(&v.name.to_uppercase()),
+                    children: Vec::new(),
+                });
+            } else {
+                roots.push(WatchNode {
+                    name: sub_name.clone(),
+                    full_path: sub_name.clone(),
+                    kind: "scalar".to_string(),
+                    var_type: String::new(),
+                    value: String::new(),
+                    forced: false,
+                    children: Vec::new(),
+                });
+            }
+        } else {
+            // Compound — build children tree
+            let parent_type = parent.map(|v| v.var_type.as_str()).unwrap_or("");
+            let kind = if parent_type.starts_with("ARRAY") {
+                "array"
+            } else if parent_type == "PROGRAM" {
+                "program"
+            } else {
+                "fb"
+            };
+            let children = build_children_from_flat(sub_name, &descendants, forced);
+            roots.push(WatchNode {
+                name: sub_name.clone(),
+                full_path: sub_name.clone(),
+                kind: kind.to_string(),
+                var_type: parent_type.to_string(),
+                value: String::new(),
+                forced: false,
+                children,
+            });
+        }
+    }
+    roots.sort_by(|a, b| a.name.cmp(&b.name));
+    roots
+}
+
+/// Build nested children from flat descendant list.
+fn build_children_from_flat(
+    parent_path: &str,
+    descendants: &[&VariableValue],
+    forced: &HashSet<String>,
+) -> Vec<WatchNode> {
+    use std::collections::BTreeMap;
+
+    struct Node {
+        full_path: String,
+        var_type: String,
+        value: String,
+        forced: bool,
+        children: BTreeMap<String, Node>,
+    }
+
+    let parent_upper = parent_path.to_uppercase();
+    let dot_prefix = format!("{parent_upper}.");
+    let bracket_prefix = format!("{parent_upper}[");
+    let mut root = BTreeMap::<String, Node>::new();
+
+    for v in descendants {
+        let vu = v.name.to_uppercase();
+        let relative = if vu.starts_with(&dot_prefix) {
+            &v.name[parent_path.len() + 1..]
+        } else if vu.starts_with(&bracket_prefix) {
+            &v.name[parent_path.len()..]
+        } else {
+            continue;
+        };
+
+        // Split on dots, but keep bracket segments intact
+        let parts = split_path_segments(relative);
+        if parts.is_empty() {
+            continue;
+        }
+
+        fn insert_at(
+            map: &mut BTreeMap<String, Node>,
+            parts: &[&str],
+            full_path: &str,
+            var_type: &str,
+            value: &str,
+            is_forced: bool,
+        ) {
+            if parts.is_empty() {
+                return;
+            }
+            let key = parts[0].to_string();
+            let node = map.entry(key).or_insert_with(|| Node {
+                full_path: String::new(),
+                var_type: String::new(),
+                value: String::new(),
+                forced: false,
+                children: BTreeMap::new(),
+            });
+            if parts.len() == 1 {
+                node.full_path = full_path.to_string();
+                node.var_type = var_type.to_string();
+                node.value = value.to_string();
+                node.forced = is_forced;
+            } else {
+                insert_at(&mut node.children, &parts[1..], full_path, var_type, value, is_forced);
+            }
+        }
+
+        let is_forced = forced.contains(&v.name.to_uppercase());
+        insert_at(&mut root, &parts, &v.name, &v.var_type, &v.value, is_forced);
+    }
+
+    fn to_nodes(map: &BTreeMap<String, Node>, parent_full_path: &str) -> Vec<WatchNode> {
+        map.iter()
+            .map(|(key, node)| {
+                // Compute fullPath for intermediate nodes that don't have one
+                let full_path = if !node.full_path.is_empty() {
+                    node.full_path.clone()
+                } else if key.starts_with('[') {
+                    format!("{parent_full_path}{key}")
+                } else if parent_full_path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{parent_full_path}.{key}")
+                };
+                let children = to_nodes(&node.children, &full_path);
+                let kind = if !children.is_empty() {
+                    if key.starts_with('[') { "array" } else { "fb" }
+                } else {
+                    "scalar"
+                };
+                WatchNode {
+                    name: key.clone(),
+                    full_path,
+                    kind: kind.to_string(),
+                    var_type: node.var_type.clone(),
+                    value: node.value.clone(),
+                    forced: node.forced,
+                    children,
+                }
+            })
+            .collect()
+    }
+
+    to_nodes(&root, parent_path)
+}
+
+/// Split a relative path into segments, keeping bracket indices intact.
+/// "counter.CV" → ["counter", "CV"]
+/// "[0]" → ["[0]"]
+/// "sub.x" → ["sub", "x"]
+fn split_path_segments(path: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let bytes = path.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'.' {
+            if i > start {
+                segments.push(&path[start..i]);
+            }
+            start = i + 1;
+        } else if bytes[i] == b'[' && i > start {
+            // Push what we have before the bracket, then the bracket segment
+            segments.push(&path[start..i]);
+            start = i;
+        }
+        i += 1;
+    }
+    if start < bytes.len() {
+        segments.push(&path[start..]);
+    }
+    segments
 }
 
 fn json_to_ir_value(v: &serde_json::Value) -> st_ir::Value {

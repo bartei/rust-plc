@@ -1,87 +1,89 @@
 /**
- * Automated unit tests for the PLC Monitor panel's tree builder logic.
+ * Unit tests for the PLC Monitor panel's WatchNode rendering logic.
  *
  * Run with: node editors/vscode/test/monitor-tree.test.js
  * (no dependencies required — uses Node's built-in assert)
  *
- * These tests exercise the exact same buildSubTree + renderTree logic
- * that runs in the webview, but with mock data and assertions instead
- * of visual inspection.
+ * Tests the WatchNode tree structure that the backend sends
+ * and the renderWatchNode function that renders it.
  */
 
 const assert = require("assert");
 
 // ============================================================================
-// Extract the pure tree-builder functions (same logic as monitorPanel.ts)
+// WatchNode structure helpers (mirror the Rust WatchNode struct)
 // ============================================================================
 
-function buildSubTree(prefix, valueMap) {
-  const prefixLc = prefix.toLowerCase() + ".";
-  const tree = {};
-  valueMap.forEach((v, fullLc) => {
-    if (!fullLc.startsWith(prefixLc)) return;
-    const relative = v.name.substring(prefix.length + 1);
-    const parts = relative.split(".");
-    let node = tree;
-    for (let i = 0; i < parts.length - 1; i++) {
-      const seg = parts[i];
-      if (!node[seg]) node[seg] = { __children: {} };
-      node = node[seg].__children;
+function makeScalar(name, fullPath, type, value, forced) {
+  return { name, fullPath, kind: "scalar", type, value, forced: !!forced, children: [] };
+}
+
+function makeFb(name, fullPath, type, children) {
+  return { name, fullPath, kind: "fb", type, value: "", forced: false, children };
+}
+
+function makeArray(name, fullPath, type, children) {
+  return { name, fullPath, kind: "array", type, value: "", forced: false, children };
+}
+
+// ============================================================================
+// Simplified renderWatchNode for testing (same logic as production)
+// ============================================================================
+
+function encAttr(s) { return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+
+function renderWatchNode(node, depth, isRoot, expandedNodes) {
+  let html = "";
+  const fullLc = node.fullPath.toLowerCase();
+  const hasChildren = node.children && node.children.length > 0;
+  const isExpanded = expandedNodes.has(fullLc);
+
+  if (hasChildren) {
+    const toggle = isExpanded ? "\u25BE" : "\u25B8";
+    const ea = encAttr(node.fullPath);
+    html += `<tr data-var="${fullLc}"><td class="name"><span class="tree-toggle" data-action="toggle" data-path="${ea}">${toggle}</span> ${node.name}</td>` +
+      `<td class="value">${node.value || ""}</td>` +
+      `<td class="type">${node.type || ""}</td><td></td></tr>`;
+    if (isExpanded) {
+      for (const child of node.children) {
+        html += renderWatchNode(child, depth + 1, false, expandedNodes);
+      }
     }
-    const leaf = parts[parts.length - 1];
-    node[leaf] = {
-      __value: v,
-      __children: node[leaf] ? node[leaf].__children : null,
-    };
-  });
-  return tree;
-}
-
-function countLeaves(tree) {
-  let count = 0;
-  for (const key of Object.keys(tree)) {
-    const entry = tree[key];
-    if (entry.__children && Object.keys(entry.__children).length > 0) {
-      count += countLeaves(entry.__children);
-    }
-    if (entry.__value) count++;
+  } else {
+    html += `<tr data-var="${fullLc}"><td class="name">${node.name}</td>` +
+      `<td class="value">${node.value || ""}</td>` +
+      `<td class="type">${node.type || ""}</td><td></td></tr>`;
   }
-  return count;
-}
-
-function getNodeNames(tree) {
-  return Object.keys(tree).sort();
+  return html;
 }
 
 // ============================================================================
-// Mock data matching the multi_file_project playground
+// Mock trees
 // ============================================================================
 
-function createMockValueMap() {
-  const entries = [
-    { name: "Main.filler.start", value: "FALSE", type: "BOOL" },
-    { name: "Main.filler.target_fill", value: "5", type: "INT" },
-    { name: "Main.filler.valve_open", value: "TRUE", type: "BOOL" },
-    { name: "Main.filler.fill_done", value: "FALSE", type: "BOOL" },
-    { name: "Main.filler.fill_count", value: "2", type: "INT" },
-    { name: "Main.filler.filling", value: "TRUE", type: "BOOL" },
-    { name: "Main.filler.pulse_toggle", value: "FALSE", type: "BOOL" },
-    { name: "Main.filler.counter.CU", value: "TRUE", type: "BOOL" },
-    { name: "Main.filler.counter.RESET", value: "FALSE", type: "BOOL" },
-    { name: "Main.filler.counter.PV", value: "5", type: "INT" },
-    { name: "Main.filler.counter.Q", value: "FALSE", type: "BOOL" },
-    { name: "Main.filler.counter.CV", value: "2", type: "INT" },
-    { name: "Main.filler.counter.prev_cu", value: "FALSE", type: "BOOL" },
-    { name: "Main.filler.edge.CLK", value: "FALSE", type: "BOOL" },
-    { name: "Main.filler.edge.Q", value: "FALSE", type: "BOOL" },
-    { name: "Main.filler.edge.prev", value: "FALSE", type: "BOOL" },
-    { name: "Main.cycle", value: "42", type: "INT" },
-  ];
-  const map = new Map();
-  for (const e of entries) {
-    map.set(e.name.toLowerCase(), e);
+function mockFillerTree() {
+  return makeFb("Main.filler", "Main.filler", "FillController", [
+    makeScalar("start", "Main.filler.start", "BOOL", "FALSE"),
+    makeScalar("fill_count", "Main.filler.fill_count", "INT", "2"),
+    makeFb("counter", "Main.filler.counter", "CTU", [
+      makeScalar("CU", "Main.filler.counter.CU", "BOOL", "TRUE"),
+      makeScalar("Q", "Main.filler.counter.Q", "BOOL", "FALSE"),
+      makeScalar("CV", "Main.filler.counter.CV", "INT", "2"),
+      makeScalar("PV", "Main.filler.counter.PV", "INT", "5"),
+    ]),
+    makeFb("edge", "Main.filler.edge", "R_TRIG", [
+      makeScalar("CLK", "Main.filler.edge.CLK", "BOOL", "FALSE"),
+      makeScalar("Q", "Main.filler.edge.Q", "BOOL", "FALSE"),
+    ]),
+  ]);
+}
+
+function mockArrayTree() {
+  const elements = [];
+  for (let i = 0; i < 10; i++) {
+    elements.push(makeScalar(`[${i}]`, `Main.test_array[${i}]`, "INT", String(i * 10)));
   }
-  return map;
+  return makeArray("Main.test_array", "Main.test_array", "ARRAY[0..9] OF INT", elements);
 }
 
 // ============================================================================
@@ -95,130 +97,102 @@ function test(name, fn) {
   try {
     fn();
     passed++;
-    console.log(`  \x1b[32m✓\x1b[0m ${name}`);
+    console.log(`  \x1b[32m\u2713\x1b[0m ${name}`);
   } catch (e) {
     failed++;
-    console.log(`  \x1b[31m✗\x1b[0m ${name}`);
+    console.log(`  \x1b[31m\u2717\x1b[0m ${name}`);
     console.log(`    ${e.message}`);
   }
 }
 
-console.log("\nPLC Monitor tree builder tests\n");
+console.log("\nPLC Monitor WatchNode tree tests\n");
 
-// --- Test: watching a scalar variable produces no tree ---
-test("scalar variable has no children", () => {
-  const vm = createMockValueMap();
-  const tree = buildSubTree("Main.cycle", vm);
-  assert.strictEqual(Object.keys(tree).length, 0, "Main.cycle is a leaf — no children");
+test("scalar node has no children", () => {
+  const node = makeScalar("Main.cycle", "Main.cycle", "INT", "42");
+  assert.strictEqual(node.children.length, 0);
 });
 
-// --- Test: watching Main.filler produces a tree with direct fields + nested FBs ---
-test("Main.filler tree has correct top-level nodes", () => {
-  const vm = createMockValueMap();
-  const tree = buildSubTree("Main.filler", vm);
-  const names = getNodeNames(tree);
-  assert.ok(names.includes("start"), "Should include 'start'");
-  assert.ok(names.includes("fill_count"), "Should include 'fill_count'");
-  assert.ok(names.includes("counter"), "Should include 'counter' (nested FB)");
-  assert.ok(names.includes("edge"), "Should include 'edge' (nested FB)");
-  assert.ok(names.includes("filling"), "Should include 'filling'");
+test("FB node has children with fullPath", () => {
+  const node = mockFillerTree();
+  assert.ok(node.children.length > 0);
+  const start = node.children.find(c => c.name === "start");
+  assert.ok(start);
+  assert.strictEqual(start.fullPath, "Main.filler.start");
 });
 
-// --- Test: nested FB 'counter' has children ---
-test("counter node has children (CU, Q, CV, etc.)", () => {
-  const vm = createMockValueMap();
-  const tree = buildSubTree("Main.filler", vm);
-  const counter = tree["counter"];
-  assert.ok(counter, "counter node should exist");
-  assert.ok(counter.__children, "counter should have __children");
-  const children = getNodeNames(counter.__children);
-  assert.ok(children.includes("CU"), "counter should have CU");
-  assert.ok(children.includes("Q"), "counter should have Q");
-  assert.ok(children.includes("CV"), "counter should have CV");
-  assert.ok(children.includes("PV"), "counter should have PV");
-  assert.ok(children.includes("prev_cu"), "counter should have prev_cu");
-  assert.ok(children.includes("RESET"), "counter should have RESET");
-  assert.strictEqual(children.length, 6, "counter should have exactly 6 children");
+test("nested FB has correct fullPaths", () => {
+  const node = mockFillerTree();
+  const counter = node.children.find(c => c.name === "counter");
+  assert.strictEqual(counter.fullPath, "Main.filler.counter");
+  const cv = counter.children.find(c => c.name === "CV");
+  assert.strictEqual(cv.fullPath, "Main.filler.counter.CV");
 });
 
-// --- Test: nested FB 'edge' has children ---
-test("edge node has children (CLK, Q, prev)", () => {
-  const vm = createMockValueMap();
-  const tree = buildSubTree("Main.filler", vm);
-  const edge = tree["edge"];
-  assert.ok(edge, "edge node should exist");
-  assert.ok(edge.__children, "edge should have __children");
-  const children = getNodeNames(edge.__children);
-  assert.ok(children.includes("CLK"), "edge should have CLK");
-  assert.ok(children.includes("Q"), "edge should have Q");
-  assert.ok(children.includes("prev"), "edge should have prev");
-  assert.strictEqual(children.length, 3, "edge should have exactly 3 children");
+test("array has indexed children with bracket fullPaths", () => {
+  const node = mockArrayTree();
+  assert.strictEqual(node.children.length, 10);
+  assert.strictEqual(node.children[0].fullPath, "Main.test_array[0]");
+  assert.strictEqual(node.children[9].fullPath, "Main.test_array[9]");
 });
 
-// --- Test: scalar fields are leaves (no __children) ---
-test("scalar fields are leaves", () => {
-  const vm = createMockValueMap();
-  const tree = buildSubTree("Main.filler", vm);
-  const start = tree["start"];
-  assert.ok(start, "start node should exist");
-  assert.ok(start.__value, "start should have __value");
-  assert.strictEqual(start.__value.value, "FALSE");
-  assert.ok(!start.__children || Object.keys(start.__children).length === 0,
-    "start should NOT have children");
+test("collapsed FB renders only parent row", () => {
+  const html = renderWatchNode(mockFillerTree(), 0, true, new Set());
+  assert.strictEqual((html.match(/<tr /g) || []).length, 1);
 });
 
-// --- Test: watching Main.filler.counter produces only counter's children ---
-test("watching counter directly shows only counter fields", () => {
-  const vm = createMockValueMap();
-  const tree = buildSubTree("Main.filler.counter", vm);
-  const names = getNodeNames(tree);
-  assert.ok(names.includes("CU"), "Should include CU");
-  assert.ok(names.includes("Q"), "Should include Q");
-  assert.ok(names.includes("CV"), "Should include CV");
-  assert.ok(!names.includes("start"), "Should NOT include filler's start");
-  assert.ok(!names.includes("counter"), "Should NOT include counter itself");
+test("expanded FB renders parent + children (not nested)", () => {
+  const html = renderWatchNode(mockFillerTree(), 0, true, new Set(["main.filler"]));
+  assert.ok((html.match(/<tr /g) || []).length > 3);
+  assert.ok(!html.includes("main.filler.counter.cv")); // counter not expanded
 });
 
-// --- Test: leaf count is correct ---
-test("Main.filler has 16 leaf values total", () => {
-  const vm = createMockValueMap();
-  const tree = buildSubTree("Main.filler", vm);
-  const leaves = countLeaves(tree);
-  // 7 direct scalars + 6 counter fields + 3 edge fields = 16
-  assert.strictEqual(leaves, 16, `Expected 16 leaves, got ${leaves}`);
+test("expanding counter shows 3rd level", () => {
+  const html = renderWatchNode(mockFillerTree(), 0, true, new Set(["main.filler", "main.filler.counter"]));
+  assert.ok(html.includes("main.filler.counter.cv"));
 });
 
-// --- Test: values are accessible in the tree ---
-test("counter.CV value is accessible", () => {
-  const vm = createMockValueMap();
-  const tree = buildSubTree("Main.filler", vm);
-  const cv = tree["counter"].__children["CV"];
-  assert.ok(cv, "CV node should exist");
-  assert.strictEqual(cv.__value.value, "2");
-  assert.strictEqual(cv.__value.type, "INT");
+test("expanding counter does NOT expand edge siblings", () => {
+  const html = renderWatchNode(mockFillerTree(), 0, true, new Set(["main.filler", "main.filler.counter"]));
+  assert.ok(html.includes("main.filler.counter.cv")); // counter expanded
+  assert.ok(!html.includes("main.filler.edge.clk")); // edge NOT expanded
 });
 
-// --- Test: empty prefix produces no tree ---
-test("empty valueMap produces empty tree", () => {
-  const vm = new Map();
-  const tree = buildSubTree("Main.filler", vm);
-  assert.strictEqual(Object.keys(tree).length, 0);
+test("expanded array renders all elements", () => {
+  const html = renderWatchNode(mockArrayTree(), 0, true, new Set(["main.test_array"]));
+  assert.strictEqual((html.match(/<tr /g) || []).length, 11); // 1 parent + 10 elements
 });
 
-// --- Test: 2-level nesting (Outer.Inner.field) ---
-test("2-level nested FB: Outer → Inner → field", () => {
-  const vm = new Map();
-  vm.set("main.outer.inner.x", { name: "Main.Outer.Inner.x", value: "1", type: "INT" });
-  vm.set("main.outer.inner.y", { name: "Main.Outer.Inner.y", value: "2", type: "INT" });
-  vm.set("main.outer.state", { name: "Main.Outer.state", value: "5", type: "INT" });
+test("data-var uses lowercased fullPath", () => {
+  const html = renderWatchNode(mockArrayTree(), 0, true, new Set(["main.test_array"]));
+  assert.ok(html.includes('data-var="main.test_array[0]"'));
+  assert.ok(html.includes('data-var="main.test_array[9]"'));
+});
 
-  const tree = buildSubTree("Main.Outer", vm);
-  assert.ok(tree["Inner"], "Inner node should exist");
-  assert.ok(tree["Inner"].__children, "Inner should have children");
-  assert.ok(tree["Inner"].__children["x"], "Inner.x should exist");
-  assert.ok(tree["Inner"].__children["y"], "Inner.y should exist");
-  assert.ok(tree["state"], "state should exist as a leaf");
-  assert.strictEqual(tree["state"].__value.value, "5");
+// ============================================================================
+// Production bundle validation
+// ============================================================================
+
+console.log("\nProduction bundle validation\n");
+
+test("esbuild output exists", () => {
+  const fs = require("fs");
+  const path = require("path");
+  const jsPath = path.resolve(__dirname, "..", "out", "webview", "monitor.js");
+  assert.ok(fs.existsSync(jsPath), `${jsPath} should exist — run 'npm run build:webview'`);
+});
+
+test("production HTML has no template interpolation leftovers", () => {
+  const fs = require("fs");
+  const path = require("path");
+  const htmlPath = path.resolve(__dirname, "..", "out", "webview", "index.html");
+  if (!fs.existsSync(htmlPath)) return; // skip if not built
+  const html = fs.readFileSync(htmlPath, "utf8");
+  // The HTML should have {{placeholders}} that the extension host replaces
+  assert.ok(html.includes("{{scriptUri}}"), "Should have scriptUri placeholder");
+  assert.ok(html.includes("{{stylesUri}}"), "Should have stylesUri placeholder");
+  assert.ok(html.includes("{{initialState}}"), "Should have initialState placeholder");
+  // Should NOT have any JavaScript in the HTML (it's all in monitor.js)
+  assert.ok(!html.includes("function renderWatchNode"), "No inline JS");
 });
 
 // Summary

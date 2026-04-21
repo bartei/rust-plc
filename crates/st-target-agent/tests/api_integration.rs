@@ -1479,3 +1479,576 @@ async fn test_ws_invalid_json() {
 
     ws.close(None).await.ok();
 }
+
+// ─── Array Variable Monitoring ────────────────────────────────────────
+
+/// A program that declares and writes to array variables.
+fn array_program() -> Vec<u8> {
+    make_bundle(
+        "ArrayTest",
+        concat!(
+            "PROGRAM Main\n",
+            "VAR\n",
+            "    arr : ARRAY[1..5] OF INT;\n",
+            "    total : INT := 0;\n",
+            "END_VAR\n",
+            "    arr[1] := 10;\n",
+            "    arr[2] := 20;\n",
+            "    arr[3] := 30;\n",
+            "    arr[4] := 40;\n",
+            "    arr[5] := 50;\n",
+            "    total := arr[1] + arr[2] + arr[3];\n",
+            "END_PROGRAM\n",
+        ),
+    )
+}
+
+#[tokio::test]
+async fn test_catalog_includes_array_elements() {
+    // The variable catalog must expose array elements so the Monitor
+    // panel's autocomplete knows about them. They should appear either
+    // as individual indexed entries (Main.arr[1], Main.arr[2], ...) or
+    // as a parent entry with type containing "ARRAY".
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &array_program()).await;
+
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/v1/variables/catalog"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let vars = body["variables"].as_array().unwrap();
+    let names: Vec<&str> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+    eprintln!("Catalog entries: {names:?}");
+
+    // Array entries must be present
+    let arr_entries: Vec<&&str> = names
+        .iter()
+        .filter(|n| n.to_lowercase().starts_with("main.arr"))
+        .collect();
+    assert!(
+        !arr_entries.is_empty(),
+        "Catalog should contain entries for Main.arr, got: {names:?}"
+    );
+
+    // Check for indexed element entries
+    let indexed: Vec<&&str> = names
+        .iter()
+        .filter(|n| n.starts_with("Main.arr["))
+        .collect();
+    if !indexed.is_empty() {
+        // If present as individual elements, must have all 5
+        assert!(
+            indexed.len() >= 5,
+            "Expected at least 5 indexed entries (Main.arr[1]..Main.arr[5]), got: {indexed:?}"
+        );
+        // Each element should be typed as INT
+        for idx_name in &indexed {
+            let entry = vars
+                .iter()
+                .find(|v| v["name"].as_str() == Some(**idx_name));
+            if let Some(e) = entry {
+                let ty = e["type"].as_str().unwrap_or("");
+                assert!(
+                    ty.contains("INT"),
+                    "Array element type should be INT, got '{ty}' for {idx_name}"
+                );
+            }
+        }
+    } else {
+        // Must have a parent entry "Main.arr" with type containing ARRAY
+        let arr_entry = vars
+            .iter()
+            .find(|v| {
+                v["name"]
+                    .as_str()
+                    .is_some_and(|n| n.eq_ignore_ascii_case("Main.arr"))
+            });
+        assert!(
+            arr_entry.is_some(),
+            "Expected parent catalog entry 'Main.arr', got: {names:?}"
+        );
+        let ty = arr_entry.unwrap()["type"].as_str().unwrap_or("");
+        assert!(
+            ty.to_uppercase().contains("ARRAY"),
+            "Array catalog type should contain 'ARRAY', got '{ty}'"
+        );
+    }
+
+    // Scalar 'total' should still be present
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("Main.total")),
+        "Catalog should contain Main.total, got: {names:?}"
+    );
+
+    // Cleanup
+    client
+        .post(format!("{base}/api/v1/program/stop"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_watch_array_elements_via_http() {
+    // Watching an array variable via the HTTP polling API should return
+    // array element values — either as individual named entries or as
+    // a composite value.
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &array_program()).await;
+
+    // First poll sets the watch list
+    client
+        .get(format!(
+            "{base}/api/v1/variables?watch=Main.arr[1],Main.arr[2],Main.arr[3],Main.arr[4],Main.arr[5]"
+        ))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Second poll should have values
+    let body: serde_json::Value = client
+        .get(format!(
+            "{base}/api/v1/variables?watch=Main.arr[1],Main.arr[2],Main.arr[3],Main.arr[4],Main.arr[5]"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let vars = body["variables"].as_array().unwrap();
+    eprintln!(
+        "Watched array elements: {:?}",
+        vars.iter()
+            .map(|v| format!(
+                "{}={}",
+                v["name"].as_str().unwrap_or("?"),
+                v["value"].as_str().unwrap_or("?")
+            ))
+            .collect::<Vec<_>>()
+    );
+
+    // All 5 elements should be returned with values
+    assert_eq!(
+        vars.len(),
+        5,
+        "Expected 5 array element values, got {}: {:?}",
+        vars.len(),
+        vars
+    );
+
+    // Check that element values are the written constants
+    for (idx, expected) in [(1, "10"), (2, "20"), (3, "30"), (4, "40"), (5, "50")] {
+        let name = format!("Main.arr[{idx}]");
+        let entry = vars
+            .iter()
+            .find(|v| {
+                v["name"]
+                    .as_str()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(&name))
+            });
+        assert!(
+            entry.is_some(),
+            "Expected '{name}' in watched results, got: {:?}",
+            vars.iter().map(|v| v["name"].as_str()).collect::<Vec<_>>()
+        );
+        let val = entry.unwrap()["value"].as_str().unwrap_or("");
+        assert_eq!(
+            val, expected,
+            "{name} should be {expected}, got '{val}'"
+        );
+    }
+
+    // Cleanup
+    client
+        .post(format!("{base}/api/v1/program/stop"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_watch_array_parent_via_http() {
+    // Watching the parent "Main.arr" (without indices) should return all
+    // array elements — similar to how watching a FB instance prefix returns
+    // all descendant fields.
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &array_program()).await;
+
+    // Watch the parent name
+    client
+        .get(format!("{base}/api/v1/variables?watch=Main.arr"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/v1/variables?watch=Main.arr"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let vars = body["variables"].as_array().unwrap();
+    let var_names: Vec<&str> = vars
+        .iter()
+        .filter_map(|v| v["name"].as_str())
+        .collect();
+    eprintln!("Watch Main.arr result: {var_names:?}");
+
+    // Should include all 5 elements (flat or nested)
+    let element_count = vars
+        .iter()
+        .filter(|v| {
+            v["name"]
+                .as_str()
+                .is_some_and(|n| n.starts_with("Main.arr["))
+        })
+        .count();
+    assert!(
+        element_count >= 5,
+        "Watching 'Main.arr' should expand to at least 5 elements, got {element_count}: {var_names:?}"
+    );
+
+    // Cleanup
+    client
+        .post(format!("{base}/api/v1/program/stop"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_ws_subscribe_array_elements() {
+    // Subscribing to individual array elements via WebSocket should push
+    // their values in variableUpdate messages.
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &array_program()).await;
+
+    let mut ws = ws_connect(&base).await;
+
+    // Subscribe to array elements
+    let resp = ws_request(
+        &mut ws,
+        serde_json::json!({
+            "method": "subscribe",
+            "params": {
+                "variables": [
+                    "Main.arr[1]",
+                    "Main.arr[2]",
+                    "Main.arr[3]"
+                ],
+                "interval_ms": 0
+            }
+        }),
+    )
+    .await;
+    assert_eq!(resp["type"], "response");
+    assert_eq!(resp["success"], true);
+    assert_eq!(
+        resp["data"]["subscribed"], 3,
+        "Should have subscribed to 3 array elements"
+    );
+
+    // Wait for a push with array element values
+    let push = ws_recv(&mut ws).await;
+    assert_eq!(push["type"], "variableUpdate");
+    let vars = push["variables"].as_array().unwrap();
+    let var_names: Vec<&str> = vars
+        .iter()
+        .filter_map(|v| v["name"].as_str())
+        .collect();
+    eprintln!("WS push array elements: {var_names:?}");
+
+    // Should include the 3 subscribed elements
+    assert_eq!(
+        vars.len(),
+        3,
+        "Push should contain exactly 3 subscribed array elements, got: {var_names:?}"
+    );
+    for idx in [1, 2, 3] {
+        let name = format!("Main.arr[{idx}]");
+        assert!(
+            var_names
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(&name)),
+            "Push should contain '{name}', got: {var_names:?}"
+        );
+    }
+
+    // Cleanup
+    ws.close(None).await.ok();
+    client
+        .post(format!("{base}/api/v1/program/stop"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_ws_catalog_includes_array_elements() {
+    // The WebSocket getCatalog response should include array element entries.
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &array_program()).await;
+
+    let mut ws = ws_connect(&base).await;
+    let resp = ws_request(
+        &mut ws,
+        serde_json::json!({ "method": "getCatalog" }),
+    )
+    .await;
+
+    assert_eq!(resp["type"], "catalog");
+    let vars = resp["variables"].as_array().unwrap();
+    let names: Vec<&str> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+    eprintln!("WS catalog entries: {names:?}");
+
+    // Array elements must be present
+    let arr_entries: Vec<&&str> = names
+        .iter()
+        .filter(|n| n.to_lowercase().starts_with("main.arr"))
+        .collect();
+    assert!(
+        !arr_entries.is_empty(),
+        "WS catalog should contain entries for Main.arr, got: {names:?}"
+    );
+
+    // Prefer indexed entries
+    let indexed: Vec<&&str> = names
+        .iter()
+        .filter(|n| n.starts_with("Main.arr["))
+        .collect();
+    if !indexed.is_empty() {
+        assert!(
+            indexed.len() >= 5,
+            "Expected at least 5 indexed catalog entries, got: {indexed:?}"
+        );
+    }
+
+    // Cleanup
+    ws.close(None).await.ok();
+    client
+        .post(format!("{base}/api/v1/program/stop"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+// ─── Compound-type Watch (FB / nested) ────────────────────────────────
+
+/// A program with nested FB instances for compound watch testing.
+fn nested_fb_program() -> Vec<u8> {
+    make_bundle(
+        "NestedFbTest",
+        concat!(
+            "FUNCTION_BLOCK Inner\n",
+            "VAR_INPUT x : INT; END_VAR\n",
+            "VAR_OUTPUT y : INT; END_VAR\n",
+            "    y := x * 2;\n",
+            "END_FUNCTION_BLOCK\n",
+            "\n",
+            "FUNCTION_BLOCK Outer\n",
+            "VAR_INPUT cmd : BOOL; END_VAR\n",
+            "VAR\n",
+            "    sub : Inner;\n",
+            "    state : INT := 0;\n",
+            "END_VAR\n",
+            "    state := state + 1;\n",
+            "    sub(x := state);\n",
+            "END_FUNCTION_BLOCK\n",
+            "\n",
+            "PROGRAM Main\n",
+            "VAR\n",
+            "    fb : Outer;\n",
+            "    counter : INT := 0;\n",
+            "END_VAR\n",
+            "    fb(cmd := TRUE);\n",
+            "    counter := counter + 1;\n",
+            "END_PROGRAM\n",
+        ),
+    )
+}
+
+#[tokio::test]
+async fn test_watch_fb_parent_via_http() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &nested_fb_program()).await;
+
+    client
+        .get(format!("{base}/api/v1/variables?watch=Main.fb"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/v1/variables?watch=Main.fb"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let vars = body["variables"].as_array().unwrap();
+    let names: Vec<&str> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+    eprintln!("Watch Main.fb result: {names:?}");
+
+    // Direct fields
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.cmd")),
+        "Should include Main.fb.cmd: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.state")),
+        "Should include Main.fb.state: {names:?}"
+    );
+    // Nested Inner FB fields (2 levels)
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.sub.x")),
+        "Should include nested Main.fb.sub.x: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.sub.y")),
+        "Should include nested Main.fb.sub.y: {names:?}"
+    );
+    // Unrelated variables excluded
+    assert!(
+        !names.iter().any(|n| n.eq_ignore_ascii_case("Main.counter")),
+        "Should NOT include Main.counter: {names:?}"
+    );
+
+    client.post(format!("{base}/api/v1/program/stop")).send().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_watch_entire_main_via_http() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &nested_fb_program()).await;
+
+    client
+        .get(format!("{base}/api/v1/variables?watch=Main"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/v1/variables?watch=Main"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let vars = body["variables"].as_array().unwrap();
+    let names: Vec<&str> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+    eprintln!("Watch Main result: {names:?}");
+
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("Main.counter")),
+        "Should include Main.counter: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.state")),
+        "Should include Main.fb.state: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.sub.x")),
+        "Should include Main.fb.sub.x: {names:?}"
+    );
+    assert!(
+        vars.len() >= 5,
+        "Expected at least 5 variables for 'Main', got {}: {names:?}",
+        vars.len()
+    );
+
+    client.post(format!("{base}/api/v1/program/stop")).send().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_ws_subscribe_fb_parent_pushes_descendants() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    upload_and_start(&client, &base, &nested_fb_program()).await;
+
+    let mut ws = ws_connect(&base).await;
+
+    let resp = ws_request(
+        &mut ws,
+        serde_json::json!({
+            "method": "subscribe",
+            "params": { "variables": ["Main.fb"], "interval_ms": 0 }
+        }),
+    )
+    .await;
+    assert_eq!(resp["success"], true);
+
+    // Wait for a push that contains descendant variables. The first push
+    // may arrive before the engine has populated fb_instances, so retry
+    // up to 10 pushes.
+    let mut found = false;
+    for _ in 0..10 {
+        let push = ws_recv(&mut ws).await;
+        if push["type"] != "variableUpdate" {
+            continue;
+        }
+        let vars = push["variables"].as_array().unwrap();
+        let names: Vec<&str> = vars.iter().filter_map(|v| v["name"].as_str()).collect();
+
+        if names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.state")) {
+            eprintln!("WS push Main.fb descendants: {names:?}");
+            assert!(
+                names.iter().any(|n| n.eq_ignore_ascii_case("Main.fb.sub.x")),
+                "Push should include nested Main.fb.sub.x: {names:?}"
+            );
+            assert!(
+                !names.iter().any(|n| n.eq_ignore_ascii_case("Main.counter")),
+                "Push should NOT include Main.counter: {names:?}"
+            );
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "Should have received a push with Main.fb descendant fields");
+
+    ws.close(None).await.ok();
+    client.post(format!("{base}/api/v1/program/stop")).send().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}

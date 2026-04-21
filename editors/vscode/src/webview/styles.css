@@ -1,0 +1,349 @@
+/*
+ * PLC Monitor Panel — Styles
+ *
+ * Extracted from monitorPanel.ts setInitialHtml().
+ * Uses VS Code CSS custom properties (--vscode-*) for theme integration.
+ */
+
+body {
+  font-family: var(--vscode-font-family);
+  color: var(--vscode-foreground);
+  background: var(--vscode-editor-background);
+  padding: 10px;
+  font-size: 13px;
+}
+
+h2 {
+  margin-top: 0;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  padding-bottom: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+h2 .h-actions {
+  font-size: 11px;
+  font-weight: normal;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 20px;
+}
+
+th, td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+th {
+  background: var(--vscode-editor-selectionBackground);
+  font-weight: bold;
+}
+
+.value {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-weight: bold;
+}
+
+.type {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  margin-bottom: 16px;
+}
+
+.stat-label {
+  color: var(--vscode-descriptionForeground);
+}
+
+.stat-value {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-weight: bold;
+}
+
+.add-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+  position: relative;
+}
+
+.add-row input {
+  flex: 1;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border);
+  font-family: var(--vscode-font-family);
+  font-size: 13px;
+}
+
+.add-row input:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
+.force-input {
+  width: 80px;
+  padding: 2px 4px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+}
+
+button {
+  padding: 2px 8px;
+  cursor: pointer;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border: none;
+  border-radius: 2px;
+  font-size: 12px;
+}
+
+button:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+button.secondary {
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+}
+
+button.secondary:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.empty-msg {
+  text-align: center;
+  color: var(--vscode-descriptionForeground);
+  padding: 12px;
+}
+
+.pending {
+  color: var(--vscode-descriptionForeground);
+}
+
+.tree-toggle {
+  cursor: pointer;
+  font-size: 11px;
+  user-select: none;
+  display: inline-block;
+  width: 12px;
+}
+
+.tree-child td.name {
+  padding-left: 28px;
+}
+
+.autocomplete-dropdown {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 48px;
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--vscode-editorSuggestWidget-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-editorSuggestWidget-border, var(--vscode-panel-border));
+  z-index: 1000;
+  font-size: 13px;
+}
+
+.autocomplete-dropdown.visible {
+  display: block;
+}
+
+.autocomplete-item {
+  padding: 4px 8px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+}
+
+.autocomplete-item:hover, .autocomplete-item.selected {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.autocomplete-item .item-type {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+  margin-left: 12px;
+}
+
+.forced td.value {
+  color: var(--vscode-charts-orange, #d18616);
+  font-weight: bold;
+}
+
+.forced td.name::before {
+  content: "\1F512 ";
+  color: var(--vscode-charts-orange, #d18616);
+}
+
+.force-error {
+  border-color: var(--vscode-inputValidation-errorBorder, #be1100) !important;
+  background: var(--vscode-inputValidation-errorBackground) !important;
+}
+
+/* -- Deployment Toolbar ----------------------------------------- */
+
+.deploy-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 0 10px 0;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.deploy-toolbar .tb-group {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+}
+
+.deploy-toolbar .tb-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--vscode-panel-border);
+  margin: 0 6px;
+}
+
+.deploy-toolbar button {
+  padding: 3px 8px;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.deploy-toolbar button .tb-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.deploy-toolbar button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.deploy-toolbar .tb-status {
+  font-size: 11px;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--vscode-descriptionForeground);
+}
+
+#tb-target-select {
+  font-size: 11px;
+  font-family: var(--vscode-font-family);
+  background: var(--vscode-dropdown-background);
+  color: var(--vscode-dropdown-foreground);
+  border: 1px solid var(--vscode-dropdown-border);
+  border-radius: 2px;
+  padding: 2px 4px;
+  cursor: pointer;
+  max-width: 180px;
+}
+
+.tb-status .tb-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--vscode-descriptionForeground);
+}
+
+.tb-dot.running {
+  background: var(--vscode-charts-green, #4caf50);
+}
+
+.tb-dot.stopped {
+  background: var(--vscode-descriptionForeground);
+}
+
+.tb-dot.error {
+  background: var(--vscode-charts-red, #f44336);
+}
+
+.tb-dot.offline {
+  background: var(--vscode-descriptionForeground);
+  opacity: 0.4;
+}
+
+/* -- Target Info Panel ------------------------------------------ */
+
+.target-info {
+  display: none;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  background: var(--vscode-editorWidget-background);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.target-info.visible {
+  display: block;
+}
+
+.target-info .ti-row {
+  display: flex;
+  gap: 8px;
+}
+
+.target-info .ti-label {
+  color: var(--vscode-descriptionForeground);
+  min-width: 110px;
+}
+
+.target-info .ti-value {
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-editor-font-family), monospace;
+}
+
+.target-info .ti-ok {
+  color: var(--vscode-charts-green, #4caf50);
+}
+
+.target-info .ti-warn {
+  color: var(--vscode-charts-yellow, #ffb300);
+}
+
+.target-info .ti-err {
+  color: var(--vscode-charts-red, #f44336);
+}
+
+.target-info .ti-title {
+  font-weight: bold;
+  margin-bottom: 4px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.target-info .ti-close {
+  cursor: pointer;
+  color: var(--vscode-descriptionForeground);
+  font-size: 14px;
+  background: none;
+  border: none;
+  padding: 0 4px;
+}

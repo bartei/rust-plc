@@ -2,7 +2,7 @@
   "name": "iec61131-st",
   "displayName": "IEC 61131-3 Structured Text",
   "description": "Language support for IEC 61131-3 Structured Text with LSP and online debugging",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "rust-plc",
   "license": "GPL-3.0-or-later",
   "repository": {
@@ -58,15 +58,33 @@
       {
         "language": "structured-text",
         "scopes": {
-          "keyword": ["keyword.control.st"],
-          "type": ["support.type.st"],
-          "variable": ["variable.other.st"],
-          "function": ["entity.name.function.st"],
-          "parameter": ["variable.parameter.st"],
-          "number": ["constant.numeric.st"],
-          "string": ["string.quoted.st"],
-          "comment": ["comment.st"],
-          "enumMember": ["variable.other.enummember.st"]
+          "keyword": [
+            "keyword.control.st"
+          ],
+          "type": [
+            "support.type.st"
+          ],
+          "variable": [
+            "variable.other.st"
+          ],
+          "function": [
+            "entity.name.function.st"
+          ],
+          "parameter": [
+            "variable.parameter.st"
+          ],
+          "number": [
+            "constant.numeric.st"
+          ],
+          "string": [
+            "string.quoted.st"
+          ],
+          "comment": [
+            "comment.st"
+          ],
+          "enumMember": [
+            "variable.other.enummember.st"
+          ]
         }
       }
     ],
@@ -79,10 +97,14 @@
       {
         "type": "st",
         "label": "Structured Text Debug",
-        "languages": ["structured-text"],
+        "languages": [
+          "structured-text"
+        ],
         "configurationAttributes": {
           "launch": {
-            "required": ["program"],
+            "required": [
+              "program"
+            ],
             "properties": {
               "program": {
                 "type": "string",
@@ -259,9 +281,10 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run compile && npm run build:webview",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
+    "build:webview": "node esbuild.webview.mjs",
+    "watch": "concurrently \"tsc -watch -p ./\" \"node esbuild.webview.mjs --watch\"",
     "test": "node ./out/test/runTest.js",
     "test:unit": "node ./test/monitor-tree.test.js",
     "test:ui": "cd test/ui && npx playwright test",
@@ -275,11 +298,13 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@types/ws": "^8.5.0",
-    "@types/vscode": "^1.85.0",
-    "@types/node": "^20.0.0",
     "@types/mocha": "^10.0.0",
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.0",
     "@vscode/test-electron": "^2.3.0",
+    "concurrently": "^9.2.1",
+    "esbuild": "^0.28.0",
     "glob": "^10.0.0",
     "mocha": "^10.2.0",
     "typescript": "^5.3.0"

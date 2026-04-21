@@ -49,7 +49,7 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
     tracing::debug!("Monitor WS: push task spawned, subscribed to cycle broadcast");
 
     let push_task = tokio::spawn(async move {
-        let mut last_push = Instant::now();
+        let mut last_push = Instant::now() - Duration::from_secs(1);
         let throttle = Duration::from_millis(50);
         let mut push_count: u64 = 0;
 
@@ -79,21 +79,38 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
                 .map(|cs| cs.cycle_count)
                 .unwrap_or(0);
 
-            let vars: Vec<VariableValue> = rt_state
+            // Convert runtime snapshot to HashMap for tree builder
+            let var_map: std::collections::HashMap<String, VariableValue> = rt_state
                 .all_variables
                 .iter()
-                .filter(|v| subs.contains(&v.name))
-                .map(|v| VariableValue {
-                    name: v.name.clone(),
-                    value: v.value.clone(),
-                    var_type: v.ty.clone(),
-                    forced: v.forced,
-                })
+                .map(|v| (
+                    v.name.clone(),
+                    VariableValue {
+                        name: v.name.clone(),
+                        value: v.value.clone(),
+                        var_type: v.ty.clone(),
+                        forced: v.forced,
+                    },
+                ))
                 .collect();
+
+            let forced_set: HashSet<String> = rt_state
+                .all_variables
+                .iter()
+                .filter(|v| v.forced)
+                .map(|v| v.name.to_uppercase())
+                .collect();
+
+            // Build prefix-matched flat list (legacy) + tree
+            let vars: Vec<VariableValue> = st_monitor::server::collect_watched_variables_from_map(
+                &subs, &var_map,
+            );
+            let watch_tree = st_monitor::server::build_watch_tree(&subs, &var_map, &forced_set);
+
             let sub_count = subs.len();
             drop(subs);
 
-            if vars.is_empty() {
+            if vars.is_empty() && watch_tree.is_empty() {
                 if push_count == 0 {
                     tracing::debug!(
                         "Monitor WS: push skip — {sub_count} subscriptions but 0 matched \
@@ -117,6 +134,7 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
                 max_period_us: cs.map(|s| s.max_period_us).unwrap_or(0),
                 jitter_max_us: cs.map(|s| s.jitter_max_us).unwrap_or(0),
                 variables: vars.clone(),
+                watch_tree,
             });
 
             if let Ok(json) = serde_json::to_string(&msg) {
@@ -298,18 +316,30 @@ async fn handle_request(
                 params.variables,
                 all.len()
             );
-            let vars: Vec<VariableValue> = params
+            // Prefix matching for compound types (same as subscribe push)
+            let exact_names: HashSet<String> = params.variables.iter().map(|n| n.to_uppercase()).collect();
+            let read_prefixes: Vec<(String, String)> = params
                 .variables
                 .iter()
-                .filter_map(|name| {
-                    all.iter()
-                        .find(|v| v.name.eq_ignore_ascii_case(name))
-                        .map(|v| VariableValue {
-                            name: v.name.clone(),
-                            value: v.value.clone(),
-                            var_type: v.ty.clone(),
-                            forced: v.forced,
-                        })
+                .map(|n| {
+                    let u = n.to_uppercase();
+                    (format!("{u}."), format!("{u}["))
+                })
+                .collect();
+            let vars: Vec<VariableValue> = all
+                .iter()
+                .filter(|v| {
+                    let vu = v.name.to_uppercase();
+                    exact_names.contains(&vu)
+                        || read_prefixes
+                            .iter()
+                            .any(|(dot, bracket)| vu.starts_with(dot) || vu.starts_with(bracket))
+                })
+                .map(|v| VariableValue {
+                    name: v.name.clone(),
+                    value: v.value.clone(),
+                    var_type: v.ty.clone(),
+                    forced: v.forced,
                 })
                 .collect();
             tracing::debug!("Monitor WS: read matched {} of {}", vars.len(), params.variables.len());

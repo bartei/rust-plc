@@ -128,7 +128,39 @@ pub struct VariableUpdateData {
     /// Maximum absolute deviation of period from target.
     #[serde(default)]
     pub jitter_max_us: u64,
+    /// Flat variable list (legacy — kept for backward compatibility).
     pub variables: Vec<VariableValue>,
+    /// Pre-built watch tree. One entry per watch-list root, each a
+    /// complete `WatchNode` with children already resolved. The widget
+    /// renders this directly — no name parsing required.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub watch_tree: Vec<WatchNode>,
+}
+
+/// A node in the watch tree. Leaf nodes have `value`; compound nodes
+/// (FB instances, structs, arrays) have `children`. The backend builds
+/// the full tree so the widget never parses variable names.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchNode {
+    /// Display name for this node (e.g. "filler", "[0]", "counter").
+    pub name: String,
+    /// Fully qualified path for force/unforce commands (e.g. "Main.filler.counter.CV").
+    #[serde(rename = "fullPath")]
+    pub full_path: String,
+    /// Node kind: "scalar", "fb", "struct", "array", "program".
+    pub kind: String,
+    /// Displayed type (e.g. "INT", "FillController", "ARRAY[0..9] OF INT").
+    #[serde(rename = "type")]
+    pub var_type: String,
+    /// Current value as string (leaf nodes), or summary for compound nodes.
+    #[serde(default)]
+    pub value: String,
+    /// Whether this variable is currently forced.
+    #[serde(default)]
+    pub forced: bool,
+    /// Children (for compound nodes). Empty vec for leaf nodes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<WatchNode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

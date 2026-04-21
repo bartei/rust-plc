@@ -398,8 +398,26 @@ pub fn format_var_type(ty: VarType) -> &'static str {
         VarType::FbInstance(_) => "FB_INSTANCE",
         VarType::ClassInstance(_) => "CLASS_INSTANCE",
         VarType::Struct(_) => "STRUCT",
+        VarType::Array(_) => "ARRAY",
         VarType::Ref => "REF_TO",
     }
+}
+
+/// Format a VarType with full array details when the module is available.
+/// Returns e.g. "ARRAY[1..5] OF INT" for arrays, otherwise falls back to
+/// the static `format_var_type_with_width`.
+pub fn format_var_type_full(ty: VarType, width: IntWidth, type_defs: &[st_ir::TypeDef]) -> String {
+    if let VarType::Array(td_idx) = ty {
+        if let Some(st_ir::TypeDef::Array { element_type, dimensions }) = type_defs.get(td_idx as usize) {
+            let dims: Vec<String> = dimensions
+                .iter()
+                .map(|(lo, hi)| format!("{lo}..{hi}"))
+                .collect();
+            let elem = format_var_type(*element_type);
+            return format!("ARRAY[{}] OF {elem}", dims.join(", "));
+        }
+    }
+    format_var_type_with_width(ty, width).to_string()
 }
 
 /// Format a variable's type with full width info from its declared

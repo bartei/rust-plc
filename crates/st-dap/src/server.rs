@@ -361,6 +361,17 @@ struct StructVarRef {
     type_def_idx: u16,
 }
 
+/// Reference to an array variable for hierarchical variable expansion.
+#[derive(Debug, Clone, Copy)]
+struct ArrayVarRef {
+    /// The caller identity (encodes who owns this array).
+    caller_id: u32,
+    /// The slot index of this array variable in its parent's locals.
+    slot_idx: u16,
+    /// The type_def index for this array's element type and dimensions.
+    type_def_idx: u16,
+}
+
 struct DapSession {
     source_path: String,
     source: String,
@@ -385,6 +396,8 @@ struct DapSession {
     /// Maps variable reference IDs to struct instance locations for
     /// hierarchical expansion (same pattern as fb_var_refs).
     struct_var_refs: std::collections::HashMap<i64, StructVarRef>,
+    /// Maps variable reference IDs to array locations for hierarchical expansion.
+    array_var_refs: std::collections::HashMap<i64, ArrayVarRef>,
     /// Per-file byte offsets in the virtual concatenated text produced by
     /// `parse_multi()`. Maps file path → virtual offset. Used by
     /// `set_line_breakpoints` to align file-local line numbers with the
@@ -456,6 +469,7 @@ impl DapSession {
             scope_refs: std::collections::HashMap::new(),
             fb_var_refs: std::collections::HashMap::new(),
             struct_var_refs: std::collections::HashMap::new(),
+            array_var_refs: std::collections::HashMap::new(),
             next_var_ref: 1000,
             file_virtual_offsets: std::collections::HashMap::new(),
             native_fb_registry: None,
@@ -550,6 +564,37 @@ impl DapSession {
         } else {
             parts.join(", ")
         }
+    }
+
+    fn array_summary_value(
+        &self,
+        vm: &st_engine::vm::Vm,
+        caller_id: u32,
+        slot_idx: u16,
+        type_def_idx: u16,
+    ) -> String {
+        let Some((elem_type, dims, _total)) = vm.array_type_info(type_def_idx) else {
+            return "(no type info)".to_string();
+        };
+        let instance_key = (caller_id, slot_idx);
+        let state = vm.fb_instances_ref().get(&instance_key);
+        if dims.is_empty() {
+            return "[]".to_string();
+        }
+        let (lo, hi) = dims[0];
+        let count = (hi - lo + 1) as usize;
+        let mut parts = Vec::new();
+        for idx in 0..count.min(4) {
+            let val = state
+                .and_then(|s| s.get(idx))
+                .cloned()
+                .unwrap_or(st_ir::Value::default_for_type(elem_type));
+            parts.push(st_engine::debug::format_value(&val));
+        }
+        if count > 4 {
+            parts.push("...".to_string());
+        }
+        format!("[{}]", parts.join(", "))
     }
 
     /// Look up the virtual offset for a file path. Falls back to:
@@ -1322,6 +1367,36 @@ impl DapSession {
                 );
             }
 
+            // Check if this is a request for array element children.
+            if let Some(ar) = self.array_var_refs.get(&ref_id).copied() {
+                if let Some((elem_type, dims, _total)) = vm.array_type_info(ar.type_def_idx) {
+                    let instance_key = (ar.caller_id, ar.slot_idx);
+                    let state = vm.fb_instances_ref().get(&instance_key);
+                    let elem_ty_str = st_engine::debug::format_var_type(elem_type).to_string();
+                    if !dims.is_empty() {
+                        let (lo, hi) = dims[0];
+                        for idx in lo..=hi {
+                            let flat = (idx - lo) as usize;
+                            let value = state
+                                .and_then(|s| s.get(flat))
+                                .cloned()
+                                .unwrap_or(st_ir::Value::default_for_type(elem_type));
+                            variables.push(Variable {
+                                name: format!("[{idx}]"),
+                                value: st_engine::debug::format_value(&value),
+                                type_field: Some(elem_ty_str.clone()),
+                                variables_reference: 0,
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+                return ok(
+                    seq,
+                    ResponseBody::Variables(dap::responses::VariablesResponse { variables }),
+                );
+            }
+
             // Normal scope-based dispatch (Locals or Globals).
             let scope_kind = self.scope_refs.get(&ref_id).copied().unwrap_or(ScopeKind::Locals);
 
@@ -1379,6 +1454,29 @@ impl DapSession {
                                 value: summary,
                                 type_field: Some(type_name),
                                 variables_reference: struct_ref_id,
+                                ..Default::default()
+                            });
+                        } else if let st_ir::VarType::Array(td_idx) = slot.ty {
+                            // Array variable → expandable node with variablesReference.
+                            let array_ref_id = self.next_var_ref;
+                            self.next_var_ref += 1;
+                            self.array_var_refs.insert(
+                                array_ref_id,
+                                ArrayVarRef {
+                                    caller_id,
+                                    slot_idx: i as u16,
+                                    type_def_idx: td_idx,
+                                },
+                            );
+                            let type_str = st_engine::debug::format_var_type_full(
+                                slot.ty, slot.int_width, &vm.module().type_defs,
+                            );
+                            let summary = self.array_summary_value(vm, caller_id, i as u16, td_idx);
+                            variables.push(Variable {
+                                name: slot.name.clone(),
+                                value: summary,
+                                type_field: Some(type_str),
+                                variables_reference: array_ref_id,
                                 ..Default::default()
                             });
                         } else if matches!(slot.ty, st_ir::VarType::ClassInstance(_)) {
@@ -1515,12 +1613,61 @@ impl DapSession {
                         result_str = self.struct_summary_value(vm, caller_id, slot_idx, td_idx);
                         var_ref = ref_id;
                         type_name = Some(tn);
+                    } else if let st_ir::VarType::Array(td_idx) = slot.ty {
+                        // Array variable → expandable in the Watch panel
+                        let ref_id = self.next_var_ref;
+                        self.next_var_ref += 1;
+                        self.array_var_refs.insert(
+                            ref_id,
+                            ArrayVarRef {
+                                caller_id,
+                                slot_idx,
+                                type_def_idx: td_idx,
+                            },
+                        );
+                        result_str = self.array_summary_value(vm, caller_id, slot_idx, td_idx);
+                        var_ref = ref_id;
+                        type_name = Some(st_engine::debug::format_var_type_full(
+                            slot.ty, slot.int_width, &vm.module().type_defs,
+                        ));
                     } else {
                         // Scalar local — look up via current_locals()
                         let locals = vm.current_locals();
                         if let Some(v) = locals.iter().find(|v| v.name.eq_ignore_ascii_case(expr)) {
                             result_str = v.value.clone();
                             type_name = Some(v.ty.clone());
+                        }
+                    }
+                }
+            }
+
+            // Try array element access: "arr[1]"
+            if result_str == "<unknown>" && expr.contains('[') {
+                if let Some(bracket) = expr.find('[') {
+                    let arr_name = &expr[..bracket];
+                    let idx_str = expr[bracket + 1..].trim_end_matches(']').trim();
+                    if let Ok(idx) = idx_str.parse::<i64>() {
+                        if let Some(frame) = vm.stack_frames().first() {
+                            let func = &vm.module().functions[frame.func_index as usize];
+                            let caller_id = vm.caller_identity_pub();
+                            if let Some((slot_idx, slot)) = func.locals.find_slot(arr_name) {
+                                if let st_ir::VarType::Array(td_idx) = slot.ty {
+                                    if let Some((elem_type, dims, _)) = vm.array_type_info(td_idx) {
+                                        let lo = dims.first().map(|(l, _)| *l).unwrap_or(0);
+                                        let flat = (idx - lo) as usize;
+                                        let instance_key = (caller_id, slot_idx);
+                                        let val = vm.fb_instances_ref()
+                                            .get(&instance_key)
+                                            .and_then(|s| s.get(flat))
+                                            .cloned()
+                                            .unwrap_or(st_ir::Value::default_for_type(elem_type));
+                                        result_str = st_engine::debug::format_value(&val);
+                                        type_name = Some(
+                                            st_engine::debug::format_var_type(elem_type).to_string(),
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1728,12 +1875,11 @@ impl DapSession {
     }
 
     /// Push variable snapshot + cycle stats to the monitor server.
-    /// Called after each completed scan cycle.
+    /// Called after each completed scan cycle and on every debugger halt.
+    /// Always updates MonitorState so data is available when a WS client
+    /// connects later (e.g., after the initial entry-stop).
     fn push_monitor_snapshot(&self) {
         let Some(ref handle) = self.monitor_handle else { return };
-        if !handle.has_subscribers() {
-            return;
-        }
         let Some(ref vm) = self.vm else { return };
 
         let forced = vm.forced_variables();
@@ -2060,13 +2206,15 @@ impl DapSession {
                     let mut seen = std::collections::HashSet::new();
                     for name in &self.watched_variables {
                         let upper = name.to_uppercase();
-                        let prefix = format!("{upper}.");
+                        let dot_prefix = format!("{upper}.");
+                        let bracket_prefix = format!("{upper}[");
 
-                        // Collect ALL descendants under this prefix.
+                        // Collect ALL descendants under this prefix (dot or bracket).
                         let mut descendants = Vec::new();
                         for v in &all {
-                            if v.name.to_uppercase().starts_with(&prefix)
-                                && seen.insert(v.name.to_uppercase())
+                            let v_upper = v.name.to_uppercase();
+                            if (v_upper.starts_with(&dot_prefix) || v_upper.starts_with(&bracket_prefix))
+                                && seen.insert(v_upper)
                             {
                                 let is_forced = forced.contains_key(&v.name.to_uppercase());
                                 descendants.push(serde_json::json!({
@@ -2153,14 +2301,22 @@ impl DapSession {
         }
 
         let prefix_dot = format!("{prefix}.");
+        let prefix_bracket = format!("{prefix}[");
         let mut root = BTreeMap::<String, Node>::new();
 
         for entry in flat {
             let full_name = entry["name"].as_str().unwrap_or("");
-            let Some(relative) = full_name
-                .get(prefix_dot.len()..)
-                .filter(|_| full_name.len() > prefix_dot.len())
-            else {
+            // Match descendants via dot OR bracket prefix.
+            let relative = if full_name.len() > prefix_dot.len()
+                && full_name[..prefix_dot.len()].eq_ignore_ascii_case(&prefix_dot)
+            {
+                &full_name[prefix_dot.len()..]
+            } else if full_name.len() > prefix_bracket.len()
+                && full_name[..prefix_bracket.len()].eq_ignore_ascii_case(&prefix_bracket)
+            {
+                // Include the bracket: "[0]" becomes the segment name
+                &full_name[prefix.len()..]
+            } else {
                 continue;
             };
             let parts: Vec<&str> = relative.split('.').collect();
@@ -2327,6 +2483,10 @@ impl DapSession {
             all_threads_stopped: Some(true),
             hit_breakpoint_ids: None,
         }));
+
+        // Push variable snapshot to the monitor WS so the Monitor panel
+        // shows current values even when the debugger is paused.
+        self.push_monitor_snapshot();
     }
 
     /// Push a runtime error message + Terminated event.

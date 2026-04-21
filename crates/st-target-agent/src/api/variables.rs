@@ -50,7 +50,15 @@ pub async fn variables(
     } else {
         let names: Vec<String> = query.watch.split(',').map(|s| s.trim().to_string()).collect();
         all.into_iter()
-            .filter(|v| names.iter().any(|n| n.eq_ignore_ascii_case(&v.name)))
+            .filter(|v| {
+                names.iter().any(|n| {
+                    // Exact match
+                    n.eq_ignore_ascii_case(&v.name)
+                    // Prefix match for compound types: "Main.arr" matches "Main.arr[1]"
+                    || v.name.to_uppercase().starts_with(&format!("{}.", n.to_uppercase()))
+                    || v.name.to_uppercase().starts_with(&format!("{}[", n.to_uppercase()))
+                })
+            })
             .collect()
     };
     Json(VariablesResponse { variables: values })

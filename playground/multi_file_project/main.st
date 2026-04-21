@@ -35,12 +35,22 @@ VAR
     conveyor : ConveyorController;
     stats : ProcessData;
 
+    fillers : ARRAY[0..9] OF FillController;
+
     cycle : INT := 0;
     bottle_sensor : BOOL := FALSE;
     filling : BOOL := FALSE;
     moving : BOOL := TRUE;
+    test_array: ARRAY[0..9] OF INT;
+    i: INT;
 END_VAR
     cycle := cycle + 1;
+
+    test_array[0] := cycle;
+
+    FOR i := 1 TO 9 DO
+        test_array[i] := test_array[i-1] + 1;
+    END_FOR;
 
     bottle_sensor := ((cycle MOD 20) = 0) AND conveyor.motor_running;
 

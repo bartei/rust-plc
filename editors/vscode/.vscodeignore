@@ -1,5 +1,8 @@
 .gitignore
 src/**
 tsconfig.json
+tsconfig.webview.json
+esbuild.webview.mjs
 node_modules/**
+test/**
 *.vsix

@@ -492,6 +492,21 @@ impl Vm {
         })
     }
 
+    /// Get array type info from type_defs. Returns (element_type, dimensions, total_elements).
+    #[allow(clippy::type_complexity)]
+    pub fn array_type_info(&self, type_def_idx: u16) -> Option<(VarType, &[(i64, i64)], usize)> {
+        self.module.type_defs.get(type_def_idx as usize).and_then(|td| {
+            if let TypeDef::Array { element_type, dimensions } = td {
+                let total: usize = dimensions.iter()
+                    .map(|(lo, hi)| (hi - lo + 1).max(0) as usize)
+                    .product();
+                Some((*element_type, dimensions.as_slice(), total))
+            } else {
+                None
+            }
+        })
+    }
+
     /// Get the call stack as frame info for the debugger.
     pub fn stack_frames(&self) -> Vec<FrameInfo> {
         self.call_stack
@@ -591,18 +606,35 @@ impl Vm {
                 continue;
             }
             let prefix = &func.name;
+            // Add the PROGRAM itself as a watchable parent
+            result.push((prefix.clone(), "PROGRAM".to_string()));
             for slot in &func.locals.slots {
                 // Skip FB/class instance slots — they're not scalar values.
                 // Their FIELDS are enumerated via the recursion below.
                 match slot.ty {
                     VarType::FbInstance(fb_idx) => {
                         let inst_prefix = format!("{prefix}.{}", slot.name);
+                        // Add the parent entry so users can watch "Main.fb"
+                        let fb_func = &self.module.functions[fb_idx as usize];
+                        result.push((inst_prefix.clone(), fb_func.name.clone()));
                         self.catalog_fb_fields(fb_idx, &inst_prefix, &mut result);
                     }
                     VarType::ClassInstance(_) => { /* skip */ }
                     VarType::Struct(td_idx) => {
                         let inst_prefix = format!("{prefix}.{}", slot.name);
+                        let ty_name = self.struct_type_fields(td_idx)
+                            .map(|(name, _)| name.to_string())
+                            .unwrap_or_else(|| "STRUCT".to_string());
+                        result.push((inst_prefix.clone(), ty_name));
                         self.catalog_struct_fields(td_idx, &inst_prefix, &mut result);
+                    }
+                    VarType::Array(td_idx) => {
+                        let arr_prefix = format!("{prefix}.{}", slot.name);
+                        let ty_str = debug::format_var_type_full(
+                            slot.ty, slot.int_width, &self.module.type_defs,
+                        );
+                        result.push((arr_prefix.clone(), ty_str));
+                        self.catalog_array_elements(td_idx, &arr_prefix, &mut result);
                     }
                     _ => {
                         result.push((
@@ -615,6 +647,24 @@ impl Vm {
             }
         }
         result
+    }
+
+    /// Enumerate array elements for the catalog (schema only, no values).
+    fn catalog_array_elements(
+        &self,
+        type_def_idx: u16,
+        prefix: &str,
+        result: &mut Vec<(String, String)>,
+    ) {
+        if let Some((elem_type, dims, _total)) = self.array_type_info(type_def_idx) {
+            let elem_ty_str = debug::format_var_type(elem_type).to_string();
+            if dims.len() == 1 {
+                let (lo, hi) = dims[0];
+                for idx in lo..=hi {
+                    result.push((format!("{prefix}[{idx}]"), elem_ty_str.clone()));
+                }
+            }
+        }
     }
 
     /// Enumerate a struct's fields for the catalog (schema only, no values).
@@ -698,8 +748,10 @@ impl Vm {
         for fb_slot in &fb_func.locals.slots {
             match fb_slot.ty {
                 VarType::FbInstance(nested_idx) => {
-                    // Recurse into nested FB, don't add the FB slot itself
+                    // Add parent entry, then recurse into nested FB
                     let nested_prefix = format!("{prefix}.{}", fb_slot.name);
+                    let nested_func = &self.module.functions[nested_idx as usize];
+                    result.push((nested_prefix.clone(), nested_func.name.clone()));
                     self.catalog_fb_fields(nested_idx, &nested_prefix, result);
                 }
                 VarType::ClassInstance(_) => { /* skip */ }
@@ -738,6 +790,14 @@ impl Vm {
                 match slot.ty {
                     VarType::FbInstance(fb_idx) => {
                         let inst_prefix = format!("{prefix}.{}", slot.name);
+                        let fb_func = &self.module.functions[fb_idx as usize];
+                        // Parent entry with summary for the FB
+                        result.push(VariableInfo {
+                            name: inst_prefix.clone(),
+                            value: String::new(), // populated by DAP/extension
+                            ty: fb_func.name.clone(),
+                            var_ref: 0,
+                        });
                         let instance_key = (caller_id, i as u16);
                         let nested_caller = ((i as u32) << 16) | (fb_idx as u32);
                         self.snapshot_fb_fields(
@@ -751,10 +811,38 @@ impl Vm {
                     VarType::ClassInstance(_) => { /* skip */ }
                     VarType::Struct(td_idx) => {
                         let inst_prefix = format!("{prefix}.{}", slot.name);
+                        let ty_name = self.struct_type_fields(td_idx)
+                            .map(|(name, _)| name.to_string())
+                            .unwrap_or_else(|| "STRUCT".to_string());
+                        result.push(VariableInfo {
+                            name: inst_prefix.clone(),
+                            value: String::new(),
+                            ty: ty_name,
+                            var_ref: 0,
+                        });
                         let instance_key = (caller_id, i as u16);
                         self.snapshot_struct_fields(
                             td_idx,
                             &inst_prefix,
+                            &instance_key,
+                            &mut result,
+                        );
+                    }
+                    VarType::Array(td_idx) => {
+                        let arr_prefix = format!("{prefix}.{}", slot.name);
+                        // Parent entry with array type
+                        result.push(VariableInfo {
+                            name: arr_prefix.clone(),
+                            value: String::new(),
+                            ty: debug::format_var_type_full(
+                                slot.ty, slot.int_width, &self.module.type_defs,
+                            ),
+                            var_ref: 0,
+                        });
+                        let instance_key = (caller_id, i as u16);
+                        self.snapshot_array_elements(
+                            td_idx,
+                            &arr_prefix,
                             &instance_key,
                             &mut result,
                         );
@@ -776,6 +864,36 @@ impl Vm {
             }
         }
         result
+    }
+
+    /// Snapshot array elements with runtime values.
+    fn snapshot_array_elements(
+        &self,
+        type_def_idx: u16,
+        prefix: &str,
+        instance_key: &(u32, u16),
+        result: &mut Vec<VariableInfo>,
+    ) {
+        if let Some((elem_type, dims, _total)) = self.array_type_info(type_def_idx) {
+            let state = self.fb_instances.get(instance_key);
+            let elem_ty_str = debug::format_var_type(elem_type).to_string();
+            if dims.len() == 1 {
+                let (lo, hi) = dims[0];
+                for idx in lo..=hi {
+                    let flat = (idx - lo) as usize;
+                    let value = state
+                        .and_then(|s| s.get(flat))
+                        .cloned()
+                        .unwrap_or(Value::default_for_type(elem_type));
+                    result.push(VariableInfo {
+                        name: format!("{prefix}[{idx}]"),
+                        value: debug::format_value(&value),
+                        ty: elem_ty_str.clone(),
+                        var_ref: 0,
+                    });
+                }
+            }
+        }
     }
 
     /// Snapshot a struct instance's fields with runtime values.
@@ -1324,12 +1442,60 @@ impl Vm {
                     self.reg_set(dst, Value::Int(base));
                 }
 
-                // Array/struct access (simplified)
-                Instruction::LoadArray(dst, _slot, _idx) => {
-                    self.reg_set(dst, Value::Int(0)); // TODO: implement array storage
+                // Array access — elements stored in fb_instances[(caller_id, slot)]
+                Instruction::LoadArray(dst, base_slot, idx_reg) => {
+                    let raw_idx = self.reg_get(idx_reg).as_int();
+                    let caller_id = self.caller_identity();
+                    let instance_key = (caller_id, base_slot);
+                    // Determine lower bound from type_defs
+                    let frame = self.call_stack.last().unwrap();
+                    let func = &self.module.functions[frame.func_index as usize];
+                    let lo = if let Some(slot) = func.locals.slots.get(base_slot as usize) {
+                        if let VarType::Array(td_idx) = slot.ty {
+                            self.module.type_defs.get(td_idx as usize)
+                                .and_then(|td| if let TypeDef::Array { dimensions, .. } = td {
+                                    dimensions.first().map(|(lo, _)| *lo)
+                                } else { None })
+                                .unwrap_or(0)
+                        } else { 0 }
+                    } else { 0 };
+                    let flat = (raw_idx - lo) as usize;
+                    let val = self.fb_instances
+                        .get(&instance_key)
+                        .and_then(|arr| arr.get(flat))
+                        .cloned()
+                        .unwrap_or(Value::Int(0));
+                    self.reg_set(dst, val);
                 }
-                Instruction::StoreArray(_slot, _idx, _val) => {
-                    // TODO: implement array storage
+                Instruction::StoreArray(base_slot, idx_reg, val_reg) => {
+                    let raw_idx = self.reg_get(idx_reg).as_int();
+                    let val = self.reg_get(val_reg).clone();
+                    let caller_id = self.caller_identity();
+                    let instance_key = (caller_id, base_slot);
+                    // Determine lower bound and total size from type_defs
+                    let frame = self.call_stack.last().unwrap();
+                    let func = &self.module.functions[frame.func_index as usize];
+                    let (lo, total) = if let Some(slot) = func.locals.slots.get(base_slot as usize) {
+                        if let VarType::Array(td_idx) = slot.ty {
+                            self.module.type_defs.get(td_idx as usize)
+                                .and_then(|td| if let TypeDef::Array { dimensions, element_type } = td {
+                                    let lo = dimensions.first().map(|(l, _)| *l).unwrap_or(0);
+                                    let total: usize = dimensions.iter()
+                                        .map(|(l, h)| (h - l + 1).max(0) as usize)
+                                        .product();
+                                    Some((lo, total, *element_type))
+                                } else { None })
+                                .map(|(lo, total, _et)| (lo, total))
+                                .unwrap_or((0, 0))
+                        } else { (0, 0) }
+                    } else { (0, 0) };
+                    let flat = (raw_idx - lo) as usize;
+                    let entry = self.fb_instances
+                        .entry(instance_key)
+                        .or_insert_with(|| vec![Value::Int(0); total]);
+                    if flat < entry.len() {
+                        entry[flat] = val;
+                    }
                 }
                 Instruction::LoadField(dst, instance_slot, field_idx) => {
                     // Read a field from an FB instance's retained state
