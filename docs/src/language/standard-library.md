@@ -10,7 +10,7 @@ The library includes:
 | [Edge Detection](#edge-detection) | `stdlib/edge_detection.st` | R_TRIG, F_TRIG |
 | [Timers](#timers) | `stdlib/timers.st` | TON, TOF, TP |
 | [Math & Selection](#math--selection) | `stdlib/math.st` | MAX, MIN, LIMIT, ABS, SEL |
-| [Type Conversions](#type-conversions) | Compiler intrinsics | 30+ *_TO_* functions (INT_TO_REAL, REAL_TO_INT, etc.) |
+| [Type Conversions](#type-conversions) | Compiler intrinsics | 60+ *_TO_* functions including TIME conversions and TO_*/ANY_TO_* generics |
 | [Trig & Math Intrinsics](#trigonometric--math-intrinsics) | Compiler intrinsics | SQRT, SIN, COS, TAN, ASIN, ACOS, ATAN, LN, LOG, EXP |
 | [System Time](#system-time) | Compiler intrinsic | SYSTEM_TIME() |
 
@@ -325,7 +325,9 @@ END_PROGRAM
 
 ## Type Conversions
 
-Type conversion functions are implemented as **compiler intrinsics**. The compiler recognizes `*_TO_*` function name patterns and emits `ToInt`, `ToReal`, or `ToBool` VM instructions directly, rather than calling a user-defined function. The file `stdlib/conversions.st` serves as documentation for the available conversions.
+Type conversion functions are implemented as **compiler intrinsics**. The compiler recognizes `*_TO_*` function name patterns and emits dedicated VM instructions (`ToInt`, `ToReal`, `ToBool`, `ToTime`) directly, rather than calling a user-defined function. The file `stdlib/conversions.st` serves as documentation for all available conversions.
+
+All conversion functions take a single parameter `IN1` and return the converted value.
 
 ### To REAL / LREAL
 
@@ -340,13 +342,15 @@ Type conversion functions are implemented as **compiler intrinsics**. The compil
 | `UDINT_TO_REAL` | Unsigned double integer to REAL |
 | `ULINT_TO_REAL` | Unsigned long integer to REAL |
 | `BOOL_TO_REAL` | Boolean to REAL (FALSE=0.0, TRUE=1.0) |
+| `TIME_TO_REAL` | TIME to REAL (milliseconds as float) |
+| `TIME_TO_LREAL` | TIME to LREAL (milliseconds as float) |
 | `INT_TO_LREAL` | Integer to LREAL |
 | `SINT_TO_LREAL` | Short integer to LREAL |
 | `DINT_TO_LREAL` | Double integer to LREAL |
 | `LINT_TO_LREAL` | Long integer to LREAL |
 | `REAL_TO_LREAL` | REAL to LREAL |
 
-### To INT / DINT / LINT / SINT
+### To INT / DINT / LINT / SINT (and unsigned variants)
 
 | Function | Description |
 |----------|-------------|
@@ -370,6 +374,14 @@ Type conversion functions are implemented as **compiler intrinsics**. The compil
 | `SINT_TO_INT` | Short integer to integer |
 | `SINT_TO_DINT` | Short integer to double integer |
 | `SINT_TO_LINT` | Short integer to long integer |
+| `TIME_TO_INT` | TIME to integer (milliseconds) |
+| `TIME_TO_SINT` | TIME to short integer (milliseconds, may truncate) |
+| `TIME_TO_DINT` | TIME to double integer (milliseconds) |
+| `TIME_TO_LINT` | TIME to long integer (milliseconds) |
+| `TIME_TO_UINT` | TIME to unsigned integer (milliseconds) |
+| `TIME_TO_USINT` | TIME to unsigned short integer (milliseconds) |
+| `TIME_TO_UDINT` | TIME to unsigned double integer (milliseconds) |
+| `TIME_TO_ULINT` | TIME to unsigned long integer (milliseconds) |
 
 ### To BOOL
 
@@ -379,6 +391,44 @@ Type conversion functions are implemented as **compiler intrinsics**. The compil
 | `REAL_TO_BOOL` | REAL to boolean |
 | `DINT_TO_BOOL` | Double integer to boolean |
 | `LINT_TO_BOOL` | Long integer to boolean |
+| `TIME_TO_BOOL` | TIME to boolean (T#0ms=FALSE, nonzero=TRUE) |
+
+### To TIME
+
+TIME values are stored internally as milliseconds (i64). When converting a numeric value to TIME, the integer is interpreted as milliseconds. When converting TIME to a numeric value, the result is the millisecond count.
+
+| Function | Description |
+|----------|-------------|
+| `INT_TO_TIME` | Integer (ms) to TIME |
+| `SINT_TO_TIME` | Short integer (ms) to TIME |
+| `DINT_TO_TIME` | Double integer (ms) to TIME |
+| `LINT_TO_TIME` | Long integer (ms) to TIME |
+| `UINT_TO_TIME` | Unsigned integer (ms) to TIME |
+| `USINT_TO_TIME` | Unsigned short integer (ms) to TIME |
+| `UDINT_TO_TIME` | Unsigned double integer (ms) to TIME |
+| `ULINT_TO_TIME` | Unsigned long integer (ms) to TIME |
+| `REAL_TO_TIME` | REAL (ms, truncated) to TIME |
+| `LREAL_TO_TIME` | LREAL (ms, truncated) to TIME |
+| `BOOL_TO_TIME` | Boolean to TIME (FALSE=T#0ms, TRUE=T#1ms) |
+
+### Overloaded Generic Conversions (TO_\* / ANY_TO_\*)
+
+These accept **any input type** and convert to the target type. The compiler resolves the appropriate conversion at compile time. `TO_<target>` and `ANY_TO_<target>` are functionally identical -- the `ANY_TO_` prefix follows IEC 61131-3 Edition 3 naming, while `TO_` follows the CODESYS convention.
+
+| Function | Equivalent to |
+|----------|---------------|
+| `TO_INT` / `ANY_TO_INT` | `*_TO_INT` (returns INT) |
+| `TO_SINT` / `ANY_TO_SINT` | `*_TO_SINT` (returns INT, narrowed at store) |
+| `TO_DINT` / `ANY_TO_DINT` | `*_TO_DINT` (returns INT) |
+| `TO_LINT` / `ANY_TO_LINT` | `*_TO_LINT` (returns INT) |
+| `TO_UINT` / `ANY_TO_UINT` | `*_TO_UINT` (returns INT, unsigned) |
+| `TO_USINT` / `ANY_TO_USINT` | `*_TO_USINT` (returns INT, unsigned) |
+| `TO_UDINT` / `ANY_TO_UDINT` | `*_TO_UDINT` (returns INT, unsigned) |
+| `TO_ULINT` / `ANY_TO_ULINT` | `*_TO_ULINT` (returns INT, unsigned) |
+| `TO_REAL` / `ANY_TO_REAL` | `*_TO_REAL` (returns REAL) |
+| `TO_LREAL` / `ANY_TO_LREAL` | `*_TO_LREAL` (returns LREAL) |
+| `TO_BOOL` / `ANY_TO_BOOL` | `*_TO_BOOL` (returns BOOL) |
+| `TO_TIME` / `ANY_TO_TIME` | `*_TO_TIME` (returns TIME) |
 
 **Example**
 
@@ -390,17 +440,134 @@ VAR
     my_real : REAL;
     my_int : INT := 42;
     value_as_bool : BOOL;
+    delay : TIME := T#5s;
+    delay_ms : INT;
+    custom_time : TIME;
 END_VAR
-    flag_as_int := BOOL_TO_INT(IN1 := flag);
-    // flag_as_int = 1
+    // Typed conversions
+    flag_as_int := BOOL_TO_INT(IN1 := flag);        // 1
+    my_real := INT_TO_REAL(IN1 := my_int);           // 42.0
+    value_as_bool := INT_TO_BOOL(IN1 := my_int);     // TRUE
 
-    my_real := INT_TO_REAL(IN1 := my_int);
-    // my_real = 42.0
+    // TIME conversions
+    delay_ms := TIME_TO_INT(IN1 := delay);           // 5000
+    custom_time := DINT_TO_TIME(IN1 := 2500);        // T#2s500ms
 
-    value_as_bool := INT_TO_BOOL(IN1 := my_int);
-    // value_as_bool = TRUE
+    // Generic conversions (accept any input type)
+    delay_ms := TO_INT(IN1 := delay);                // 5000
+    custom_time := TO_TIME(IN1 := 3000);             // T#3s
+    my_real := ANY_TO_REAL(IN1 := delay);            // 5000.0
 END_PROGRAM
 ```
+
+---
+
+## DATE, TOD, and DT Conversions
+
+DATE, TOD (TIME_OF_DAY), and DT (DATE_AND_TIME) types are stored internally as milliseconds (i64), the same representation as TIME:
+
+- **DATE** -- milliseconds since Unix epoch (1970-01-01)
+- **TOD** -- milliseconds since midnight
+- **DT** -- milliseconds since Unix epoch (includes time of day)
+
+> **Note:** DATE and DT values in milliseconds exceed the DINT (32-bit) range. Use LINT for numeric conversions of DATE/DT values.
+
+> **TOD wrapping:** TOD values are always wrapped modulo 86,400,000 ms (24 hours), matching CODESYS behavior. This applies to `*_TO_TOD` conversions, `ADD_TOD_TIME`, and `SUB_TOD_TIME`. For example, `ADD_TOD_TIME(TOD#23:00:00, T#2h)` wraps to `TOD#01:00:00`.
+
+### DATE / TOD / DT to Numeric
+
+| Function | Description |
+|----------|-------------|
+| `DATE_TO_INT` / `DATE_TO_DINT` / `DATE_TO_LINT` | DATE to integer (ms since epoch) |
+| `DATE_TO_REAL` / `DATE_TO_LREAL` | DATE to float (ms since epoch) |
+| `DATE_TO_BOOL` | DATE to boolean (epoch=FALSE, nonzero=TRUE) |
+| `TOD_TO_INT` / `TOD_TO_DINT` / `TOD_TO_LINT` | TOD to integer (ms since midnight) |
+| `TOD_TO_REAL` / `TOD_TO_LREAL` | TOD to float (ms since midnight) |
+| `TOD_TO_BOOL` | TOD to boolean (midnight=FALSE, nonzero=TRUE) |
+| `DT_TO_INT` / `DT_TO_DINT` / `DT_TO_LINT` | DT to integer (ms since epoch) |
+| `DT_TO_REAL` / `DT_TO_LREAL` | DT to float (ms since epoch) |
+| `DT_TO_BOOL` | DT to boolean (epoch=FALSE, nonzero=TRUE) |
+
+### Numeric to DATE / TOD / DT
+
+| Function | Description |
+|----------|-------------|
+| `INT_TO_DATE` / `DINT_TO_DATE` / `LINT_TO_DATE` | Integer (ms since epoch) to DATE |
+| `REAL_TO_DATE` / `LREAL_TO_DATE` | Float (ms, truncated) to DATE |
+| `INT_TO_TOD` / `DINT_TO_TOD` / `LINT_TO_TOD` | Integer (ms since midnight) to TOD (wraps modulo 24h) |
+| `REAL_TO_TOD` / `LREAL_TO_TOD` | Float (ms, truncated) to TOD (wraps modulo 24h) |
+| `INT_TO_DT` / `DINT_TO_DT` / `LINT_TO_DT` | Integer (ms since epoch) to DT |
+| `REAL_TO_DT` / `LREAL_TO_DT` | Float (ms, truncated) to DT |
+
+### Cross-Type Extraction and Combination
+
+| Function | Description |
+|----------|-------------|
+| `DT_TO_DATE` | Extract date portion from DT (truncates to day boundary) |
+| `DT_TO_TOD` | Extract time-of-day portion from DT |
+| `CONCAT_DATE_TOD(IN1, IN2)` | Combine DATE + TOD into DT |
+| `DATE_TO_DT` / `TIME_TO_DATE` / `TIME_TO_DT` | Cross-type cast (reinterpret ms value) |
+| `DATE_TO_TIME` / `TOD_TO_TIME` / `DT_TO_TIME` | Cross-type cast (reinterpret ms value) |
+
+### Date/Time Arithmetic
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `ADD_TOD_TIME` | `(IN1: TOD, IN2: TIME) : TOD` | Add duration to time-of-day |
+| `ADD_DT_TIME` | `(IN1: DT, IN2: TIME) : DT` | Add duration to date-and-time |
+| `SUB_TOD_TIME` | `(IN1: TOD, IN2: TIME) : TOD` | Subtract duration from TOD |
+| `SUB_DATE_DATE` | `(IN1: DATE, IN2: DATE) : TIME` | Difference between two dates |
+| `SUB_TOD_TOD` | `(IN1: TOD, IN2: TOD) : TIME` | Difference between two TODs |
+| `SUB_DT_TIME` | `(IN1: DT, IN2: TIME) : DT` | Subtract duration from DT |
+| `SUB_DT_DT` | `(IN1: DT, IN2: DT) : TIME` | Difference between two DTs |
+| `MULTIME` | `(IN1: TIME, IN2: INT) : TIME` | Multiply duration by integer |
+| `DIVTIME` | `(IN1: TIME, IN2: INT) : TIME` | Divide duration by integer |
+| `DAY_OF_WEEK` | `(IN1: DATE) : INT` | Day of week (0=Sun, 1=Mon, ..., 6=Sat) |
+
+### Generic Conversions
+
+| Function | Description |
+|----------|-------------|
+| `TO_DATE` / `ANY_TO_DATE` | Any type to DATE |
+| `TO_TOD` / `ANY_TO_TOD` | Any type to TOD |
+| `TO_DT` / `ANY_TO_DT` | Any type to DT |
+
+**Example**
+
+```st
+PROGRAM DateTimeExample
+VAR
+    my_date  : DATE := D#2024-01-15;
+    my_tod   : TOD  := TOD#12:30:00;
+    my_dt    : DT   := DT#2024-01-15-12:30:00;
+    combined : DT;
+    date_part : DATE;
+    tod_part  : TOD;
+    diff     : TIME;
+    dow      : INT;
+    scaled   : TIME;
+END_VAR
+    // Combine date + time-of-day into DT
+    combined := CONCAT_DATE_TOD(IN1 := my_date, IN2 := my_tod);
+
+    // Extract components from DT
+    date_part := DT_TO_DATE(IN1 := my_dt);   // D#2024-01-15
+    tod_part  := DT_TO_TOD(IN1 := my_dt);    // TOD#12:30:00
+
+    // Date arithmetic
+    diff := SUB_DATE_DATE(IN1 := D#2024-01-15, IN2 := D#2024-01-01);
+    // diff = T#14d (14 days in ms)
+
+    // Day of week
+    dow := DAY_OF_WEEK(IN1 := my_date);      // 1 = Monday
+
+    // Scale a duration
+    scaled := MULTIME(IN1 := T#1s, IN2 := 5); // T#5s
+    scaled := DIVTIME(IN1 := T#10s, IN2 := 2); // T#5s
+END_PROGRAM
+```
+
+> **Not yet implemented:** `TIME_TO_STRING`, `STRING_TO_TIME`, `SPLIT_DATE`, `SPLIT_TOD`, `SPLIT_DT`, `CONCAT_DATE` (from components), `CONCAT_TOD`, `CONCAT_DT`. These require string formatting and multi-output function infrastructure.
 
 ---
 

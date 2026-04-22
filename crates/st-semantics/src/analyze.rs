@@ -147,7 +147,194 @@ impl Analyzer {
             reg(name, &int_ty, &bool_ty);
         }
         reg("REAL_TO_BOOL", &real_ty, &bool_ty);
+
+        // ── TIME conversions ────────────────────────────────────────────
+        let time_ty = Ty::Elementary(ElementaryType::Time);
+
+        // TIME_TO_* (TIME → numeric/bool) — value is milliseconds
+        for name in [
+            "TIME_TO_INT", "TIME_TO_SINT", "TIME_TO_DINT", "TIME_TO_LINT",
+            "TIME_TO_UINT", "TIME_TO_USINT", "TIME_TO_UDINT", "TIME_TO_ULINT",
+        ] {
+            reg(name, &time_ty, &int_ty);
+        }
+        for name in ["TIME_TO_REAL", "TIME_TO_LREAL"] {
+            reg(name, &time_ty, &real_ty);
+        }
+        reg("TIME_TO_BOOL", &time_ty, &bool_ty);
+
+        // *_TO_TIME (numeric/bool → TIME) — value interpreted as milliseconds
+        for name in [
+            "INT_TO_TIME", "SINT_TO_TIME", "DINT_TO_TIME", "LINT_TO_TIME",
+            "UINT_TO_TIME", "USINT_TO_TIME", "UDINT_TO_TIME", "ULINT_TO_TIME",
+        ] {
+            reg(name, &int_ty, &time_ty);
+        }
+        for name in ["REAL_TO_TIME", "LREAL_TO_TIME"] {
+            reg(name, &real_ty, &time_ty);
+        }
+        reg("BOOL_TO_TIME", &bool_ty, &time_ty);
+
+        // ── Overloaded TO_* / ANY_TO_* generic conversions ──────────────
+        // These accept any input type; the VM dispatches dynamically.
+        // TO_<target> and ANY_TO_<target> are functionally identical.
+        // Use Ty::Unknown as parameter type to accept any input (like REF()).
+        let any_ty = Ty::Unknown;
+        for name in [
+            "TO_INT", "TO_SINT", "TO_DINT", "TO_LINT",
+            "TO_UINT", "TO_USINT", "TO_UDINT", "TO_ULINT",
+            "ANY_TO_INT", "ANY_TO_SINT", "ANY_TO_DINT", "ANY_TO_LINT",
+            "ANY_TO_UINT", "ANY_TO_USINT", "ANY_TO_UDINT", "ANY_TO_ULINT",
+        ] {
+            reg(name, &any_ty, &int_ty);
+        }
+        for name in [
+            "TO_REAL", "TO_LREAL",
+            "ANY_TO_REAL", "ANY_TO_LREAL",
+        ] {
+            reg(name, &any_ty, &real_ty);
+        }
+        for name in ["TO_BOOL", "ANY_TO_BOOL"] {
+            reg(name, &any_ty, &bool_ty);
+        }
+        for name in ["TO_TIME", "ANY_TO_TIME"] {
+            reg(name, &any_ty, &time_ty);
+        }
+
+        // ── DATE / TOD / DT conversions ─────────────────────────────────
+        let date_ty = Ty::Elementary(ElementaryType::Date);
+        let tod_ty = Ty::Elementary(ElementaryType::Tod);
+        let dt_ty = Ty::Elementary(ElementaryType::Dt);
+
+        // DATE_TO_* / *_TO_DATE
+        for name in [
+            "DATE_TO_INT", "DATE_TO_SINT", "DATE_TO_DINT", "DATE_TO_LINT",
+            "DATE_TO_UINT", "DATE_TO_USINT", "DATE_TO_UDINT", "DATE_TO_ULINT",
+        ] {
+            reg(name, &date_ty, &int_ty);
+        }
+        for name in ["DATE_TO_REAL", "DATE_TO_LREAL"] {
+            reg(name, &date_ty, &real_ty);
+        }
+        reg("DATE_TO_BOOL", &date_ty, &bool_ty);
+        for name in [
+            "INT_TO_DATE", "SINT_TO_DATE", "DINT_TO_DATE", "LINT_TO_DATE",
+            "UINT_TO_DATE", "USINT_TO_DATE", "UDINT_TO_DATE", "ULINT_TO_DATE",
+        ] {
+            reg(name, &int_ty, &date_ty);
+        }
+        for name in ["REAL_TO_DATE", "LREAL_TO_DATE"] {
+            reg(name, &real_ty, &date_ty);
+        }
+
+        // TOD_TO_* / *_TO_TOD
+        for name in [
+            "TOD_TO_INT", "TOD_TO_SINT", "TOD_TO_DINT", "TOD_TO_LINT",
+            "TOD_TO_UINT", "TOD_TO_USINT", "TOD_TO_UDINT", "TOD_TO_ULINT",
+        ] {
+            reg(name, &tod_ty, &int_ty);
+        }
+        for name in ["TOD_TO_REAL", "TOD_TO_LREAL"] {
+            reg(name, &tod_ty, &real_ty);
+        }
+        reg("TOD_TO_BOOL", &tod_ty, &bool_ty);
+        for name in [
+            "INT_TO_TOD", "SINT_TO_TOD", "DINT_TO_TOD", "LINT_TO_TOD",
+            "UINT_TO_TOD", "USINT_TO_TOD", "UDINT_TO_TOD", "ULINT_TO_TOD",
+        ] {
+            reg(name, &int_ty, &tod_ty);
+        }
+        for name in ["REAL_TO_TOD", "LREAL_TO_TOD"] {
+            reg(name, &real_ty, &tod_ty);
+        }
+
+        // DT_TO_* / *_TO_DT
+        for name in [
+            "DT_TO_INT", "DT_TO_SINT", "DT_TO_DINT", "DT_TO_LINT",
+            "DT_TO_UINT", "DT_TO_USINT", "DT_TO_UDINT", "DT_TO_ULINT",
+        ] {
+            reg(name, &dt_ty, &int_ty);
+        }
+        for name in ["DT_TO_REAL", "DT_TO_LREAL"] {
+            reg(name, &dt_ty, &real_ty);
+        }
+        reg("DT_TO_BOOL", &dt_ty, &bool_ty);
+        for name in [
+            "INT_TO_DT", "SINT_TO_DT", "DINT_TO_DT", "LINT_TO_DT",
+            "UINT_TO_DT", "USINT_TO_DT", "UDINT_TO_DT", "ULINT_TO_DT",
+        ] {
+            reg(name, &int_ty, &dt_ty);
+        }
+        for name in ["REAL_TO_DT", "LREAL_TO_DT"] {
+            reg(name, &real_ty, &dt_ty);
+        }
+
+        // Cross-type extractions (single-arg)
+        reg("DT_TO_DATE", &dt_ty, &date_ty);
+        reg("DT_TO_TOD", &dt_ty, &tod_ty);
+        reg("DATE_TO_DT", &date_ty, &dt_ty);
+        reg("TIME_TO_DATE", &time_ty, &date_ty);
+        reg("TIME_TO_TOD", &time_ty, &tod_ty);
+        reg("TIME_TO_DT", &time_ty, &dt_ty);
+        reg("DATE_TO_TIME", &date_ty, &time_ty);
+        reg("TOD_TO_TIME", &tod_ty, &time_ty);
+        reg("DT_TO_TIME", &dt_ty, &time_ty);
+
+        // DAY_OF_WEEK (DATE → INT)
+        reg("DAY_OF_WEEK", &date_ty, &int_ty);
+
+        // TO_DATE / TO_TOD / TO_DT generics
+        for name in ["TO_DATE", "ANY_TO_DATE"] {
+            reg(name, &any_ty, &date_ty);
+        }
+        for name in ["TO_TOD", "ANY_TO_TOD"] {
+            reg(name, &any_ty, &tod_ty);
+        }
+        for name in ["TO_DT", "ANY_TO_DT"] {
+            reg(name, &any_ty, &dt_ty);
+        }
         } // end closure scope
+
+        // ── Two-argument date/time intrinsics ───────────────────────────
+        {
+        let time_ty = Ty::Elementary(ElementaryType::Time);
+        let date_ty = Ty::Elementary(ElementaryType::Date);
+        let tod_ty = Ty::Elementary(ElementaryType::Tod);
+        let dt_ty = Ty::Elementary(ElementaryType::Dt);
+        let int_ty = Ty::Elementary(ElementaryType::Int);
+
+        let mut reg2 = |name: &str, p1_ty: &Ty, p2_ty: &Ty, ret_ty: &Ty| {
+            self.symbols.define(
+                global,
+                Symbol {
+                    name: name.to_string(),
+                    ty: ret_ty.clone(),
+                    kind: SymbolKind::Function {
+                        return_type: ret_ty.clone(),
+                        params: vec![
+                            ParamDef { name: "IN1".to_string(), ty: p1_ty.clone(), var_kind: VarKind::VarInput },
+                            ParamDef { name: "IN2".to_string(), ty: p2_ty.clone(), var_kind: VarKind::VarInput },
+                        ],
+                    },
+                    range: TextRange::new(0, 0),
+                    used: true,
+                    assigned: true,
+                },
+            );
+        };
+
+        // Date/time arithmetic
+        reg2("ADD_TOD_TIME", &tod_ty, &time_ty, &tod_ty);
+        reg2("ADD_DT_TIME", &dt_ty, &time_ty, &dt_ty);
+        reg2("SUB_TOD_TIME", &tod_ty, &time_ty, &tod_ty);
+        reg2("SUB_DATE_DATE", &date_ty, &date_ty, &time_ty);
+        reg2("SUB_TOD_TOD", &tod_ty, &tod_ty, &time_ty);
+        reg2("SUB_DT_TIME", &dt_ty, &time_ty, &dt_ty);
+        reg2("SUB_DT_DT", &dt_ty, &dt_ty, &time_ty);
+        reg2("CONCAT_DATE_TOD", &date_ty, &tod_ty, &dt_ty);
+        reg2("MULTIME", &time_ty, &int_ty, &time_ty);
+        reg2("DIVTIME", &time_ty, &int_ty, &time_ty);
+        }
 
         // REF() intrinsic — takes any variable, returns a reference
         self.symbols.define(

@@ -1354,6 +1354,34 @@ impl Vm {
                     let val = Value::Bool(self.reg_get(src).as_bool());
                     self.reg_set(dst, val);
                 }
+                Instruction::ToTime(dst, src) => {
+                    let val = Value::Time(self.reg_get(src).as_time());
+                    self.reg_set(dst, val);
+                }
+                Instruction::ToTod(dst, src) => {
+                    let ms = self.reg_get(src).as_time();
+                    let wrapped = ms.rem_euclid(86_400_000);
+                    self.reg_set(dst, Value::Time(wrapped));
+                }
+                Instruction::DtExtractDate(dst, src) => {
+                    let ms = self.reg_get(src).as_time();
+                    // Truncate to day boundary (floor division for negative values)
+                    let day_ms = 86_400_000i64;
+                    let date = ms.div_euclid(day_ms) * day_ms;
+                    self.reg_set(dst, Value::Time(date));
+                }
+                Instruction::DtExtractTod(dst, src) => {
+                    let ms = self.reg_get(src).as_time();
+                    let tod = ms.rem_euclid(86_400_000);
+                    self.reg_set(dst, Value::Time(tod));
+                }
+                Instruction::DayOfWeek(dst, src) => {
+                    let ms = self.reg_get(src).as_time();
+                    // Unix epoch (1970-01-01) was a Thursday (4).
+                    let days = ms.div_euclid(86_400_000);
+                    let dow = (days + 4).rem_euclid(7); // 0=Sun, 1=Mon, ..., 6=Sat
+                    self.reg_set(dst, Value::Int(dow));
+                }
 
                 // Control flow
                 Instruction::Jump(label) => {

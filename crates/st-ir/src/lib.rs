@@ -135,7 +135,7 @@ pub enum VarType {
     UInt,   // 64-bit unsigned (covers USINT..ULINT)
     Real,   // 64-bit float (covers REAL, LREAL)
     String, // heap-allocated
-    Time,   // nanoseconds as i64
+    Time,   // milliseconds as i64
     FbInstance(u16),    // index into Module::functions
     ClassInstance(u16), // index into Module::functions (the class)
     Struct(u16),        // index into Module::type_defs
@@ -180,6 +180,9 @@ impl Value {
         match self {
             Value::Bool(b) => *b,
             Value::Int(i) => *i != 0,
+            Value::UInt(u) => *u != 0,
+            Value::Real(r) => *r != 0.0,
+            Value::Time(ms) => *ms != 0,
             _ => false,
         }
     }
@@ -200,7 +203,30 @@ impl Value {
             Value::Real(r) => *r,
             Value::Int(i) => *i as f64,
             Value::UInt(u) => *u as f64,
+            Value::Time(ms) => *ms as f64,
             _ => 0.0,
+        }
+    }
+
+    pub fn as_time(&self) -> i64 {
+        match self {
+            Value::Time(ms) => *ms,
+            Value::Int(i) => *i,
+            Value::UInt(u) => *u as i64,
+            Value::Real(r) => *r as i64,
+            Value::Bool(b) => *b as i64,
+            _ => 0,
+        }
+    }
+
+    pub fn as_uint(&self) -> u64 {
+        match self {
+            Value::UInt(u) => *u,
+            Value::Int(i) => *i as u64,
+            Value::Bool(b) => *b as u64,
+            Value::Real(r) => *r as u64,
+            Value::Time(ms) => *ms as u64,
+            _ => 0,
         }
     }
 
@@ -310,6 +336,16 @@ pub enum Instruction {
     ToReal(Reg, Reg),
     /// Convert register value to bool.
     ToBool(Reg, Reg),
+    /// Convert register value to time (milliseconds).
+    ToTime(Reg, Reg),
+    /// Convert register value to TOD (wraps to 0..86_399_999 ms).
+    ToTod(Reg, Reg),
+    /// Extract date from DT: dst = (src / 86400000) * 86400000.
+    DtExtractDate(Reg, Reg),
+    /// Extract time-of-day from DT: dst = src % 86400000.
+    DtExtractTod(Reg, Reg),
+    /// Day of week from DATE (ms since epoch): 0=Sunday..6=Saturday.
+    DayOfWeek(Reg, Reg),
 
     // ── Control flow ─────────────────────────────────────────────────
     /// Unconditional jump.

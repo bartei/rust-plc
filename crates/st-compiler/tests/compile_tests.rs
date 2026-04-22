@@ -345,6 +345,152 @@ fn value_conversions() {
 }
 
 #[test]
+fn value_as_time() {
+    // Time → Time (identity)
+    assert_eq!(Value::Time(5000).as_time(), 5000);
+    // Int → Time (milliseconds)
+    assert_eq!(Value::Int(3000).as_time(), 3000);
+    // UInt → Time
+    assert_eq!(Value::UInt(7500).as_time(), 7500);
+    // Real → Time (truncates)
+    assert_eq!(Value::Real(2500.7).as_time(), 2500);
+    // Bool → Time
+    assert_eq!(Value::Bool(true).as_time(), 1);
+    assert_eq!(Value::Bool(false).as_time(), 0);
+    // Null/Void → 0
+    assert_eq!(Value::Null.as_time(), 0);
+    assert_eq!(Value::Void.as_time(), 0);
+}
+
+#[test]
+fn value_as_uint() {
+    assert_eq!(Value::UInt(42).as_uint(), 42);
+    assert_eq!(Value::Int(100).as_uint(), 100);
+    assert_eq!(Value::Bool(true).as_uint(), 1);
+    assert_eq!(Value::Real(3.9).as_uint(), 3);
+    assert_eq!(Value::Time(5000).as_uint(), 5000);
+    assert_eq!(Value::Null.as_uint(), 0);
+}
+
+#[test]
+fn value_as_real_from_time() {
+    // Time should convert to real (milliseconds as float)
+    assert_eq!(Value::Time(5000).as_real(), 5000.0);
+}
+
+#[test]
+fn time_to_int_instruction_emitted() {
+    let module = compile_ok(
+        "PROGRAM Main\nVAR\n  t : TIME := T#5s;\n  x : INT;\nEND_VAR\n  x := TIME_TO_INT(IN1 := t);\nEND_PROGRAM\n"
+    );
+    let (_, main) = module.find_function("Main").expect("Main not found");
+    let has_to_int = main.instructions.iter().any(|i| matches!(i, Instruction::ToInt(_, _)));
+    assert!(has_to_int, "Expected ToInt instruction for TIME_TO_INT");
+}
+
+#[test]
+fn int_to_time_instruction_emitted() {
+    let module = compile_ok(
+        "PROGRAM Main\nVAR\n  t : TIME;\n  x : INT := 5000;\nEND_VAR\n  t := INT_TO_TIME(IN1 := x);\nEND_PROGRAM\n"
+    );
+    let (_, main) = module.find_function("Main").expect("Main not found");
+    let has_to_time = main.instructions.iter().any(|i| matches!(i, Instruction::ToTime(_, _)));
+    assert!(has_to_time, "Expected ToTime instruction for INT_TO_TIME");
+}
+
+#[test]
+fn to_time_generic_instruction_emitted() {
+    let module = compile_ok(
+        "PROGRAM Main\nVAR\n  t : TIME;\n  x : INT := 5000;\nEND_VAR\n  t := TO_TIME(IN1 := x);\nEND_PROGRAM\n"
+    );
+    let (_, main) = module.find_function("Main").expect("Main not found");
+    let has_to_time = main.instructions.iter().any(|i| matches!(i, Instruction::ToTime(_, _)));
+    assert!(has_to_time, "Expected ToTime instruction for TO_TIME");
+}
+
+#[test]
+fn any_to_int_generic_instruction_emitted() {
+    let module = compile_ok(
+        "PROGRAM Main\nVAR\n  t : TIME := T#5s;\n  x : INT;\nEND_VAR\n  x := ANY_TO_INT(IN1 := t);\nEND_PROGRAM\n"
+    );
+    let (_, main) = module.find_function("Main").expect("Main not found");
+    let has_to_int = main.instructions.iter().any(|i| matches!(i, Instruction::ToInt(_, _)));
+    assert!(has_to_int, "Expected ToInt instruction for ANY_TO_INT");
+}
+
+#[test]
+fn date_literal_parsed_to_epoch_ms() {
+    let module = compile_ok(
+        "PROGRAM Main\nVAR\n  d : DATE := D#1970-01-01;\n  x : INT;\nEND_VAR\n  x := DATE_TO_DINT(IN1 := d);\nEND_PROGRAM\n"
+    );
+    let (_, main) = module.find_function("Main").expect("Main not found");
+    // The date literal should produce a LoadConst with Time(0) for epoch
+    let has_time_zero = main.instructions.iter().any(|i| matches!(i, Instruction::LoadConst(_, Value::Time(0))));
+    assert!(has_time_zero, "D#1970-01-01 should parse to Time(0)");
+}
+
+#[test]
+fn tod_literal_parsed_to_ms_since_midnight() {
+    let module = compile_ok(
+        "PROGRAM Main\nVAR\n  t : TOD := TOD#12:30:00;\n  x : INT;\nEND_VAR\n  x := TOD_TO_DINT(IN1 := t);\nEND_PROGRAM\n"
+    );
+    let (_, main) = module.find_function("Main").expect("Main not found");
+    // 12h30m = 45000000 ms
+    let has_value = main.instructions.iter().any(|i| matches!(i, Instruction::LoadConst(_, Value::Time(45000000))));
+    assert!(has_value, "TOD#12:30:00 should parse to Time(45000000)");
+}
+
+#[test]
+fn dt_to_date_emits_extract_instruction() {
+    let module = compile_ok(
+        "PROGRAM Main\nVAR\n  mydt : DT := DT#2024-01-15-12:30:00;\n  d : DATE;\nEND_VAR\n  d := DT_TO_DATE(IN1 := mydt);\nEND_PROGRAM\n"
+    );
+    let (_, main) = module.find_function("Main").expect("Main not found");
+    let has_extract = main.instructions.iter().any(|i| matches!(i, Instruction::DtExtractDate(_, _)));
+    assert!(has_extract, "Expected DtExtractDate instruction for DT_TO_DATE");
+}
+
+#[test]
+fn dt_to_tod_emits_extract_instruction() {
+    let module = compile_ok(
+        "PROGRAM Main\nVAR\n  mydt : DT := DT#2024-01-15-12:30:00;\n  t : TOD;\nEND_VAR\n  t := DT_TO_TOD(IN1 := mydt);\nEND_PROGRAM\n"
+    );
+    let (_, main) = module.find_function("Main").expect("Main not found");
+    let has_extract = main.instructions.iter().any(|i| matches!(i, Instruction::DtExtractTod(_, _)));
+    assert!(has_extract, "Expected DtExtractTod instruction for DT_TO_TOD");
+}
+
+#[test]
+fn day_of_week_emits_instruction() {
+    let module = compile_ok(
+        "PROGRAM Main\nVAR\n  d : DATE := D#1970-01-01;\n  dow : INT;\nEND_VAR\n  dow := DAY_OF_WEEK(IN1 := d);\nEND_PROGRAM\n"
+    );
+    let (_, main) = module.find_function("Main").expect("Main not found");
+    let has_dow = main.instructions.iter().any(|i| matches!(i, Instruction::DayOfWeek(_, _)));
+    assert!(has_dow, "Expected DayOfWeek instruction");
+}
+
+#[test]
+fn concat_date_tod_emits_add() {
+    let module = compile_ok(
+        "PROGRAM Main\nVAR\n  d : DATE := D#2024-01-15;\n  t : TOD := TOD#12:00:00;\n  dt : DT;\nEND_VAR\n  dt := CONCAT_DATE_TOD(IN1 := d, IN2 := t);\nEND_PROGRAM\n"
+    );
+    let (_, main) = module.find_function("Main").expect("Main not found");
+    let has_add = main.instructions.iter().any(|i| matches!(i, Instruction::Add(_, _, _)));
+    assert!(has_add, "CONCAT_DATE_TOD should emit Add instruction");
+}
+
+#[test]
+fn multime_emits_mul() {
+    let module = compile_ok(
+        "PROGRAM Main\nVAR\n  t : TIME;\nEND_VAR\n  t := MULTIME(IN1 := T#1s, IN2 := 5);\nEND_PROGRAM\n"
+    );
+    let (_, main) = module.find_function("Main").expect("Main not found");
+    let has_mul = main.instructions.iter().any(|i| matches!(i, Instruction::Mul(_, _, _)));
+    assert!(has_mul, "MULTIME should emit Mul instruction");
+}
+
+#[test]
 fn value_defaults_for_types() {
     assert_eq!(Value::default_for_type(VarType::Bool), Value::Bool(false));
     assert_eq!(Value::default_for_type(VarType::Int), Value::Int(0));

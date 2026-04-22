@@ -1324,21 +1324,79 @@ impl<'a> FunctionCompiler<'a> {
             "LN"   => Some(Instruction::Ln),
             "LOG"  => Some(Instruction::Log),
             "EXP"  => Some(Instruction::Exp),
-            // Type conversions: *_TO_INT, *_TO_REAL, *_TO_BOOL
+            // Type conversions: *_TO_REAL
             "INT_TO_REAL" | "SINT_TO_REAL" | "DINT_TO_REAL" | "LINT_TO_REAL"
             | "UINT_TO_REAL" | "UDINT_TO_REAL" | "ULINT_TO_REAL" | "USINT_TO_REAL"
             | "BOOL_TO_REAL" | "INT_TO_LREAL" | "SINT_TO_LREAL" | "DINT_TO_LREAL"
             | "LINT_TO_LREAL" | "REAL_TO_LREAL"
+            | "TIME_TO_REAL" | "TIME_TO_LREAL"
+            | "TO_REAL" | "TO_LREAL" | "ANY_TO_REAL" | "ANY_TO_LREAL"
                 => Some(Instruction::ToReal),
+            // *_TO_INT
             "REAL_TO_INT" | "LREAL_TO_INT" | "REAL_TO_DINT" | "LREAL_TO_DINT"
             | "REAL_TO_LINT" | "LREAL_TO_LINT" | "REAL_TO_SINT" | "LREAL_TO_SINT"
             | "BOOL_TO_INT" | "BOOL_TO_DINT" | "BOOL_TO_LINT"
             | "UINT_TO_INT" | "UDINT_TO_DINT" | "ULINT_TO_LINT"
             | "INT_TO_DINT" | "INT_TO_LINT" | "DINT_TO_LINT"
             | "SINT_TO_INT" | "SINT_TO_DINT" | "SINT_TO_LINT"
+            | "TIME_TO_INT" | "TIME_TO_SINT" | "TIME_TO_DINT" | "TIME_TO_LINT"
+            | "TIME_TO_UINT" | "TIME_TO_USINT" | "TIME_TO_UDINT" | "TIME_TO_ULINT"
+            | "TO_INT" | "TO_SINT" | "TO_DINT" | "TO_LINT"
+            | "TO_UINT" | "TO_USINT" | "TO_UDINT" | "TO_ULINT"
+            | "ANY_TO_INT" | "ANY_TO_SINT" | "ANY_TO_DINT" | "ANY_TO_LINT"
+            | "ANY_TO_UINT" | "ANY_TO_USINT" | "ANY_TO_UDINT" | "ANY_TO_ULINT"
                 => Some(Instruction::ToInt),
+            // *_TO_BOOL
             "INT_TO_BOOL" | "REAL_TO_BOOL" | "DINT_TO_BOOL" | "LINT_TO_BOOL"
+            | "TIME_TO_BOOL"
+            | "TO_BOOL" | "ANY_TO_BOOL"
                 => Some(Instruction::ToBool),
+            // *_TO_TIME / *_TO_DATE / *_TO_TOD / *_TO_DT
+            // All date/time types share Value::Time(i64) in milliseconds.
+            // Conversions between them and from numerics all use ToTime.
+            "INT_TO_TIME" | "SINT_TO_TIME" | "DINT_TO_TIME" | "LINT_TO_TIME"
+            | "UINT_TO_TIME" | "USINT_TO_TIME" | "UDINT_TO_TIME" | "ULINT_TO_TIME"
+            | "REAL_TO_TIME" | "LREAL_TO_TIME" | "BOOL_TO_TIME"
+            | "TO_TIME" | "ANY_TO_TIME"
+            | "INT_TO_DATE" | "SINT_TO_DATE" | "DINT_TO_DATE" | "LINT_TO_DATE"
+            | "UINT_TO_DATE" | "USINT_TO_DATE" | "UDINT_TO_DATE" | "ULINT_TO_DATE"
+            | "REAL_TO_DATE" | "LREAL_TO_DATE"
+            | "TO_DATE" | "ANY_TO_DATE"
+                => Some(Instruction::ToTime),
+            // *_TO_TOD — wraps modulo 86_400_000 (24 hours)
+            "INT_TO_TOD" | "SINT_TO_TOD" | "DINT_TO_TOD" | "LINT_TO_TOD"
+            | "UINT_TO_TOD" | "USINT_TO_TOD" | "UDINT_TO_TOD" | "ULINT_TO_TOD"
+            | "REAL_TO_TOD" | "LREAL_TO_TOD"
+            | "TO_TOD" | "ANY_TO_TOD"
+            | "TIME_TO_TOD"
+                => Some(Instruction::ToTod),
+            // *_TO_DT / cross-type casts (no wrapping needed)
+            "INT_TO_DT" | "SINT_TO_DT" | "DINT_TO_DT" | "LINT_TO_DT"
+            | "UINT_TO_DT" | "USINT_TO_DT" | "UDINT_TO_DT" | "ULINT_TO_DT"
+            | "REAL_TO_DT" | "LREAL_TO_DT"
+            | "TO_DT" | "ANY_TO_DT"
+            // Cross-type identity casts (all just pass through the ms value)
+            | "DATE_TO_DT" | "TIME_TO_DATE" | "TIME_TO_DT"
+            | "DATE_TO_TIME" | "TOD_TO_TIME" | "DT_TO_TIME"
+                => Some(Instruction::ToTime),
+            // DATE/TOD/DT _TO_INT (same as TIME — returns raw ms)
+            "DATE_TO_INT" | "DATE_TO_SINT" | "DATE_TO_DINT" | "DATE_TO_LINT"
+            | "DATE_TO_UINT" | "DATE_TO_USINT" | "DATE_TO_UDINT" | "DATE_TO_ULINT"
+            | "TOD_TO_INT" | "TOD_TO_SINT" | "TOD_TO_DINT" | "TOD_TO_LINT"
+            | "TOD_TO_UINT" | "TOD_TO_USINT" | "TOD_TO_UDINT" | "TOD_TO_ULINT"
+            | "DT_TO_INT" | "DT_TO_SINT" | "DT_TO_DINT" | "DT_TO_LINT"
+            | "DT_TO_UINT" | "DT_TO_USINT" | "DT_TO_UDINT" | "DT_TO_ULINT"
+                => Some(Instruction::ToInt),
+            "DATE_TO_REAL" | "DATE_TO_LREAL"
+            | "TOD_TO_REAL" | "TOD_TO_LREAL"
+            | "DT_TO_REAL" | "DT_TO_LREAL"
+                => Some(Instruction::ToReal),
+            "DATE_TO_BOOL" | "TOD_TO_BOOL" | "DT_TO_BOOL"
+                => Some(Instruction::ToBool),
+            // DT extraction
+            "DT_TO_DATE" => Some(Instruction::DtExtractDate),
+            "DT_TO_TOD" => Some(Instruction::DtExtractTod),
+            "DAY_OF_WEEK" => Some(Instruction::DayOfWeek),
             _ => None,
         };
         if let Some(make_instr) = intrinsic {
@@ -1353,6 +1411,59 @@ impl<'a> FunctionCompiler<'a> {
                 r
             };
             self.emit(make_instr(dst, arg));
+            return dst;
+        }
+
+        // Check for two-argument intrinsics (date/time arithmetic)
+        // wrap_tod: result must be wrapped to 0..86_399_999 ms (TOD range)
+        type BinIntrinsic = (fn(Reg, Reg, Reg) -> Instruction, bool);
+        let intrinsic2: Option<BinIntrinsic> = match name.to_uppercase().as_str() {
+            "ADD_TOD_TIME" => Some((Instruction::Add, true)),
+            "SUB_TOD_TIME" => Some((Instruction::Sub, true)),
+            "ADD_DT_TIME" | "CONCAT_DATE_TOD" => Some((Instruction::Add, false)),
+            "SUB_DATE_DATE" | "SUB_TOD_TOD"
+            | "SUB_DT_TIME" | "SUB_DT_DT" => Some((Instruction::Sub, false)),
+            "MULTIME" => Some((Instruction::Mul, false)),
+            "DIVTIME" => Some((Instruction::Div, false)),
+            _ => None,
+        };
+        if let Some((make_instr, wrap_tod)) = intrinsic2 {
+            let (arg1, arg2) = match fc.arguments.len() {
+                0 => {
+                    let r1 = self.alloc_reg();
+                    let r2 = self.alloc_reg();
+                    self.emit(Instruction::LoadConst(r1, Value::Time(0)));
+                    self.emit(Instruction::LoadConst(r2, Value::Time(0)));
+                    (r1, r2)
+                }
+                1 => {
+                    let a = match &fc.arguments[0] {
+                        Argument::Positional(expr) => self.compile_expression(expr),
+                        Argument::Named { value, .. } => self.compile_expression(value),
+                    };
+                    let r2 = self.alloc_reg();
+                    self.emit(Instruction::LoadConst(r2, Value::Time(0)));
+                    (a, r2)
+                }
+                _ => {
+                    let a = match &fc.arguments[0] {
+                        Argument::Positional(expr) => self.compile_expression(expr),
+                        Argument::Named { value, .. } => self.compile_expression(value),
+                    };
+                    let b = match &fc.arguments[1] {
+                        Argument::Positional(expr) => self.compile_expression(expr),
+                        Argument::Named { value, .. } => self.compile_expression(value),
+                    };
+                    (a, b)
+                }
+            };
+            if wrap_tod {
+                let tmp = self.alloc_reg();
+                self.emit(make_instr(tmp, arg1, arg2));
+                self.emit(Instruction::ToTod(dst, tmp));
+            } else {
+                self.emit(make_instr(dst, arg1, arg2));
+            }
             return dst;
         }
 
@@ -1408,9 +1519,9 @@ impl<'a> FunctionCompiler<'a> {
             LiteralKind::Bool(v) => Value::Bool(*v),
             LiteralKind::String(s) => Value::String(s.clone()),
             LiteralKind::Time(s) => Value::Time(parse_time_literal(s)),
-            LiteralKind::Date(_) => Value::Time(0),
-            LiteralKind::Tod(_) => Value::Time(0),
-            LiteralKind::Dt(_) => Value::Time(0),
+            LiteralKind::Date(s) => Value::Time(parse_date_literal(s)),
+            LiteralKind::Tod(s) => Value::Time(parse_tod_literal(s)),
+            LiteralKind::Dt(s) => Value::Time(parse_dt_literal(s)),
             LiteralKind::Null => Value::Null,
             LiteralKind::Typed { raw_value, .. } => {
                 if let Ok(v) = raw_value.parse::<i64>() {
@@ -1425,7 +1536,6 @@ impl<'a> FunctionCompiler<'a> {
     }
 }
 
-/// Parse a TIME literal string like "T#5s", "T#100ms", "T#1h2m3s" into milliseconds.
 /// Parse a TIME literal string like "T#5s", "T#100ms", "T#1h2m3s" into milliseconds.
 fn parse_time_literal(s: &str) -> i64 {
     let raw = s.trim();
@@ -1474,6 +1584,7 @@ fn parse_time_literal(s: &str) -> i64 {
             };
 
             match unit.as_str() {
+                "d" => total_ms += (num * 86_400_000.0) as i64,
                 "h" => total_ms += (num * 3_600_000.0) as i64,
                 "m" => total_ms += (num * 60_000.0) as i64,
                 "s" => total_ms += (num * 1_000.0) as i64,
@@ -1491,5 +1602,73 @@ fn parse_time_literal(s: &str) -> i64 {
     }
 
     total_ms
+}
+
+/// Convert year/month/day to milliseconds since Unix epoch (1970-01-01).
+/// Uses a simplified algorithm (no leap-second handling).
+fn ymd_to_epoch_ms(year: i64, month: i64, day: i64) -> i64 {
+    // Days from epoch using a standard civil-date algorithm.
+    // Adjust so March=1 to simplify leap year logic.
+    let y = if month <= 2 { year - 1 } else { year };
+    let m = if month <= 2 { month + 9 } else { month - 3 };
+    let days = 365 * y + y / 4 - y / 100 + y / 400
+        + (m * 306 + 5) / 10
+        + (day - 1)
+        - 719468; // offset to Unix epoch
+    days * 86_400_000
+}
+
+/// Parse a DATE literal like "D#2024-01-15" into milliseconds since epoch.
+fn parse_date_literal(s: &str) -> i64 {
+    let raw = s.trim();
+    // Strip prefix: D#, DATE#, LD#, LDATE#
+    let body = raw.split('#').next_back().unwrap_or("");
+    let parts: Vec<&str> = body.split('-').collect();
+    if parts.len() < 3 {
+        return 0;
+    }
+    let year = parts[0].parse::<i64>().unwrap_or(1970);
+    let month = parts[1].parse::<i64>().unwrap_or(1);
+    let day = parts[2].parse::<i64>().unwrap_or(1);
+    ymd_to_epoch_ms(year, month, day)
+}
+
+/// Parse a TOD literal like "TOD#12:30:00" or "TOD#12:30:00.500" into ms since midnight.
+/// Values are wrapped modulo 86_400_000 (24 hours) to match CODESYS behavior.
+fn parse_tod_literal(s: &str) -> i64 {
+    let raw = s.trim();
+    let body = raw.split('#').next_back().unwrap_or("");
+    // Split time and optional fractional seconds
+    let (time_part, frac) = if let Some((t, f)) = body.split_once('.') {
+        let frac_str = format!("0.{f}");
+        (t, frac_str.parse::<f64>().unwrap_or(0.0))
+    } else {
+        (body, 0.0)
+    };
+    let parts: Vec<&str> = time_part.split(':').collect();
+    let h = parts.first().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+    let m = parts.get(1).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+    let sec = parts.get(2).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+    let total = h * 3_600_000 + m * 60_000 + sec * 1_000 + (frac * 1000.0) as i64;
+    total.rem_euclid(86_400_000)
+}
+
+/// Parse a DT literal like "DT#2024-01-15-12:30:00" into ms since epoch.
+fn parse_dt_literal(s: &str) -> i64 {
+    let raw = s.trim();
+    let body = raw.split('#').next_back().unwrap_or("");
+    // Format: YYYY-M-D-HH:MM:SS[.frac]
+    // Split on '-' → [YYYY, M, D, HH:MM:SS.frac]
+    let parts: Vec<&str> = body.splitn(4, '-').collect();
+    if parts.len() < 4 {
+        return 0;
+    }
+    let year = parts[0].parse::<i64>().unwrap_or(1970);
+    let month = parts[1].parse::<i64>().unwrap_or(1);
+    let day = parts[2].parse::<i64>().unwrap_or(1);
+    let date_ms = ymd_to_epoch_ms(year, month, day);
+    // Parse the time portion by prefixing with "TOD#"
+    let tod_ms = parse_tod_literal(&format!("TOD#{}", parts[3]));
+    date_ms + tod_ms
 }
 

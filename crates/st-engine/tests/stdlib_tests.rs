@@ -365,6 +365,932 @@ END_PROGRAM
 }
 
 // =============================================================================
+// TIME_TO_* conversions
+// =============================================================================
+
+#[test]
+fn time_to_int_returns_milliseconds() {
+    let source = r#"
+VAR_GLOBAL
+    g_ms : INT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TIME := T#5s;
+END_VAR
+    g_ms := TIME_TO_INT(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_ms"), Some(&Value::Int(5000)));
+}
+
+#[test]
+fn time_to_dint_returns_milliseconds() {
+    let source = r#"
+VAR_GLOBAL
+    g_ms : DINT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TIME := T#1d2h3m4s5ms;
+END_VAR
+    g_ms := TIME_TO_DINT(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    // 1d = 86400000, 2h = 7200000, 3m = 180000, 4s = 4000, 5ms = 5
+    assert_eq!(engine.vm().get_global("g_ms"), Some(&Value::Int(93784005)));
+}
+
+#[test]
+fn time_to_real_returns_float_milliseconds() {
+    let source = r#"
+VAR_GLOBAL
+    g_r : REAL;
+END_VAR
+PROGRAM Main
+VAR
+    t : TIME := T#5s;
+END_VAR
+    g_r := TIME_TO_REAL(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_r"), Some(&Value::Real(5000.0)));
+}
+
+#[test]
+fn time_to_lreal_returns_float_milliseconds() {
+    let source = r#"
+VAR_GLOBAL
+    g_r : LREAL;
+END_VAR
+PROGRAM Main
+VAR
+    t : TIME := T#100ms;
+END_VAR
+    g_r := TIME_TO_LREAL(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_r"), Some(&Value::Real(100.0)));
+}
+
+#[test]
+fn time_to_bool_nonzero_is_true() {
+    let source = r#"
+VAR_GLOBAL
+    g_true : INT;
+    g_false : INT;
+END_VAR
+PROGRAM Main
+VAR
+    t5 : TIME := T#5s;
+    t0 : TIME := T#0ms;
+END_VAR
+    g_true := BOOL_TO_INT(IN1 := TIME_TO_BOOL(IN1 := t5));
+    g_false := BOOL_TO_INT(IN1 := TIME_TO_BOOL(IN1 := t0));
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_true"), Some(&Value::Int(1)));
+    assert_eq!(engine.vm().get_global("g_false"), Some(&Value::Int(0)));
+}
+
+// =============================================================================
+// *_TO_TIME conversions
+// =============================================================================
+
+#[test]
+fn int_to_time_and_back() {
+    let source = r#"
+VAR_GLOBAL
+    g_ms : INT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TIME;
+END_VAR
+    t := INT_TO_TIME(IN1 := 3000);
+    g_ms := TIME_TO_INT(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_ms"), Some(&Value::Int(3000)));
+}
+
+#[test]
+fn dint_to_time_from_literal() {
+    let source = r#"
+VAR_GLOBAL
+    g_ms : INT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TIME;
+END_VAR
+    t := DINT_TO_TIME(IN1 := 7500);
+    g_ms := TIME_TO_INT(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_ms"), Some(&Value::Int(7500)));
+}
+
+#[test]
+fn real_to_time_truncates() {
+    let source = r#"
+VAR_GLOBAL
+    g_ms : INT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TIME;
+END_VAR
+    t := REAL_TO_TIME(IN1 := 2500.7);
+    g_ms := TIME_TO_INT(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_ms"), Some(&Value::Int(2500)));
+}
+
+#[test]
+fn bool_to_time_true_is_1ms() {
+    let source = r#"
+VAR_GLOBAL
+    g_t : INT;
+    g_f : INT;
+END_VAR
+PROGRAM Main
+VAR END_VAR
+    g_t := TIME_TO_INT(IN1 := BOOL_TO_TIME(IN1 := TRUE));
+    g_f := TIME_TO_INT(IN1 := BOOL_TO_TIME(IN1 := FALSE));
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_t"), Some(&Value::Int(1)));
+    assert_eq!(engine.vm().get_global("g_f"), Some(&Value::Int(0)));
+}
+
+// =============================================================================
+// TO_* overloaded generic conversions
+// =============================================================================
+
+#[test]
+fn to_int_from_time() {
+    let source = r#"
+VAR_GLOBAL
+    g_r : INT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TIME := T#100ms;
+END_VAR
+    g_r := TO_INT(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_r"), Some(&Value::Int(100)));
+}
+
+#[test]
+fn to_real_from_time() {
+    let source = r#"
+VAR_GLOBAL
+    g_r : REAL;
+END_VAR
+PROGRAM Main
+VAR
+    t : TIME := T#5s;
+END_VAR
+    g_r := TO_REAL(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_r"), Some(&Value::Real(5000.0)));
+}
+
+#[test]
+fn to_time_from_int() {
+    let source = r#"
+VAR_GLOBAL
+    g_ms : INT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TIME;
+END_VAR
+    t := TO_TIME(IN1 := 4000);
+    g_ms := TIME_TO_INT(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_ms"), Some(&Value::Int(4000)));
+}
+
+#[test]
+fn to_bool_from_time() {
+    let source = r#"
+VAR_GLOBAL
+    g_r : INT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TIME := T#5s;
+END_VAR
+    g_r := BOOL_TO_INT(IN1 := TO_BOOL(IN1 := t));
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_r"), Some(&Value::Int(1)));
+}
+
+// =============================================================================
+// ANY_TO_* generic conversions
+// =============================================================================
+
+#[test]
+fn any_to_int_from_time() {
+    let source = r#"
+VAR_GLOBAL
+    g_r : INT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TIME := T#100ms;
+END_VAR
+    g_r := ANY_TO_INT(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_r"), Some(&Value::Int(100)));
+}
+
+#[test]
+fn any_to_real_from_time() {
+    let source = r#"
+VAR_GLOBAL
+    g_r : REAL;
+END_VAR
+PROGRAM Main
+VAR
+    t : TIME := T#5s;
+END_VAR
+    g_r := ANY_TO_REAL(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_r"), Some(&Value::Real(5000.0)));
+}
+
+#[test]
+fn any_to_time_from_int() {
+    let source = r#"
+VAR_GLOBAL
+    g_ms : INT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TIME;
+END_VAR
+    t := ANY_TO_TIME(IN1 := 6000);
+    g_ms := TIME_TO_INT(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_ms"), Some(&Value::Int(6000)));
+}
+
+// =============================================================================
+// Round-trip and arithmetic
+// =============================================================================
+
+#[test]
+fn time_int_roundtrip() {
+    let source = r#"
+VAR_GLOBAL
+    g_ms : INT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TIME := T#5s;
+    ms : INT;
+    t2 : TIME;
+END_VAR
+    ms := TIME_TO_INT(IN1 := t);
+    t2 := INT_TO_TIME(IN1 := ms);
+    g_ms := TIME_TO_INT(IN1 := t2);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_ms"), Some(&Value::Int(5000)));
+}
+
+#[test]
+fn time_real_roundtrip() {
+    let source = r#"
+VAR_GLOBAL
+    g_ms : INT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TIME := T#5s;
+END_VAR
+    g_ms := TIME_TO_INT(IN1 := REAL_TO_TIME(IN1 := TIME_TO_REAL(IN1 := t)));
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_ms"), Some(&Value::Int(5000)));
+}
+
+#[test]
+fn time_arithmetic_with_conversion() {
+    let source = r#"
+VAR_GLOBAL
+    g_sum : INT;
+    g_diff : INT;
+END_VAR
+PROGRAM Main
+VAR
+    t5s : TIME := T#5s;
+    t100ms : TIME := T#100ms;
+END_VAR
+    g_sum := TIME_TO_INT(IN1 := t5s + t100ms);
+    g_diff := TIME_TO_INT(IN1 := t5s - t100ms);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_sum"), Some(&Value::Int(5100)));
+    assert_eq!(engine.vm().get_global("g_diff"), Some(&Value::Int(4900)));
+}
+
+#[test]
+fn time_zero_conversion() {
+    let source = r#"
+VAR_GLOBAL
+    g_zero : INT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TIME := T#0ms;
+END_VAR
+    g_zero := TIME_TO_INT(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_zero"), Some(&Value::Int(0)));
+}
+
+#[test]
+fn time_large_value_conversion() {
+    let source = r#"
+VAR_GLOBAL
+    g_large : DINT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TIME := T#1d2h3m4s5ms;
+END_VAR
+    g_large := TIME_TO_DINT(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_large"), Some(&Value::Int(93784005)));
+}
+
+// =============================================================================
+// Playground 16 end-to-end (all conversions in one program)
+// =============================================================================
+
+#[test]
+fn playground_16_time_conversions_e2e() {
+    let source = include_str!("../../../playground/16_time_conversions.st");
+    let engine = run_with_stdlib(source, 1);
+
+    // TIME_TO_*
+    assert_eq!(engine.vm().get_global("g_time_to_int"), Some(&Value::Int(5000)));
+    assert_eq!(engine.vm().get_global("g_time_to_dint"), Some(&Value::Int(5000)));
+    assert_eq!(engine.vm().get_global("g_time_to_lint"), Some(&Value::Int(5000)));
+    assert_eq!(engine.vm().get_global("g_time_to_sint"), Some(&Value::Int(100)));
+    assert_eq!(engine.vm().get_global("g_time_to_real"), Some(&Value::Real(5000.0)));
+    assert_eq!(engine.vm().get_global("g_time_to_lreal"), Some(&Value::Real(5000.0)));
+    assert_eq!(engine.vm().get_global("g_time_to_bool_t"), Some(&Value::Int(1)));
+    assert_eq!(engine.vm().get_global("g_time_to_bool_f"), Some(&Value::Int(0)));
+
+    // *_TO_TIME
+    assert_eq!(engine.vm().get_global("g_int_to_time"), Some(&Value::Int(3000)));
+    assert_eq!(engine.vm().get_global("g_dint_to_time"), Some(&Value::Int(7500)));
+    assert_eq!(engine.vm().get_global("g_lint_to_time"), Some(&Value::Int(12000)));
+    assert_eq!(engine.vm().get_global("g_real_to_time"), Some(&Value::Int(2500)));
+    assert_eq!(engine.vm().get_global("g_bool_to_time_t"), Some(&Value::Int(1)));
+    assert_eq!(engine.vm().get_global("g_bool_to_time_f"), Some(&Value::Int(0)));
+
+    // TO_*
+    assert_eq!(engine.vm().get_global("g_to_int_from_time"), Some(&Value::Int(100)));
+    assert_eq!(engine.vm().get_global("g_to_real_from_time"), Some(&Value::Real(5000.0)));
+    assert_eq!(engine.vm().get_global("g_to_bool_from_time"), Some(&Value::Int(1)));
+    assert_eq!(engine.vm().get_global("g_to_time_from_int"), Some(&Value::Int(4000)));
+
+    // ANY_TO_*
+    assert_eq!(engine.vm().get_global("g_any_to_int_from_time"), Some(&Value::Int(100)));
+    assert_eq!(engine.vm().get_global("g_any_to_real_from_time"), Some(&Value::Real(5000.0)));
+    assert_eq!(engine.vm().get_global("g_any_to_bool_from_time"), Some(&Value::Int(1)));
+    assert_eq!(engine.vm().get_global("g_any_to_time_from_int"), Some(&Value::Int(6000)));
+
+    // Round-trips
+    assert_eq!(engine.vm().get_global("g_roundtrip_int"), Some(&Value::Int(5000)));
+    assert_eq!(engine.vm().get_global("g_roundtrip_real"), Some(&Value::Int(5000)));
+
+    // Arithmetic
+    assert_eq!(engine.vm().get_global("g_time_sum"), Some(&Value::Int(5100)));
+    assert_eq!(engine.vm().get_global("g_time_diff"), Some(&Value::Int(4900)));
+
+    // Edge cases
+    assert_eq!(engine.vm().get_global("g_zero_time"), Some(&Value::Int(0)));
+    assert_eq!(engine.vm().get_global("g_large_time"), Some(&Value::Int(93784005)));
+}
+
+// =============================================================================
+// DATE literal parsing
+// =============================================================================
+
+#[test]
+fn date_literal_epoch() {
+    let source = r#"
+VAR_GLOBAL
+    g_ms : DINT;
+END_VAR
+PROGRAM Main
+VAR
+    d : DATE := D#1970-01-01;
+END_VAR
+    g_ms := DATE_TO_DINT(IN1 := d);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_ms"), Some(&Value::Int(0)));
+}
+
+#[test]
+fn date_literal_2024() {
+    let source = r#"
+VAR_GLOBAL
+    g_ms : LINT;
+END_VAR
+PROGRAM Main
+VAR
+    d : DATE := D#2024-01-15;
+END_VAR
+    g_ms := DATE_TO_LINT(IN1 := d);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    // 2024-01-15 = 1705276800 seconds since epoch = 1705276800000 ms
+    assert_eq!(engine.vm().get_global("g_ms"), Some(&Value::Int(1705276800000)));
+}
+
+// =============================================================================
+// TOD literal parsing
+// =============================================================================
+
+#[test]
+fn tod_literal_noon() {
+    let source = r#"
+VAR_GLOBAL
+    g_ms : DINT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TOD := TOD#12:30:00;
+END_VAR
+    g_ms := TOD_TO_DINT(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    // 12h30m = 12*3600000 + 30*60000 = 45000000
+    assert_eq!(engine.vm().get_global("g_ms"), Some(&Value::Int(45000000)));
+}
+
+#[test]
+fn tod_literal_midnight() {
+    let source = r#"
+VAR_GLOBAL
+    g_ms : DINT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TOD := TOD#00:00:00;
+END_VAR
+    g_ms := TOD_TO_DINT(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_ms"), Some(&Value::Int(0)));
+}
+
+#[test]
+fn tod_literal_fractional_seconds() {
+    let source = r#"
+VAR_GLOBAL
+    g_ms : DINT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TOD := TOD#12:30:00.500;
+END_VAR
+    g_ms := TOD_TO_DINT(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    // 12h30m + 0.5s = 45000000 + 500 = 45000500
+    assert_eq!(engine.vm().get_global("g_ms"), Some(&Value::Int(45000500)));
+}
+
+// =============================================================================
+// TOD wrapping (modulo 24h)
+// =============================================================================
+
+#[test]
+fn to_tod_wraps_large_value() {
+    let source = r#"
+VAR_GLOBAL
+    g_ms : DINT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TOD;
+END_VAR
+    (* 100_000_000 ms = 27h46m40s → wraps to 03:46:40 = 13_600_000 ms *)
+    t := INT_TO_TOD(IN1 := 100000000);
+    g_ms := TOD_TO_DINT(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    // 100000000 % 86400000 = 13600000
+    assert_eq!(engine.vm().get_global("g_ms"), Some(&Value::Int(13600000)));
+}
+
+#[test]
+fn add_tod_time_wraps_past_midnight() {
+    let source = r#"
+VAR_GLOBAL
+    g_ms : DINT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TOD := TOD#23:00:00;
+    dur : TIME := T#2h;
+END_VAR
+    g_ms := TOD_TO_DINT(IN1 := ADD_TOD_TIME(IN1 := t, IN2 := dur));
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    // 23:00 + 2h = 25:00 → wraps to 01:00 = 3600000 ms
+    assert_eq!(engine.vm().get_global("g_ms"), Some(&Value::Int(3600000)));
+}
+
+#[test]
+fn sub_tod_time_wraps_negative() {
+    let source = r#"
+VAR_GLOBAL
+    g_ms : DINT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TOD := TOD#01:00:00;
+    dur : TIME := T#2h;
+END_VAR
+    g_ms := TOD_TO_DINT(IN1 := SUB_TOD_TIME(IN1 := t, IN2 := dur));
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    // 01:00 - 2h = -1h → wraps to 23:00 = 82800000 ms
+    assert_eq!(engine.vm().get_global("g_ms"), Some(&Value::Int(82800000)));
+}
+
+#[test]
+fn to_tod_generic_wraps() {
+    let source = r#"
+VAR_GLOBAL
+    g_ms : DINT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TOD;
+END_VAR
+    t := TO_TOD(IN1 := 90000000);  (* 25h → wraps to 01:00 *)
+    g_ms := TOD_TO_DINT(IN1 := t);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    // 90000000 % 86400000 = 3600000 = 01:00
+    assert_eq!(engine.vm().get_global("g_ms"), Some(&Value::Int(3600000)));
+}
+
+// =============================================================================
+// DT literal parsing
+// =============================================================================
+
+#[test]
+fn dt_literal_parsing() {
+    let source = r#"
+VAR_GLOBAL
+    g_ms : LINT;
+END_VAR
+PROGRAM Main
+VAR
+    mydt : DT := DT#2024-01-15-12:30:00;
+END_VAR
+    g_ms := DT_TO_LINT(IN1 := mydt);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    // 2024-01-15 00:00:00 = 1705276800000ms + 12h30m = 45000000ms
+    assert_eq!(engine.vm().get_global("g_ms"), Some(&Value::Int(1705276800000 + 45000000)));
+}
+
+// =============================================================================
+// DT extraction
+// =============================================================================
+
+#[test]
+fn dt_to_date_extracts_date_portion() {
+    let source = r#"
+VAR_GLOBAL
+    g_date : LINT;
+END_VAR
+PROGRAM Main
+VAR
+    mydt : DT := DT#2024-01-15-12:30:00;
+END_VAR
+    g_date := DATE_TO_LINT(IN1 := DT_TO_DATE(IN1 := mydt));
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    // Should truncate to day boundary = 1705276800000
+    assert_eq!(engine.vm().get_global("g_date"), Some(&Value::Int(1705276800000)));
+}
+
+#[test]
+fn dt_to_tod_extracts_time_portion() {
+    let source = r#"
+VAR_GLOBAL
+    g_tod : DINT;
+END_VAR
+PROGRAM Main
+VAR
+    mydt : DT := DT#2024-01-15-12:30:00;
+END_VAR
+    g_tod := TOD_TO_DINT(IN1 := DT_TO_TOD(IN1 := mydt));
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_tod"), Some(&Value::Int(45000000)));
+}
+
+// =============================================================================
+// CONCAT_DATE_TOD
+// =============================================================================
+
+#[test]
+fn concat_date_tod_combines() {
+    let source = r#"
+VAR_GLOBAL
+    g_dt : LINT;
+END_VAR
+PROGRAM Main
+VAR
+    d : DATE := D#2024-01-15;
+    t : TOD := TOD#12:30:00;
+END_VAR
+    g_dt := DT_TO_LINT(IN1 := CONCAT_DATE_TOD(IN1 := d, IN2 := t));
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_dt"), Some(&Value::Int(1705276800000 + 45000000)));
+}
+
+#[test]
+fn dt_roundtrip_extract_concat() {
+    let source = r#"
+VAR_GLOBAL
+    g_rt : LINT;
+END_VAR
+PROGRAM Main
+VAR
+    mydt : DT := DT#2024-01-15-12:30:00;
+    d : DATE;
+    t : TOD;
+END_VAR
+    d := DT_TO_DATE(IN1 := mydt);
+    t := DT_TO_TOD(IN1 := mydt);
+    g_rt := DT_TO_LINT(IN1 := CONCAT_DATE_TOD(IN1 := d, IN2 := t));
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_rt"), Some(&Value::Int(1705276800000 + 45000000)));
+}
+
+// =============================================================================
+// Date/time arithmetic
+// =============================================================================
+
+#[test]
+fn add_tod_time() {
+    let source = r#"
+VAR_GLOBAL
+    g_r : DINT;
+END_VAR
+PROGRAM Main
+VAR
+    t : TOD := TOD#12:30:00;
+    dur : TIME := T#1h;
+END_VAR
+    g_r := TOD_TO_DINT(IN1 := ADD_TOD_TIME(IN1 := t, IN2 := dur));
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    // 12:30 + 1h = 13:30 = 48600000
+    assert_eq!(engine.vm().get_global("g_r"), Some(&Value::Int(48600000)));
+}
+
+#[test]
+fn sub_date_date_returns_time() {
+    let source = r#"
+VAR_GLOBAL
+    g_r : LINT;
+END_VAR
+PROGRAM Main
+VAR
+    d1 : DATE := D#2024-01-15;
+    d2 : DATE := D#1970-01-01;
+END_VAR
+    g_r := TIME_TO_LINT(IN1 := SUB_DATE_DATE(IN1 := d1, IN2 := d2));
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_r"), Some(&Value::Int(1705276800000)));
+}
+
+// =============================================================================
+// MULTIME / DIVTIME
+// =============================================================================
+
+#[test]
+fn multime_multiplies() {
+    let source = r#"
+VAR_GLOBAL
+    g_r : DINT;
+END_VAR
+PROGRAM Main
+VAR END_VAR
+    g_r := TIME_TO_DINT(IN1 := MULTIME(IN1 := T#1s, IN2 := 5));
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_r"), Some(&Value::Int(5000)));
+}
+
+#[test]
+fn divtime_divides() {
+    let source = r#"
+VAR_GLOBAL
+    g_r : DINT;
+END_VAR
+PROGRAM Main
+VAR END_VAR
+    g_r := TIME_TO_DINT(IN1 := DIVTIME(IN1 := T#10s, IN2 := 2));
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    assert_eq!(engine.vm().get_global("g_r"), Some(&Value::Int(5000)));
+}
+
+// =============================================================================
+// DAY_OF_WEEK
+// =============================================================================
+
+#[test]
+fn day_of_week_epoch_is_thursday() {
+    let source = r#"
+VAR_GLOBAL
+    g_dow : INT;
+END_VAR
+PROGRAM Main
+VAR
+    d : DATE := D#1970-01-01;
+END_VAR
+    g_dow := DAY_OF_WEEK(IN1 := d);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    // 1970-01-01 = Thursday = 4
+    assert_eq!(engine.vm().get_global("g_dow"), Some(&Value::Int(4)));
+}
+
+#[test]
+fn day_of_week_sunday() {
+    let source = r#"
+VAR_GLOBAL
+    g_dow : INT;
+END_VAR
+PROGRAM Main
+VAR
+    d : DATE := D#1970-01-04;
+END_VAR
+    g_dow := DAY_OF_WEEK(IN1 := d);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    // 1970-01-04 = Sunday = 0
+    assert_eq!(engine.vm().get_global("g_dow"), Some(&Value::Int(0)));
+}
+
+#[test]
+fn day_of_week_monday_2024() {
+    let source = r#"
+VAR_GLOBAL
+    g_dow : INT;
+END_VAR
+PROGRAM Main
+VAR
+    d : DATE := D#2024-01-15;
+END_VAR
+    g_dow := DAY_OF_WEEK(IN1 := d);
+END_PROGRAM
+"#;
+    let engine = run_with_stdlib(source, 1);
+    // 2024-01-15 = Monday = 1
+    assert_eq!(engine.vm().get_global("g_dow"), Some(&Value::Int(1)));
+}
+
+// =============================================================================
+// Playground 17 end-to-end
+// =============================================================================
+
+#[test]
+fn playground_17_date_time_types_e2e() {
+    let source = include_str!("../../../playground/17_date_time_types.st");
+    let engine = run_with_stdlib(source, 1);
+
+    let date_2024 = 1705276800000i64;
+    let tod_1230 = 45000000i64;
+    let dt_expected = date_2024 + tod_1230;
+
+    // DATE literal parsing
+    assert_eq!(engine.vm().get_global("g_date_ms"), Some(&Value::Int(date_2024)));
+    assert_eq!(engine.vm().get_global("g_date_epoch"), Some(&Value::Int(0)));
+
+    // TOD literal parsing
+    assert_eq!(engine.vm().get_global("g_tod_ms"), Some(&Value::Int(tod_1230)));
+    assert_eq!(engine.vm().get_global("g_tod_midnight"), Some(&Value::Int(0)));
+    assert_eq!(engine.vm().get_global("g_tod_frac"), Some(&Value::Int(45000500)));
+
+    // DT literal parsing
+    assert_eq!(engine.vm().get_global("g_dt_ms"), Some(&Value::Int(dt_expected)));
+
+    // DATE_TO_* / TOD_TO_*
+    assert_eq!(engine.vm().get_global("g_date_to_int"), Some(&Value::Int(date_2024)));
+    assert_eq!(engine.vm().get_global("g_date_to_real"), Some(&Value::Real(date_2024 as f64)));
+    assert_eq!(engine.vm().get_global("g_date_to_bool"), Some(&Value::Int(1)));
+    assert_eq!(engine.vm().get_global("g_tod_to_int"), Some(&Value::Int(tod_1230)));
+    assert_eq!(engine.vm().get_global("g_tod_to_real"), Some(&Value::Real(tod_1230 as f64)));
+
+    // DT extraction
+    assert_eq!(engine.vm().get_global("g_dt_to_date"), Some(&Value::Int(date_2024)));
+    assert_eq!(engine.vm().get_global("g_dt_to_tod"), Some(&Value::Int(tod_1230)));
+
+    // CONCAT_DATE_TOD
+    assert_eq!(engine.vm().get_global("g_concat_dt"), Some(&Value::Int(dt_expected)));
+
+    // Arithmetic
+    assert_eq!(engine.vm().get_global("g_add_tod_time"), Some(&Value::Int(48600000))); // 13:30
+    assert_eq!(engine.vm().get_global("g_sub_tod_time"), Some(&Value::Int(41400000))); // 11:30
+    assert_eq!(engine.vm().get_global("g_sub_date_date"), Some(&Value::Int(date_2024)));
+    assert_eq!(engine.vm().get_global("g_sub_dt_dt"), Some(&Value::Int(tod_1230))); // 12h30m
+    assert_eq!(engine.vm().get_global("g_add_dt_time"), Some(&Value::Int(dt_expected + 3600000)));
+
+    // MULTIME / DIVTIME
+    assert_eq!(engine.vm().get_global("g_multime"), Some(&Value::Int(5000)));
+    assert_eq!(engine.vm().get_global("g_divtime"), Some(&Value::Int(5000)));
+
+    // DAY_OF_WEEK
+    assert_eq!(engine.vm().get_global("g_dow_thu"), Some(&Value::Int(4)));
+    assert_eq!(engine.vm().get_global("g_dow_sun"), Some(&Value::Int(0)));
+    assert_eq!(engine.vm().get_global("g_dow_mon"), Some(&Value::Int(1)));
+
+    // Generic TO_*/ANY_TO_*
+    assert_eq!(engine.vm().get_global("g_to_date"), Some(&Value::Int(0)));
+    assert_eq!(engine.vm().get_global("g_any_to_tod"), Some(&Value::Int(tod_1230)));
+    assert_eq!(engine.vm().get_global("g_any_to_dt"), Some(&Value::Int(1000)));
+
+    // Round-trip
+    assert_eq!(engine.vm().get_global("g_roundtrip_dt"), Some(&Value::Int(dt_expected)));
+}
+
+// =============================================================================
 // CTUD — Count Up/Down
 // =============================================================================
 

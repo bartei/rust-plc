@@ -387,6 +387,76 @@ Infrastructure: `@vscode/test-electron` (real Electron instance) + Playwright (w
 
 ---
 
+## Time & Type Conversion Functions (IEC 61131-3 / CODESYS-compatible)
+
+### Tier 1 — TIME ↔ numeric conversions (COMPLETED)
+
+- [x] IR: `ToTime(Reg, Reg)` instruction
+- [x] IR: `Value::as_time()` method (Int/UInt/Real/Bool → milliseconds)
+- [x] IR: Fix `VarType::Time` doc comment (milliseconds, not nanoseconds)
+- [x] VM: execute `ToTime` instruction
+- [x] Semantics: register `TIME_TO_INT`, `TIME_TO_DINT`, `TIME_TO_LINT`, `TIME_TO_REAL`, `TIME_TO_LREAL`, `TIME_TO_BOOL`
+- [x] Semantics: register `INT_TO_TIME`, `DINT_TO_TIME`, `LINT_TO_TIME`, `REAL_TO_TIME`, `LREAL_TO_TIME`, `BOOL_TO_TIME`
+- [x] Semantics: register `TIME_TO_SINT`, `TIME_TO_UINT`, `TIME_TO_USINT`, `TIME_TO_UDINT`, `TIME_TO_ULINT`
+- [x] Semantics: register `SINT_TO_TIME`, `UINT_TO_TIME`, `USINT_TO_TIME`, `UDINT_TO_TIME`, `ULINT_TO_TIME`
+- [x] Compiler: map all `TIME_TO_*` to `ToInt`/`ToReal`/`ToBool`; map all `*_TO_TIME` to `ToTime`
+
+### Tier 2 — Overloaded TO_* / ANY_TO_* generic dispatch (COMPLETED)
+
+- [x] Semantics: register `TO_INT`, `TO_DINT`, `TO_LINT`, `TO_SINT`, `TO_REAL`, `TO_LREAL`, `TO_BOOL`, `TO_TIME`
+- [x] Semantics: register `TO_UINT`, `TO_USINT`, `TO_UDINT`, `TO_ULINT`
+- [x] Semantics: register `ANY_TO_INT`, `ANY_TO_DINT`, `ANY_TO_LINT`, `ANY_TO_SINT`, `ANY_TO_REAL`, `ANY_TO_LREAL`, `ANY_TO_BOOL`, `ANY_TO_TIME`
+- [x] Semantics: register `ANY_TO_UINT`, `ANY_TO_USINT`, `ANY_TO_UDINT`, `ANY_TO_ULINT`
+- [x] Compiler: map `TO_*` / `ANY_TO_*` to the same IR instructions as typed conversions
+- [x] Stdlib: update `conversions.st` documentation
+
+### Tier 3 — DATE / TOD / DT types + conversions (COMPLETED)
+
+All date/time types share `Value::Time(i64)` in milliseconds (no separate Value/VarType variants needed). DATE = ms since epoch, TOD = ms since midnight, DT = ms since epoch.
+
+- [x] Compiler: `parse_date_literal()` — D#YYYY-MM-DD → ms since epoch via civil-date algorithm
+- [x] Compiler: `parse_tod_literal()` — TOD#HH:MM:SS[.frac] → ms since midnight
+- [x] Compiler: `parse_dt_literal()` — DT#YYYY-MM-DD-HH:MM:SS[.frac] → ms since epoch
+- [x] Compiler: `ymd_to_epoch_ms()` helper for date→epoch conversion
+- [x] Compiler: `parse_time_literal()` — fixed: now handles `d` (days) suffix
+- [x] IR: `DtExtractDate(Reg, Reg)`, `DtExtractTod(Reg, Reg)`, `DayOfWeek(Reg, Reg)`, `ToTod(Reg, Reg)` instructions
+- [x] VM: execute all four new instructions (day-boundary truncation, modulo, weekday, TOD wrap)
+- [x] TOD wrapping: `ToTod` instruction wraps modulo 86,400,000 ms (CODESYS-compatible)
+- [x] TOD wrapping applies to: `*_TO_TOD`, `TO_TOD`, `ANY_TO_TOD`, `ADD_TOD_TIME`, `SUB_TOD_TIME`, `DtExtractTod`, TOD literal parsing
+- [x] Semantics: register all `DATE_TO_*`, `TOD_TO_*`, `DT_TO_*` conversions (INT/SINT/DINT/LINT/UINT/USINT/UDINT/ULINT/REAL/LREAL/BOOL)
+- [x] Semantics: register all `*_TO_DATE`, `*_TO_TOD`, `*_TO_DT` conversions
+- [x] Semantics: register cross-type: `DT_TO_DATE`, `DT_TO_TOD`, `DATE_TO_DT`, `TIME_TO_DATE/TOD/DT`, `DATE/TOD/DT_TO_TIME`
+- [x] Semantics: register `TO_DATE`, `TO_TOD`, `TO_DT`, `ANY_TO_DATE`, `ANY_TO_TOD`, `ANY_TO_DT`
+- [x] Semantics: register two-arg arithmetic: `ADD_TOD_TIME`, `ADD_DT_TIME`, `SUB_TOD_TIME`, `SUB_DATE_DATE`, `SUB_TOD_TOD`, `SUB_DT_TIME`, `SUB_DT_DT`, `CONCAT_DATE_TOD`
+- [x] Compiler: two-argument intrinsic handling for arithmetic functions → Add/Sub instructions
+- [x] Compiler: map extraction functions to specialized IR instructions
+
+### Tier 4 — Date/time utilities + string conversions (PARTIAL)
+
+- [x] `MULTIME(IN1: TIME, IN2: INT) : TIME` — maps to Mul instruction
+- [x] `DIVTIME(IN1: TIME, IN2: INT) : TIME` — maps to Div instruction
+- [x] `DAY_OF_WEEK(IN1: DATE) : INT` — 0=Sunday..6=Saturday
+- [ ] `TIME_TO_STRING`, `STRING_TO_TIME` — requires string formatting infrastructure
+- [ ] `DATE_TO_STRING`, `STRING_TO_DATE` — requires string formatting infrastructure
+- [ ] `SPLIT_DATE`, `SPLIT_TOD`, `SPLIT_DT` — requires multi-output function support
+- [ ] `CONCAT_DATE`, `CONCAT_TOD`, `CONCAT_DT` (from year/month/day components) — requires multi-input
+- [ ] `MULTIME` with REAL factor (currently INT only)
+
+### Testing
+
+- [x] Unit tests: `Value::as_time()`, `Value::as_uint()`, `Value::as_bool()` for Time/UInt/Real
+- [x] Compiler tests: `ToTime`, `DtExtractDate`, `DtExtractTod`, `DayOfWeek`, `ConcatDateTod`, `Multime` instruction emission
+- [x] Compiler tests: DATE/TOD/DT literal value verification
+- [x] Stdlib integration tests: TIME_TO_*, *_TO_TIME, TO_*, ANY_TO_* (Tier 1+2)
+- [x] Stdlib integration tests: DATE/TOD/DT literal parsing, extraction, arithmetic, round-trips (Tier 3)
+- [x] Stdlib integration tests: MULTIME, DIVTIME, DAY_OF_WEEK (Tier 4)
+- [x] Playground: `16_time_conversions.st` (TIME conversions + generics)
+- [x] Playground: `17_date_time_types.st` (DATE/TOD/DT + arithmetic + extraction)
+- [x] E2E: `playground_16_time_conversions_e2e` — 28 assertions
+- [x] E2E: `playground_17_date_time_types_e2e` — 30 assertions
+
+---
+
 ## Cross-Cutting Concerns
 
 - [x] Testing: 714+ tests across 10+ crates
