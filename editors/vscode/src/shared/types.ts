@@ -78,6 +78,7 @@ export type WebviewToHostMessage =
   | { command: "removeWatch"; variable: string }
   | { command: "clearWatch" }
   | { command: "force"; variable: string; value: string }
+  | { command: "trigger"; variable: string; value: string }
   | { command: "unforce"; variable: string }
   | { command: "resetStats" }
   | { command: "expandedNodesChanged"; nodes: string[] }
@@ -96,4 +97,5 @@ export interface InitialState {
   catalog: CatalogEntry[];
   watchList: string[];
   expandedNodes: string[];
+  version: string;
 }

@@ -12,108 +12,13 @@
 </head>
 <body>
 
-  <!-- ── Deployment Toolbar ──────────────────────────────────── -->
-  <div class="deploy-toolbar" id="deploy-toolbar">
-    <div class="tb-group">
-      <button id="btn-install" title="Install or upgrade the PLC runtime on the target">
-        <span class="tb-icon">&#x2B07;</span> Install
-      </button>
-    </div>
-    <div class="tb-sep"></div>
-    <div class="tb-group">
-      <button id="btn-upload" title="Upload PLC program to target (offline update — stops the program)">
-        <span class="tb-icon">&#x2191;</span> Upload
-      </button>
-      <button id="btn-online-update" title="Online update — hot-reload without stopping (when possible)">
-        <span class="tb-icon">&#x21BB;</span> Online
-      </button>
-    </div>
-    <div class="tb-sep"></div>
-    <div class="tb-group">
-      <button id="btn-run" title="Start or restart the PLC program on the target">
-        <span class="tb-icon">&#x25B6;</span> Run
-      </button>
-      <button id="btn-stop" title="Stop the PLC program on the target">
-        <span class="tb-icon">&#x25A0;</span> Stop
-      </button>
-    </div>
-    <div class="tb-status" id="tb-status">
-      <span class="tb-dot offline" id="tb-dot"></span>
-      <select id="tb-target-select" title="Select deployment target">
-        <option value="">-- No target --</option>
-      </select>
-      <button id="btn-refresh-targets" title="Reload targets from plc-project.yaml"
-        style="background:none;border:none;color:var(--vscode-descriptionForeground);cursor:pointer;font-size:12px;padding:0 2px;">&#x21BB;</button>
-      <button id="btn-fetch-target-info" title="Fetch target information (agent version, program, OS)"
-        style="font-size:11px;padding:3px 8px;">&#x2139; Info</button>
-      <span id="tb-status-text"></span>
-    </div>
-  </div>
+  <!-- Preact mounts here -->
+  <div id="app"></div>
 
-  <!-- ── Target Info Panel ───────────────────────────────────── -->
-  <div class="target-info" id="target-info-panel">
-    <div class="ti-title">
-      <span>Target Information</span>
-      <button class="ti-close" id="btn-close-target-info">&#x2715;</button>
-    </div>
-    <div id="target-info-content">Fetching...</div>
-  </div>
-
-  <!-- ── Scan Cycle Stats ────────────────────────────────────── -->
-  <h2>
-    Scan Cycle
-    <span class="h-actions">
-      <button class="secondary" id="btn-reset-stats">Reset Stats</button>
-    </span>
-  </h2>
-  <div class="stats">
-    <span class="stat-label">Cycles:</span><span class="stat-value" id="s-cycles">0</span>
-    <span class="stat-label">Last:</span><span class="stat-value" id="s-last">-</span>
-    <span class="stat-label">Min:</span><span class="stat-value" id="s-min">-</span>
-    <span class="stat-label">Max:</span><span class="stat-value" id="s-max">-</span>
-    <span class="stat-label">Avg:</span><span class="stat-value" id="s-avg">-</span>
-    <span class="stat-label" id="s-target-label" style="display:none">Target:</span>
-    <span class="stat-value" id="s-target" style="display:none">-</span>
-    <span class="stat-label" id="s-period-label" style="display:none">Period:</span>
-    <span class="stat-value" id="s-period" style="display:none">-</span>
-    <span class="stat-label" id="s-jitter-label" style="display:none">Jitter (max):</span>
-    <span class="stat-value" id="s-jitter" style="display:none">-</span>
-  </div>
-
-  <!-- ── Watch List ──────────────────────────────────────────── -->
-  <h2>
-    Watch List
-    <span class="h-actions">
-      <button class="secondary" id="btn-clear-all">Clear all</button>
-    </span>
-  </h2>
-  <div class="add-row">
-    <input
-      id="add-input"
-      placeholder="Add variable to watch (start typing for suggestions)..."
-      autocomplete="off"
-    />
-    <div id="autocomplete-dropdown" class="autocomplete-dropdown"></div>
-    <button id="btn-add">Add</button>
-  </div>
-  <table>
-    <thead><tr><th>Name</th><th>Value</th><th>Type</th><th>Actions</th></tr></thead>
-    <tbody id="var-body">
-      <tr><td colspan="4" class="empty-msg">Watch list is empty. Add a variable above.</td></tr>
-    </tbody>
-  </table>
-
-  <!-- ── Initial State (injected by extension host) ──────────── -->
+  <!-- Initial State (injected by extension host) -->
   <script type="application/json" id="initial-state">{{initialState}}</script>
 
-  <!-- ── Status footer ───────────────────────────────────────── -->
-  <div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--vscode-descriptionForeground,#888);opacity:0.7;margin-top:8px;padding:4px 0;border-top:1px solid var(--vscode-panel-border,#333);">
-    <span id="ws-status">WS: waiting...</span>
-    <span id="debug-stats"></span>
-    <span>PLC Monitor v{{version}}</span>
-  </div>
-
-  <!-- ── Bundled TypeScript (compiled to JS) ─────────────────── -->
+  <!-- Bundled Preact app -->
   <script nonce="{{nonce}}" src="{{scriptUri}}"></script>
 
 </body>

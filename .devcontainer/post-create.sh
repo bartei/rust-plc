@@ -24,20 +24,23 @@ echo "==> Installing VSCode extension dependencies..."
 cd editors/vscode
 npm install 2>&1
 npm run compile 2>&1
+npm run build:webview 2>&1
 cd ../..
 
 echo "==> Installing ST extension into VSCode..."
-# Symlink the extension into the VSCode extensions directory
-EXT_DIR="$HOME/.vscode-server/extensions/rust-plc.iec61131-st-0.1.0"
+# Read version from package.json so the symlink always matches
+EXT_VERSION=$(node -p "require('./editors/vscode/package.json').version")
 if [ -d "$HOME/.vscode-server/extensions" ]; then
-    rm -rf "$EXT_DIR"
+    # Remove any stale version-pinned directories
+    rm -rf "$HOME/.vscode-server/extensions/rust-plc.iec61131-st-"*
+    EXT_DIR="$HOME/.vscode-server/extensions/rust-plc.iec61131-st-${EXT_VERSION}"
     ln -sf "$(pwd)/editors/vscode" "$EXT_DIR"
     echo "    Linked to $EXT_DIR"
 else
     # Try the regular vscode path (non-remote)
-    EXT_DIR="$HOME/.vscode/extensions/rust-plc.iec61131-st-0.1.0"
+    rm -rf "$HOME/.vscode/extensions/rust-plc.iec61131-st-"*
+    EXT_DIR="$HOME/.vscode/extensions/rust-plc.iec61131-st-${EXT_VERSION}"
     mkdir -p "$HOME/.vscode/extensions"
-    rm -rf "$EXT_DIR"
     ln -sf "$(pwd)/editors/vscode" "$EXT_DIR"
     echo "    Linked to $EXT_DIR"
 fi

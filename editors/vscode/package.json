@@ -2,7 +2,7 @@
   "name": "iec61131-st",
   "displayName": "IEC 61131-3 Structured Text",
   "description": "Language support for IEC 61131-3 Structured Text with LSP and online debugging",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "rust-plc",
   "license": "GPL-3.0-or-later",
   "repository": {
@@ -294,6 +294,7 @@
     "test:remote:qemu": "ST_E2E_REMOTE=qemu node ./out/test/runRemoteTest.js"
   },
   "dependencies": {
+    "preact": "^10.29.1",
     "vscode-languageclient": "^9.0.1",
     "ws": "^8.18.0"
   },

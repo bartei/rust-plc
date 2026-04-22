@@ -16,13 +16,15 @@ copyFileSync("src/webview/styles.css", `${outDir}/styles.css`);
 
 /** @type {esbuild.BuildOptions} */
 const buildOptions = {
-  entryPoints: ["src/webview/index.ts"],
+  entryPoints: ["src/webview/index.tsx"],
   bundle: true,
   outfile: `${outDir}/monitor.js`,
   format: "iife",
   target: "es2022",
   sourcemap: true,
   minify: !watch,
+  jsx: "automatic",
+  jsxImportSource: "preact",
 };
 
 if (watch) {

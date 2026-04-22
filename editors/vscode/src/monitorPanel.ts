@@ -131,6 +131,11 @@ export class MonitorPanel {
           this.targetForce(msg.variable, msg.value);
         }
         break;
+      case "trigger":
+        if (typeof msg.variable === "string" && typeof msg.value === "string") {
+          this.targetTrigger(msg.variable, msg.value);
+        }
+        break;
       case "unforce":
         if (typeof msg.variable === "string") {
           this.targetUnforce(msg.variable);
@@ -458,6 +463,24 @@ export class MonitorPanel {
     this.wsSend({ method: "force", params: { variable, value: jsonValue } });
   }
 
+  /** Trigger a variable (single-cycle force) via WebSocket. */
+  private targetTrigger(variable: string, value: string) {
+    if (!this.wsMonitorActive) {
+      vscode.window.showWarningMessage("Monitor: not connected to target");
+      return;
+    }
+    let jsonValue: any = value;
+    if (value === "true" || value === "false") {
+      jsonValue = value === "true";
+    } else if (/^-?\d+$/.test(value)) {
+      jsonValue = parseInt(value, 10);
+    } else if (/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(value)) {
+      jsonValue = parseFloat(value);
+    }
+    MonitorPanel.log(`Trigger ${variable} = ${JSON.stringify(jsonValue)}`);
+    this.wsSend({ method: "trigger", params: { variable, value: jsonValue } });
+  }
+
   /** Unforce a variable via WebSocket. */
   private targetUnforce(variable: string) {
     if (!this.wsMonitorActive) {
@@ -702,13 +725,13 @@ export class MonitorPanel {
     html = html.replace(/{{scriptUri}}/g, scriptUri.toString());
     html = html.replace(/{{nonce}}/g, nonce);
     html = html.replace(/{{cspSource}}/g, this.panel.webview.cspSource);
-    html = html.replace(/{{version}}/g, version);
     html = html.replace(
       "{{initialState}}",
       JSON.stringify({
         catalog: this.catalog,
         watchList: this.watchList,
         expandedNodes: this.loadExpandedNodes(),
+        version,
       })
     );
 

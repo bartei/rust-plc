@@ -2650,11 +2650,11 @@ fn test_vscode_watch_mixed_fb_and_array() {
     );
     // Array elements present
     assert!(
-        var_names.iter().any(|n| *n == "Main.arr[1]"),
+        var_names.contains(&"Main.arr[1]"),
         "Should include Main.arr[1]: {var_names:?}"
     );
     assert!(
-        var_names.iter().any(|n| *n == "Main.arr[3]"),
+        var_names.contains(&"Main.arr[3]"),
         "Should include Main.arr[3]: {var_names:?}"
     );
     // Counter excluded (not in watch list)

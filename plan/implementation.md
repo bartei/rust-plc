@@ -164,9 +164,13 @@
 
 ### Monitor panel UX (COMPLETED)
 
-- [x] `postMessage`-based incremental DOM updates
+- [x] Preact-based webview (replaced vanilla DOM manipulation)
+- [x] Virtual DOM diffing — buttons survive live value updates, no click-swallowing
 - [x] Watch list table with autocomplete, Force, Remove, Clear all
 - [x] Per-workspace persistence via `workspaceState`
+- [x] Force dialog popup: validates input, shows current value when forced
+- [x] Trigger (single-cycle force) command — TIA Portal style
+- [x] Unforce button on forced rows + inline forced-value badge
 - [x] Force/Unforce wired to DAP evaluate REPL (local) and WebSocket (remote)
 - [x] Live cycle stats display
 - [x] Tests: `test_watch_list_flow`, `test_var_catalog_emitted_on_launch`
@@ -211,8 +215,8 @@
 
 ## VS Code Extension E2E Testing
 
-Infrastructure: `@vscode/test-electron` (real Electron instance) + Playwright (webview DOM).
-14 Electron tests, 21 Playwright tests, 10 unit tests.
+Infrastructure: `@vscode/test-electron` (real Electron instance) + Playwright (webview DOM in Docker) + unit tests.
+14 Electron tests, 21 Playwright tests, 12 unit tests. Makefile orchestrates all suites via Docker containers.
 
 ### Extension tests (via @vscode/test-electron) — 5 passing
 
@@ -234,7 +238,7 @@ Infrastructure: `@vscode/test-electron` (real Electron instance) + Playwright (w
 - [x] Stop during Continue terminates cleanly
 - [x] Breakpoint hit stops at correct line
 
-### Playwright webview tests — 21 passing
+### Playwright webview tests — 19 passing, 2 skipped (Docker)
 
 - [x] Watch list CRUD (add, remove, clear)
 - [x] FB tree expand/collapse with nested FBs
@@ -242,12 +246,22 @@ Infrastructure: `@vscode/test-electron` (real Electron instance) + Playwright (w
 - [x] Value updates without rebuilding structure
 - [x] Expand/collapse state persistence
 - [x] Session reset: values clear and rebuild on new session
+- [x] Force dialog opens reliably during live updates
+- [x] Dockerized test runner (`docker/playwright.Dockerfile`)
+- [x] Real Rust WS test server (monitor-test-server) compiled in Docker
+
+### Build & test infrastructure
+
+- [x] Makefile with all test targets (`make test`, `make test-ui`, `make test-modbus`, etc.)
+- [x] Docker test container (`docker/test.Dockerfile`) — Rust + Node + system deps
+- [x] Docker Playwright container (`docker/playwright.Dockerfile`) — multi-stage build
+- [x] All tests run in containers — no host-specific dependencies
 
 ### Remaining E2E tests
 
 - [ ] Hover shows type information on variables
 - [ ] Go-to-definition navigates to symbol
-- [ ] Force/unforce variable via custom request
+- [ ] Force/unforce variable via custom request (test server doesn't implement force)
 - [ ] Multi-file project: breakpoints across files
 - [ ] `structured-text.openMonitor` command opens the panel
 - [ ] Headless CI via Xvfb in GitHub Actions

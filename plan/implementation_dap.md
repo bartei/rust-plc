@@ -167,10 +167,13 @@
 - [x] Evaluate handler resolves dotted paths via `resolve_fb_field`
 - [x] DAP integration tests (3 tests)
 - [x] Evaluate handler: `variablesReference > 0` for FB instances in Watch panel
-- [x] Monitor panel: recursive `buildSubTree()` + `renderTree()` tree view
-- [x] Monitor panel: tree data model (flat → WatchEntry with children)
+- [x] Monitor panel: Preact-based webview with virtual DOM diffing
+- [x] Monitor panel: recursive tree view via WatchNodeRow components
+- [x] Monitor panel: tree data model (WatchNode tree from server)
 - [x] Monitor panel: telemetry sends nested `children` for expanded FBs
 - [x] Monitor panel: persist expand/collapse state in workspace state
+- [x] Monitor panel: Force dialog popup with validation + Trigger (1-cycle force)
+- [x] Monitor panel: Dockerized Playwright E2E tests (19 passing)
 - [ ] Monitor panel: "Collapse all" / "Expand all" for large FB instances
 - [ ] `plc/varCatalog`: add `childNames` for FB-typed entries
 - [ ] Tests: DAP tree expansion (single + nested FB)

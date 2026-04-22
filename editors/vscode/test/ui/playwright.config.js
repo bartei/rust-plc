@@ -12,6 +12,14 @@ module.exports = defineConfig({
   use: {
     headless: true,
     screenshot: "only-on-failure",
+    // On NixOS, Playwright's downloaded Chromium won't run (dynamically linked).
+    // Use the system Chrome/Chromium instead via the "channel" option.
+    ...(process.env.PLAYWRIGHT_CHANNEL
+      ? { channel: process.env.PLAYWRIGHT_CHANNEL }
+      : {}),
+    ...(process.env.PLAYWRIGHT_EXECUTABLE_PATH
+      ? { launchOptions: { executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH } }
+      : {}),
   },
   // The test file starts its own servers (Rust monitor + HTML fixture)
   // so we don't need a webServer config here.

@@ -10,6 +10,6 @@
     "install-browsers": "npx playwright install chromium"
   },
   "devDependencies": {
-    "@playwright/test": "^1.45.0"
+    "@playwright/test": "1.52.0"
   }
 }

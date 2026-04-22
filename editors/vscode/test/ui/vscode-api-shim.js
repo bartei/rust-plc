@@ -37,7 +37,6 @@ function acquireVsCodeApi() {
           );
           break;
         case "clearWatch":
-          // Can't easily unsubscribe all without knowing the list
           break;
         case "force":
           var forceValue = msg.value;
@@ -49,6 +48,19 @@ function acquireVsCodeApi() {
             JSON.stringify({
               method: "force",
               params: { variable: msg.variable, value: forceValue },
+            })
+          );
+          break;
+        case "trigger":
+          var triggerValue = msg.value;
+          if (triggerValue === "true") triggerValue = true;
+          else if (triggerValue === "false") triggerValue = false;
+          else if (/^-?\d+$/.test(triggerValue))
+            triggerValue = parseInt(triggerValue, 10);
+          __testWs.send(
+            JSON.stringify({
+              method: "trigger",
+              params: { variable: msg.variable, value: triggerValue },
             })
           );
           break;
@@ -68,9 +80,11 @@ function acquireVsCodeApi() {
   };
 }
 
-function __connectTestWs() {
-  if (!__MONITOR_PORT__ || __MONITOR_PORT__ === 0) return;
-  var url = "ws://127.0.0.1:" + __MONITOR_PORT__;
+function __connectTestWs(port) {
+  var wsPort = port || __MONITOR_PORT__;
+  if (!wsPort || wsPort === 0) return;
+  if (__testWs) { __testWs.close(); __testWs = null; }
+  var url = "ws://127.0.0.1:" + wsPort;
   __testWs = new WebSocket(url);
 
   __testWs.onopen = function () {
@@ -150,4 +164,6 @@ function __connectTestWs() {
   };
 }
 
-window.addEventListener("load", __connectTestWs);
+window.addEventListener("load", function () {
+  __connectTestWs(__MONITOR_PORT__);
+});

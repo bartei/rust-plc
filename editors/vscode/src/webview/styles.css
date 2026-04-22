@@ -92,14 +92,90 @@ th {
   outline: 1px solid var(--vscode-focusBorder);
 }
 
-.force-input {
-  width: 80px;
-  padding: 2px 4px;
+/* -- Force Dialog ------------------------------------------------ */
+
+.force-dialog-overlay {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 2000;
+  align-items: center;
+  justify-content: center;
+}
+
+.force-dialog-overlay.visible {
+  display: flex;
+}
+
+.force-dialog {
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
+  border-radius: 6px;
+  padding: 16px 20px;
+  min-width: 300px;
+  max-width: 400px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+.force-dialog-title {
+  font-weight: bold;
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.force-dialog-var {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 13px;
+  font-weight: bold;
+  margin-bottom: 2px;
+  word-break: break-all;
+}
+
+.force-dialog-type {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+
+.force-dialog-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
   background: var(--vscode-input-background);
   color: var(--vscode-input-foreground);
   border: 1px solid var(--vscode-input-border);
   font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+
+.force-dialog-input:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
+.force-dialog-error {
+  color: var(--vscode-inputValidation-errorBorder, #be1100);
   font-size: 12px;
+  min-height: 18px;
+  margin-bottom: 8px;
+}
+
+.force-dialog-buttons {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.forced-value {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  color: var(--vscode-charts-orange, #d18616);
+  margin-right: 6px;
 }
 
 button {
@@ -346,4 +422,18 @@ button.secondary:hover {
   background: none;
   border: none;
   padding: 0 4px;
+}
+
+/* -- Status Footer ------------------------------------------------ */
+
+.status-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground, #888);
+  opacity: 0.7;
+  margin-top: 8px;
+  padding: 4px 0;
+  border-top: 1px solid var(--vscode-panel-border, #333);
 }
