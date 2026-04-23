@@ -5,6 +5,7 @@
 
 use st_comm_api::{DeviceProfile, EngineProjectConfig, NativeFbRegistry};
 use st_comm_modbus::device_fb::ModbusRtuDeviceNativeFb;
+use st_comm_modbus_tcp::device_fb::ModbusTcpDeviceNativeFb;
 use st_comm_serial::SerialLinkNativeFb;
 use st_comm_sim::SimulatedNativeFb;
 use std::collections::HashMap;
@@ -98,6 +99,10 @@ pub fn load_native_fbs_for_project(project_root: &Path) -> Result<Option<NativeC
                 );
                 registry.register(Box::new(modbus_fb));
                 has_modbus_rtu = true;
+            }
+            "modbus-tcp" => {
+                let tcp_fb = ModbusTcpDeviceNativeFb::new(profile.clone());
+                registry.register(Box::new(tcp_fb));
             }
             other => {
                 eprintln!(

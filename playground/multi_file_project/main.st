@@ -42,9 +42,13 @@ VAR
     filling : BOOL := FALSE;
     moving : BOOL := TRUE;
     test_array: ARRAY[0..9] OF INT;
+    time_of_day: TOD;
+    modcycle: UINT;
     i: INT;
 END_VAR
     cycle := cycle + 1;
+    modcycle := cycle MOD 100;
+    time_of_day := TO_TOD(IN1 := TO_LINT(IN1 := cycle) * 1000 * 60);
 
     test_array[0] := cycle;
 

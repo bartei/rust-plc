@@ -177,9 +177,9 @@
 
 ### Modbus TCP
 
-- [ ] `TcpLink` NativeFb (TCP socket management)
-- [ ] `ModbusTcpDevice` NativeFb (Modbus TCP/IP, MBAP header instead of CRC)
-- [ ] Device profiles same as RTU (register map is protocol-independent)
+- [x] `ModbusTcpDevice` NativeFb (Modbus TCP/IP, MBAP header instead of CRC) — `st-comm-modbus-tcp` crate
+- [x] Device profiles same as RTU (register map is protocol-independent, `protocol: modbus-tcp`)
+- [x] Unified transport+protocol: device FB owns its own TCP connection (no separate TcpLink needed)
 
 ### Plugin System
 

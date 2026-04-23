@@ -1,0 +1,5 @@
+name: ModbusTcpDemo
+version: "1.0.0"
+entryPoint: Main
+engine:
+  cycle_time: 100ms

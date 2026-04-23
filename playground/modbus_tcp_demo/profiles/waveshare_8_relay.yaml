@@ -1,0 +1,37 @@
+name: Waveshare8RelayOutput
+vendor: Waveshare
+protocol: modbus-tcp
+description: "Digital Output 8 Channel Relay"
+fields:
+  - name: DO0
+    type: BOOL
+    direction: output
+    register: { address: 0, kind: coil }
+  - name: DO1
+    type: BOOL
+    direction: output
+    register: { address: 1, kind: coil }
+  - name: DO2
+    type: BOOL
+    direction: output
+    register: { address: 2, kind: coil }
+  - name: DO3
+    type: BOOL
+    direction: output
+    register: { address: 3, kind: coil }
+  - name: DO4
+    type: BOOL
+    direction: output
+    register: { address: 4, kind: coil }
+  - name: DO5
+    type: BOOL
+    direction: output
+    register: { address: 5, kind: coil }
+  - name: DO6
+    type: BOOL
+    direction: output
+    register: { address: 6, kind: coil }
+  - name: DO7
+    type: BOOL
+    direction: output
+    register: { address: 7, kind: coil }

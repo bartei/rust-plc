@@ -8,7 +8,7 @@ exclude:
   - test_*.st
 
 engine:
-  cycle_time: 100ms
+  cycle_time: 10ms
 
 targets:
   # Production PLC on the shop floor

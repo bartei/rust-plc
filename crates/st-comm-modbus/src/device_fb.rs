@@ -323,12 +323,39 @@ fn write_batched_io(
 
         match first_pf.register.kind {
             RegisterKind::Coil => {
-                let val = write_values[first_idx].as_bool();
-                if let Err(e) = client.write_single_coil(slave_id, first_pf.register.address as u16, val) {
-                    tracing::debug!("Modbus write {}.{}: {e}", profile.name, first_pf.name);
-                    had_error = true;
+                // Batch consecutive coils into a single FC0F write
+                let start_addr = first_pf.register.address as u16;
+                let mut end = i + 1;
+                while end < output_fields.len() {
+                    let (_, next_pf) = output_fields[end];
+                    let expected_addr = start_addr + (end - i) as u16;
+                    if next_pf.register.kind != RegisterKind::Coil
+                        || next_pf.register.address as u16 != expected_addr
+                    {
+                        break;
+                    }
+                    end += 1;
                 }
-                i += 1;
+                let count = end - i;
+                if count == 1 {
+                    let val = write_values[first_idx].as_bool();
+                    if let Err(e) = client.write_single_coil(slave_id, start_addr, val) {
+                        tracing::debug!("Modbus write {}.{}: {e}", profile.name, first_pf.name);
+                        had_error = true;
+                    }
+                } else {
+                    let coils: Vec<bool> = (i..end)
+                        .map(|j| {
+                            let (idx, _) = output_fields[j];
+                            write_values[idx].as_bool()
+                        })
+                        .collect();
+                    if let Err(e) = client.write_multiple_coils(slave_id, start_addr, &coils) {
+                        tracing::debug!("Modbus batch write {}.{}: {e}", profile.name, first_pf.name);
+                        had_error = true;
+                    }
+                }
+                i = end;
             }
             RegisterKind::HoldingRegister => {
                 let start_addr = first_pf.register.address as u16;

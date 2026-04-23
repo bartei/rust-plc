@@ -16,6 +16,7 @@ st-engine.workspace = true
 st-comm-api = { path = "../st-comm-api" }
 st-comm-serial = { path = "../st-comm-serial" }
 st-comm-modbus = { path = "../st-comm-modbus" }
+st-comm-modbus-tcp = { path = "../st-comm-modbus-tcp" }
 st-comm-sim = { path = "../st-comm-sim" }
 st-deploy = { path = "../st-deploy" }
 st-lsp.workspace = true

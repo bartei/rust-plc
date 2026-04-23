@@ -1,0 +1,15 @@
+[package]
+name = "st-comm-modbus-tcp"
+description = "Modbus TCP protocol for PLC communication"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+st-comm-api = { path = "../st-comm-api" }
+st-ir.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+st-comm-api = { path = "../st-comm-api" }

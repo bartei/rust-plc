@@ -791,6 +791,17 @@ impl DapSession {
                                 }
                                 has_modbus_rtu = true;
                             }
+                            "modbus-tcp" => {
+                                if real {
+                                    registry.register(Box::new(
+                                        st_comm_modbus_tcp::device_fb::ModbusTcpDeviceNativeFb::new(profile),
+                                    ));
+                                } else {
+                                    registry.register(Box::new(
+                                        st_comm_sim::LayoutOnlyNativeFb::new(profile.to_modbus_tcp_device_layout()),
+                                    ));
+                                }
+                            }
                             _ => {
                                 let name = profile.name.clone();
                                 registry.register(Box::new(

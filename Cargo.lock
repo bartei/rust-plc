@@ -2378,6 +2378,7 @@ dependencies = [
  "serde_yaml",
  "st-comm-api",
  "st-comm-modbus",
+ "st-comm-modbus-tcp",
  "st-comm-serial",
  "st-comm-sim",
  "st-compiler",
@@ -2418,6 +2419,15 @@ dependencies = [
  "st-engine",
  "st-ir",
  "st-syntax",
+ "tracing",
+]
+
+[[package]]
+name = "st-comm-modbus-tcp"
+version = "0.3.0"
+dependencies = [
+ "st-comm-api",
+ "st-ir",
  "tracing",
 ]
 
@@ -2472,6 +2482,7 @@ dependencies = [
  "serde_yaml",
  "st-comm-api",
  "st-comm-modbus",
+ "st-comm-modbus-tcp",
  "st-comm-serial",
  "st-comm-sim",
  "st-compiler",

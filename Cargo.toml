@@ -12,6 +12,7 @@ members = [
     "crates/st-cli",
     "crates/st-comm-api",
     "crates/st-comm-modbus",
+    "crates/st-comm-modbus-tcp",
     "crates/st-comm-serial",
     "crates/st-comm-sim",
     "crates/st-deploy",

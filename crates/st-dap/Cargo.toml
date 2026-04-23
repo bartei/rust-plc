@@ -17,6 +17,7 @@ st-syntax.workspace = true
 st-compiler.workspace = true
 st-comm-api = { path = "../st-comm-api" }
 st-comm-modbus = { path = "../st-comm-modbus" }
+st-comm-modbus-tcp = { path = "../st-comm-modbus-tcp" }
 st-comm-serial = { path = "../st-comm-serial" }
 st-comm-sim = { path = "../st-comm-sim" }
 st-monitor = { path = "../st-monitor" }

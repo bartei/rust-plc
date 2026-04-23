@@ -259,6 +259,7 @@ impl Document {
                     let protocol = profile.protocol.as_deref().unwrap_or("simulated");
                     let layout = match protocol {
                         "modbus-rtu" => profile.to_modbus_rtu_device_layout(),
+                        "modbus-tcp" => profile.to_modbus_tcp_device_layout(),
                         _ => profile.to_native_fb_layout(),
                     };
                     registry.register(Box::new(

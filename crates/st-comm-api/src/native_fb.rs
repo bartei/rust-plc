@@ -213,6 +213,41 @@ impl DeviceProfile {
             fields,
         }
     }
+
+    /// Build a [`NativeFbLayout`] for a Modbus TCP device profile.
+    ///
+    /// Unlike RTU (which takes a `link` reference to a separate SerialLink),
+    /// TCP devices own their connection directly: `host` + `port` + `unit_id`.
+    ///
+    /// Layout: host, port, unit_id, refresh_rate, diagnostics, profile I/O fields.
+    pub fn to_modbus_tcp_device_layout(&self) -> NativeFbLayout {
+        let mut fields = vec![
+            // -- VAR_INPUT: connection + protocol parameters --
+            NativeFbField { name: "host".into(), data_type: FieldDataType::String, var_kind: NativeFbVarKind::VarInput },
+            NativeFbField { name: "port".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::VarInput },
+            NativeFbField { name: "unit_id".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::VarInput },
+            NativeFbField { name: "refresh_rate".into(), data_type: FieldDataType::Time, var_kind: NativeFbVarKind::VarInput },
+            // -- VAR: diagnostic fields --
+            NativeFbField { name: "connected".into(), data_type: FieldDataType::Bool, var_kind: NativeFbVarKind::Var },
+            NativeFbField { name: "error_code".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::Var },
+            NativeFbField { name: "io_cycles".into(), data_type: FieldDataType::Udint, var_kind: NativeFbVarKind::Var },
+            NativeFbField { name: "last_response_ms".into(), data_type: FieldDataType::Real, var_kind: NativeFbVarKind::Var },
+        ];
+
+        // -- VAR: I/O fields from the profile --
+        for pf in &self.fields {
+            fields.push(NativeFbField {
+                name: pf.name.clone(),
+                data_type: pf.data_type,
+                var_kind: NativeFbVarKind::Var,
+            });
+        }
+
+        NativeFbLayout {
+            type_name: self.name.clone(),
+            fields,
+        }
+    }
 }
 
 /// Map a [`FieldDataType`] to the corresponding [`st_ir::VarType`].
