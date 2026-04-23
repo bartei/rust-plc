@@ -418,6 +418,13 @@ pub enum Instruction {
     LoadField(Reg, u16, u16),
     /// Store struct field: base_slot, field_offset, value_register.
     StoreField(u16, u16, Reg),
+
+    /// Load from array field in FB instance: dst, instance_slot, field_base_offset, index_register.
+    /// Accesses `fb_instances[instance][base_offset + index]`.
+    LoadFieldIndex(Reg, u16, u16, Reg),
+    /// Store to array field in FB instance: instance_slot, field_base_offset, index_register, value_register.
+    /// Accesses `fb_instances[instance][base_offset + index]`.
+    StoreFieldIndex(u16, u16, Reg, Reg),
 }
 
 /// Source location for debugger mapping.
@@ -451,6 +458,35 @@ impl MemoryLayout {
             .enumerate()
             .find(|(_, s)| s.name.eq_ignore_ascii_case(name))
             .map(|(i, s)| (i as u16, s))
+    }
+
+    /// Check if this layout has any array fields that expand inline.
+    /// When true, slot indices don't map 1:1 to Vec<Value> indices.
+    pub fn has_expanded_arrays(&self) -> bool {
+        self.slots.iter().any(|s| matches!(s.ty, VarType::Array(_)) && s.size > 1)
+    }
+
+    /// Compute the expanded Vec<Value> index for slot `slot_idx`.
+    ///
+    /// For native FB layouts with array fields, the offset is stored as
+    /// Value-count in `VarSlot.offset`. For regular layouts or when no
+    /// arrays are present, this returns `slot_idx` unchanged.
+    pub fn expanded_index(&self, slot_idx: usize) -> usize {
+        if !self.has_expanded_arrays() {
+            return slot_idx;
+        }
+        self.slots.get(slot_idx).map_or(slot_idx, |s| s.offset)
+    }
+
+    /// Total expanded Vec<Value> size (accounting for inline array elements).
+    /// For regular layouts, this equals `slots.len()`.
+    pub fn expanded_len(&self) -> usize {
+        if !self.has_expanded_arrays() {
+            return self.slots.len();
+        }
+        self.slots.iter().map(|s| {
+            if matches!(s.ty, VarType::Array(_)) { s.size } else { 1 }
+        }).sum()
     }
 
     pub fn total_size(&self) -> usize {

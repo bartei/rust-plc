@@ -279,13 +279,13 @@ impl Document {
             let serial_link_layout = st_comm_api::NativeFbLayout {
                 type_name: "SerialLink".to_string(),
                 fields: vec![
-                    st_comm_api::NativeFbField { name: "port".into(), data_type: st_comm_api::FieldDataType::String, var_kind: st_comm_api::NativeFbVarKind::VarInput },
-                    st_comm_api::NativeFbField { name: "baud".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::VarInput },
-                    st_comm_api::NativeFbField { name: "parity".into(), data_type: st_comm_api::FieldDataType::String, var_kind: st_comm_api::NativeFbVarKind::VarInput },
-                    st_comm_api::NativeFbField { name: "data_bits".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::VarInput },
-                    st_comm_api::NativeFbField { name: "stop_bits".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::VarInput },
-                    st_comm_api::NativeFbField { name: "connected".into(), data_type: st_comm_api::FieldDataType::Bool, var_kind: st_comm_api::NativeFbVarKind::Var },
-                    st_comm_api::NativeFbField { name: "error_code".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::Var },
+                    st_comm_api::NativeFbField { name: "port".into(), data_type: st_comm_api::FieldDataType::String, var_kind: st_comm_api::NativeFbVarKind::VarInput, dimensions: None },
+                    st_comm_api::NativeFbField { name: "baud".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::VarInput, dimensions: None },
+                    st_comm_api::NativeFbField { name: "parity".into(), data_type: st_comm_api::FieldDataType::String, var_kind: st_comm_api::NativeFbVarKind::VarInput, dimensions: None },
+                    st_comm_api::NativeFbField { name: "data_bits".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::VarInput, dimensions: None },
+                    st_comm_api::NativeFbField { name: "stop_bits".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::VarInput, dimensions: None },
+                    st_comm_api::NativeFbField { name: "connected".into(), data_type: st_comm_api::FieldDataType::Bool, var_kind: st_comm_api::NativeFbVarKind::Var, dimensions: None },
+                    st_comm_api::NativeFbField { name: "error_code".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::Var, dimensions: None },
                 ],
             };
             registry.register(Box::new(

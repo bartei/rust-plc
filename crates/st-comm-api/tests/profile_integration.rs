@@ -59,7 +59,8 @@ fn profile_to_native_fb_layout() {
 fn layout_to_memory_layout_roundtrip() {
     let profile = load_bundled_profile("sim_vfd");
     let layout = profile.to_native_fb_layout();
-    let mem = layout_to_memory_layout(&layout);
+    let mut td = Vec::new();
+    let mem = layout_to_memory_layout(&layout, &mut td, 0);
 
     // All fields should be present in the memory layout
     assert_eq!(mem.slots.len(), layout.fields.len());

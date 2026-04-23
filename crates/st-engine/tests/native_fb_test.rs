@@ -20,11 +20,13 @@ impl CounterFb {
                         name: "step".to_string(),
                         data_type: FieldDataType::Int,
                         var_kind: NativeFbVarKind::VarInput,
+                        dimensions: None,
                     },
                     NativeFbField {
                         name: "count".to_string(),
                         data_type: FieldDataType::Int,
                         var_kind: NativeFbVarKind::Var,
+                        dimensions: None,
                     },
                 ],
             },

@@ -29,15 +29,33 @@ const PROFILE_FIELD_OFFSET: usize = 8;
 
 /// Shared state between the scan-cycle thread and the background I/O thread.
 struct IoState {
-    /// Latest values read from the device (indexed by profile field position).
+    /// Latest values read from the device (expanded: one Value per register).
     read_values: Vec<Value>,
-    /// Values to write to the device (indexed by profile field position).
+    /// Values to write to the device (expanded: one Value per register).
     write_values: Vec<Value>,
     /// Diagnostics
     connected: bool,
     error_code: i64,
     io_cycles: u64,
     last_response_ms: f64,
+}
+
+/// Compute the expanded offset for each profile field.
+/// Returns a vec where `offsets[i]` is the starting index for profile field `i`
+/// in the expanded Value arrays (IoState.read_values/write_values and the execute slice).
+fn compute_field_offsets(profile: &DeviceProfile) -> Vec<usize> {
+    let mut offsets = Vec::with_capacity(profile.fields.len());
+    let mut offset = 0;
+    for pf in &profile.fields {
+        offsets.push(offset);
+        offset += pf.count.max(1) as usize;
+    }
+    offsets
+}
+
+/// Total number of expanded values across all profile fields.
+fn total_expanded_values(profile: &DeviceProfile) -> usize {
+    profile.fields.iter().map(|pf| pf.count.max(1) as usize).sum()
 }
 
 /// A Modbus TCP device native FB.
@@ -56,13 +74,14 @@ impl ModbusTcpDeviceNativeFb {
     /// Create from a device profile.
     pub fn new(profile: DeviceProfile) -> Self {
         let layout = profile.to_modbus_tcp_device_layout();
-        let default_values: Vec<Value> = profile
-            .fields
-            .iter()
-            .map(|pf| {
-                Value::default_for_type(st_comm_api::field_data_type_to_var_type(pf.data_type))
-            })
-            .collect();
+        let total = total_expanded_values(&profile);
+        let mut default_values = Vec::with_capacity(total);
+        for pf in &profile.fields {
+            let def = Value::default_for_type(st_comm_api::field_data_type_to_var_type(pf.data_type));
+            for _ in 0..pf.count.max(1) {
+                default_values.push(def.clone());
+            }
+        }
         Self {
             layout,
             io_state: Arc::new(Mutex::new(IoState {
@@ -134,13 +153,18 @@ impl NativeFb for ModbusTcpDeviceNativeFb {
         }
 
         // Queue output values for the background thread to write
+        let offsets = compute_field_offsets(&self.profile);
         {
             let mut state = self.io_state.lock().unwrap();
             for (i, pf) in self.profile.fields.iter().enumerate() {
                 if matches!(pf.direction, FieldDirection::Output | FieldDirection::Inout) {
-                    let slot = PROFILE_FIELD_OFFSET + i;
-                    if slot < fields.len() {
-                        state.write_values[i] = fields[slot].clone();
+                    let count = pf.count.max(1) as usize;
+                    let base = PROFILE_FIELD_OFFSET + offsets[i];
+                    let io_base = offsets[i];
+                    for j in 0..count {
+                        if base + j < fields.len() && io_base + j < state.write_values.len() {
+                            state.write_values[io_base + j] = fields[base + j].clone();
+                        }
                     }
                 }
             }
@@ -151,9 +175,13 @@ impl NativeFb for ModbusTcpDeviceNativeFb {
             let state = self.io_state.lock().unwrap();
             for (i, pf) in self.profile.fields.iter().enumerate() {
                 if matches!(pf.direction, FieldDirection::Input | FieldDirection::Inout) {
-                    let slot = PROFILE_FIELD_OFFSET + i;
-                    if slot < fields.len() {
-                        fields[slot] = state.read_values[i].clone();
+                    let count = pf.count.max(1) as usize;
+                    let base = PROFILE_FIELD_OFFSET + offsets[i];
+                    let io_base = offsets[i];
+                    for j in 0..count {
+                        if base + j < fields.len() && io_base + j < state.read_values.len() {
+                            fields[base + j] = state.read_values[io_base + j].clone();
+                        }
                     }
                 }
             }
@@ -238,6 +266,45 @@ fn io_thread_loop(
 
 // ── Batched I/O helpers ──────────────────────────────────────────────
 
+/// An expanded register entry: one register in the flat expanded list.
+struct ExpandedReg {
+    /// Index in IoState.read_values / write_values (expanded).
+    io_idx: usize,
+    /// Register address on the device.
+    address: u16,
+    /// Register kind (coil, discrete_input, holding_register, input_register).
+    kind: RegisterKind,
+    /// Data type for scaling.
+    data_type: FieldDataType,
+    /// Register mapping (for scale/offset).
+    register: st_comm_api::profile::RegisterMapping,
+    /// Profile field name (for logging).
+    field_name: String,
+}
+
+/// Expand profile fields into a flat register list, accounting for `count`.
+fn expand_registers(profile: &DeviceProfile, direction_filter: impl Fn(&FieldDirection) -> bool) -> Vec<ExpandedReg> {
+    let offsets = compute_field_offsets(profile);
+    let mut regs = Vec::new();
+    for (i, pf) in profile.fields.iter().enumerate() {
+        if !direction_filter(&pf.direction) {
+            continue;
+        }
+        let count = pf.count.max(1) as usize;
+        for j in 0..count {
+            regs.push(ExpandedReg {
+                io_idx: offsets[i] + j,
+                address: pf.register.address as u16 + j as u16,
+                kind: pf.register.kind,
+                data_type: pf.data_type,
+                register: pf.register.clone(),
+                field_name: pf.name.clone(),
+            });
+        }
+    }
+    regs
+}
+
 /// Read input-direction fields in batches, storing results into `io_state`.
 fn read_batched_io(
     client: &mut TcpModbusClient,
@@ -246,31 +313,25 @@ fn read_batched_io(
     io_state: &Arc<Mutex<IoState>>,
 ) -> bool {
     let mut had_error = false;
-
-    let input_fields: Vec<(usize, &st_comm_api::profile::ProfileField)> = profile
-        .fields
-        .iter()
-        .enumerate()
-        .filter(|(_, pf)| matches!(pf.direction, FieldDirection::Input | FieldDirection::Inout))
-        .collect();
+    let regs = expand_registers(profile, |d| matches!(d, FieldDirection::Input | FieldDirection::Inout));
 
     let mut i = 0;
-    while i < input_fields.len() {
-        let (_, first_pf) = input_fields[i];
+    while i < regs.len() {
+        let first = &regs[i];
 
-        if first_pf.register.kind == RegisterKind::Virtual {
+        if first.kind == RegisterKind::Virtual {
             i += 1;
             continue;
         }
 
         // Find consecutive registers of the same kind
-        let start_addr = first_pf.register.address as u16;
-        let kind = first_pf.register.kind;
+        let start_addr = first.address;
+        let kind = first.kind;
         let mut end = i + 1;
-        while end < input_fields.len() {
-            let (_, next_pf) = input_fields[end];
+        while end < regs.len() {
+            let next = &regs[end];
             let expected_addr = start_addr + (end - i) as u16;
-            if next_pf.register.kind != kind || next_pf.register.address as u16 != expected_addr {
+            if next.kind != kind || next.address != expected_addr {
                 break;
             }
             end += 1;
@@ -281,8 +342,7 @@ fn read_batched_io(
             RegisterKind::Coil => client.read_coils(unit_id, start_addr, count).map(|bools| {
                 let mut state = io_state.lock().unwrap();
                 for (j, &val) in bools.iter().enumerate() {
-                    let (idx, _) = input_fields[i + j];
-                    state.read_values[idx] = Value::Bool(val);
+                    state.read_values[regs[i + j].io_idx] = Value::Bool(val);
                 }
             }),
             RegisterKind::DiscreteInput => {
@@ -291,32 +351,31 @@ fn read_batched_io(
                     .map(|bools| {
                         let mut state = io_state.lock().unwrap();
                         for (j, &val) in bools.iter().enumerate() {
-                            let (idx, _) = input_fields[i + j];
-                            state.read_values[idx] = Value::Bool(val);
+                            state.read_values[regs[i + j].io_idx] = Value::Bool(val);
                         }
                     })
             }
             RegisterKind::HoldingRegister => {
                 client
                     .read_holding_registers(unit_id, start_addr, count)
-                    .map(|regs| {
+                    .map(|regs_data| {
                         let mut state = io_state.lock().unwrap();
-                        for (j, &raw) in regs.iter().enumerate() {
-                            let (idx, pf) = input_fields[i + j];
-                            state.read_values[idx] =
-                                register_to_value(raw, pf.data_type, &pf.register);
+                        for (j, &raw) in regs_data.iter().enumerate() {
+                            let r = &regs[i + j];
+                            state.read_values[r.io_idx] =
+                                register_to_value(raw, r.data_type, &r.register);
                         }
                     })
             }
             RegisterKind::InputRegister => {
                 client
                     .read_input_registers(unit_id, start_addr, count)
-                    .map(|regs| {
+                    .map(|regs_data| {
                         let mut state = io_state.lock().unwrap();
-                        for (j, &raw) in regs.iter().enumerate() {
-                            let (idx, pf) = input_fields[i + j];
-                            state.read_values[idx] =
-                                register_to_value(raw, pf.data_type, &pf.register);
+                        for (j, &raw) in regs_data.iter().enumerate() {
+                            let r = &regs[i + j];
+                            state.read_values[r.io_idx] =
+                                register_to_value(raw, r.data_type, &r.register);
                         }
                     })
             }
@@ -324,7 +383,7 @@ fn read_batched_io(
         };
 
         if let Err(e) = result {
-            tracing::debug!("Modbus TCP batch read {}.{}: {e}", profile.name, first_pf.name);
+            tracing::debug!("Modbus TCP batch read {}.{}: {e}", profile.name, first.field_name);
             had_error = true;
         }
 
@@ -341,111 +400,69 @@ fn write_batched_io(
     write_values: &[Value],
 ) -> bool {
     let mut had_error = false;
-
-    let output_fields: Vec<(usize, &st_comm_api::profile::ProfileField)> = profile
-        .fields
-        .iter()
-        .enumerate()
-        .filter(|(_, pf)| matches!(pf.direction, FieldDirection::Output | FieldDirection::Inout))
-        .collect();
+    let regs = expand_registers(profile, |d| matches!(d, FieldDirection::Output | FieldDirection::Inout));
 
     let mut i = 0;
-    while i < output_fields.len() {
-        let (first_idx, first_pf) = output_fields[i];
+    while i < regs.len() {
+        let first = &regs[i];
 
-        match first_pf.register.kind {
+        match first.kind {
             RegisterKind::Coil => {
-                // Batch consecutive coils into a single FC0F write
-                let start_addr = first_pf.register.address as u16;
+                let start_addr = first.address;
                 let mut end = i + 1;
-                while end < output_fields.len() {
-                    let (_, next_pf) = output_fields[end];
+                while end < regs.len() {
+                    let next = &regs[end];
                     let expected_addr = start_addr + (end - i) as u16;
-                    if next_pf.register.kind != RegisterKind::Coil
-                        || next_pf.register.address as u16 != expected_addr
-                    {
+                    if next.kind != RegisterKind::Coil || next.address != expected_addr {
                         break;
                     }
                     end += 1;
                 }
                 let count = end - i;
                 if count == 1 {
-                    let val = write_values[first_idx].as_bool();
-                    if let Err(e) =
-                        client.write_single_coil(unit_id, start_addr, val)
-                    {
-                        tracing::debug!(
-                            "Modbus TCP write {}.{}: {e}",
-                            profile.name,
-                            first_pf.name
-                        );
+                    let val = write_values[first.io_idx].as_bool();
+                    if let Err(e) = client.write_single_coil(unit_id, start_addr, val) {
+                        tracing::debug!("Modbus TCP write {}.{}: {e}", profile.name, first.field_name);
                         had_error = true;
                     }
                 } else {
                     let coils: Vec<bool> = (i..end)
-                        .map(|j| {
-                            let (idx, _) = output_fields[j];
-                            write_values[idx].as_bool()
-                        })
+                        .map(|j| write_values[regs[j].io_idx].as_bool())
                         .collect();
-                    if let Err(e) =
-                        client.write_multiple_coils(unit_id, start_addr, &coils)
-                    {
-                        tracing::debug!(
-                            "Modbus TCP batch write {}.{}: {e}",
-                            profile.name,
-                            first_pf.name
-                        );
+                    if let Err(e) = client.write_multiple_coils(unit_id, start_addr, &coils) {
+                        tracing::debug!("Modbus TCP batch write {}.{}: {e}", profile.name, first.field_name);
                         had_error = true;
                     }
                 }
                 i = end;
             }
             RegisterKind::HoldingRegister => {
-                let start_addr = first_pf.register.address as u16;
+                let start_addr = first.address;
                 let mut end = i + 1;
-                while end < output_fields.len() {
-                    let (_, next_pf) = output_fields[end];
+                while end < regs.len() {
+                    let next = &regs[end];
                     let expected_addr = start_addr + (end - i) as u16;
-                    if next_pf.register.kind != RegisterKind::HoldingRegister
-                        || next_pf.register.address as u16 != expected_addr
-                    {
+                    if next.kind != RegisterKind::HoldingRegister || next.address != expected_addr {
                         break;
                     }
                     end += 1;
                 }
                 let count = end - i;
                 if count == 1 {
-                    let raw = value_to_register(
-                        &write_values[first_idx],
-                        first_pf.data_type,
-                        &first_pf.register,
-                    );
-                    if let Err(e) =
-                        client.write_single_register(unit_id, start_addr, raw)
-                    {
-                        tracing::debug!(
-                            "Modbus TCP write {}.{}: {e}",
-                            profile.name,
-                            first_pf.name
-                        );
+                    let raw = value_to_register(&write_values[first.io_idx], first.data_type, &first.register);
+                    if let Err(e) = client.write_single_register(unit_id, start_addr, raw) {
+                        tracing::debug!("Modbus TCP write {}.{}: {e}", profile.name, first.field_name);
                         had_error = true;
                     }
                 } else {
                     let values: Vec<u16> = (i..end)
                         .map(|j| {
-                            let (idx, pf) = output_fields[j];
-                            value_to_register(&write_values[idx], pf.data_type, &pf.register)
+                            let r = &regs[j];
+                            value_to_register(&write_values[r.io_idx], r.data_type, &r.register)
                         })
                         .collect();
-                    if let Err(e) =
-                        client.write_multiple_registers(unit_id, start_addr, &values)
-                    {
-                        tracing::debug!(
-                            "Modbus TCP batch write {}.{}: {e}",
-                            profile.name,
-                            first_pf.name
-                        );
+                    if let Err(e) = client.write_multiple_registers(unit_id, start_addr, &values) {
+                        tracing::debug!("Modbus TCP batch write {}.{}: {e}", profile.name, first.field_name);
                         had_error = true;
                     }
                 }

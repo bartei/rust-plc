@@ -390,7 +390,15 @@ impl Analyzer {
             let mut outputs = Vec::new();
 
             for field in &layout.fields {
-                let ty = field_data_type_to_semantic_ty(field.data_type);
+                let elem_ty = field_data_type_to_semantic_ty(field.data_type);
+                let ty = if let Some(dims) = &field.dimensions {
+                    Ty::Array {
+                        ranges: dims.clone(),
+                        element_type: Box::new(elem_ty),
+                    }
+                } else {
+                    elem_ty
+                };
                 let pd = ParamDef {
                     name: field.name.clone(),
                     ty,

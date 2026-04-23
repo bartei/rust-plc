@@ -26,10 +26,13 @@ pub enum NativeFbVarKind {
 pub struct NativeFbField {
     /// Field name as it appears in ST code (e.g., "DI_0", "slave_id").
     pub name: String,
-    /// IEC 61131-3 data type.
+    /// IEC 61131-3 data type (element type for arrays).
     pub data_type: FieldDataType,
     /// Which VAR section this field belongs to.
     pub var_kind: NativeFbVarKind,
+    /// Array dimensions. `None` for scalar fields, `Some([(lo, hi)])` for arrays.
+    /// E.g., `Some(vec![(0, 7)])` for `ARRAY[0..7]`.
+    pub dimensions: Option<Vec<(i64, i64)>>,
 }
 
 /// Complete layout of a native FB type — the single source of truth for
@@ -139,36 +142,47 @@ impl DeviceProfile {
                 name: "refresh_rate".to_string(),
                 data_type: FieldDataType::Time,
                 var_kind: NativeFbVarKind::VarInput,
+                dimensions: None,
             },
             // -- VAR: diagnostic fields --
             NativeFbField {
                 name: "connected".to_string(),
                 data_type: FieldDataType::Bool,
                 var_kind: NativeFbVarKind::Var,
+                dimensions: None,
             },
             NativeFbField {
                 name: "error_code".to_string(),
                 data_type: FieldDataType::Int,
                 var_kind: NativeFbVarKind::Var,
+                dimensions: None,
             },
             NativeFbField {
                 name: "io_cycles".to_string(),
                 data_type: FieldDataType::Udint,
                 var_kind: NativeFbVarKind::Var,
+                dimensions: None,
             },
             NativeFbField {
                 name: "last_response_ms".to_string(),
                 data_type: FieldDataType::Real,
                 var_kind: NativeFbVarKind::Var,
+                dimensions: None,
             },
         ];
 
         // -- VAR: I/O fields from the profile --
         for pf in &self.fields {
+            let dims = if pf.count > 1 {
+                Some(vec![(0, pf.count as i64 - 1)])
+            } else {
+                None
+            };
             fields.push(NativeFbField {
                 name: pf.name.clone(),
                 data_type: pf.data_type,
                 var_kind: NativeFbVarKind::Var,
+                dimensions: dims,
             });
         }
 
@@ -189,22 +203,28 @@ impl DeviceProfile {
     pub fn to_modbus_rtu_device_layout(&self) -> NativeFbLayout {
         let mut fields = vec![
             // -- VAR_INPUT: link binding + protocol parameters --
-            NativeFbField { name: "link".into(), data_type: FieldDataType::String, var_kind: NativeFbVarKind::VarInput },
-            NativeFbField { name: "slave_id".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::VarInput },
-            NativeFbField { name: "refresh_rate".into(), data_type: FieldDataType::Time, var_kind: NativeFbVarKind::VarInput },
+            NativeFbField { name: "link".into(), data_type: FieldDataType::String, var_kind: NativeFbVarKind::VarInput, dimensions: None },
+            NativeFbField { name: "slave_id".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::VarInput, dimensions: None },
+            NativeFbField { name: "refresh_rate".into(), data_type: FieldDataType::Time, var_kind: NativeFbVarKind::VarInput, dimensions: None },
             // -- VAR: diagnostic fields --
-            NativeFbField { name: "connected".into(), data_type: FieldDataType::Bool, var_kind: NativeFbVarKind::Var },
-            NativeFbField { name: "error_code".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::Var },
-            NativeFbField { name: "io_cycles".into(), data_type: FieldDataType::Udint, var_kind: NativeFbVarKind::Var },
-            NativeFbField { name: "last_response_ms".into(), data_type: FieldDataType::Real, var_kind: NativeFbVarKind::Var },
+            NativeFbField { name: "connected".into(), data_type: FieldDataType::Bool, var_kind: NativeFbVarKind::Var, dimensions: None },
+            NativeFbField { name: "error_code".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::Var, dimensions: None },
+            NativeFbField { name: "io_cycles".into(), data_type: FieldDataType::Udint, var_kind: NativeFbVarKind::Var, dimensions: None },
+            NativeFbField { name: "last_response_ms".into(), data_type: FieldDataType::Real, var_kind: NativeFbVarKind::Var, dimensions: None },
         ];
 
         // -- VAR: I/O fields from the profile --
         for pf in &self.fields {
+            let dims = if pf.count > 1 {
+                Some(vec![(0, pf.count as i64 - 1)])
+            } else {
+                None
+            };
             fields.push(NativeFbField {
                 name: pf.name.clone(),
                 data_type: pf.data_type,
                 var_kind: NativeFbVarKind::Var,
+                dimensions: dims,
             });
         }
 
@@ -223,23 +243,29 @@ impl DeviceProfile {
     pub fn to_modbus_tcp_device_layout(&self) -> NativeFbLayout {
         let mut fields = vec![
             // -- VAR_INPUT: connection + protocol parameters --
-            NativeFbField { name: "host".into(), data_type: FieldDataType::String, var_kind: NativeFbVarKind::VarInput },
-            NativeFbField { name: "port".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::VarInput },
-            NativeFbField { name: "unit_id".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::VarInput },
-            NativeFbField { name: "refresh_rate".into(), data_type: FieldDataType::Time, var_kind: NativeFbVarKind::VarInput },
+            NativeFbField { name: "host".into(), data_type: FieldDataType::String, var_kind: NativeFbVarKind::VarInput, dimensions: None },
+            NativeFbField { name: "port".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::VarInput, dimensions: None },
+            NativeFbField { name: "unit_id".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::VarInput, dimensions: None },
+            NativeFbField { name: "refresh_rate".into(), data_type: FieldDataType::Time, var_kind: NativeFbVarKind::VarInput, dimensions: None },
             // -- VAR: diagnostic fields --
-            NativeFbField { name: "connected".into(), data_type: FieldDataType::Bool, var_kind: NativeFbVarKind::Var },
-            NativeFbField { name: "error_code".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::Var },
-            NativeFbField { name: "io_cycles".into(), data_type: FieldDataType::Udint, var_kind: NativeFbVarKind::Var },
-            NativeFbField { name: "last_response_ms".into(), data_type: FieldDataType::Real, var_kind: NativeFbVarKind::Var },
+            NativeFbField { name: "connected".into(), data_type: FieldDataType::Bool, var_kind: NativeFbVarKind::Var, dimensions: None },
+            NativeFbField { name: "error_code".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::Var, dimensions: None },
+            NativeFbField { name: "io_cycles".into(), data_type: FieldDataType::Udint, var_kind: NativeFbVarKind::Var, dimensions: None },
+            NativeFbField { name: "last_response_ms".into(), data_type: FieldDataType::Real, var_kind: NativeFbVarKind::Var, dimensions: None },
         ];
 
         // -- VAR: I/O fields from the profile --
         for pf in &self.fields {
+            let dims = if pf.count > 1 {
+                Some(vec![(0, pf.count as i64 - 1)])
+            } else {
+                None
+            };
             fields.push(NativeFbField {
                 name: pf.name.clone(),
                 data_type: pf.data_type,
                 var_kind: NativeFbVarKind::Var,
+                dimensions: dims,
             });
         }
 
@@ -288,31 +314,76 @@ pub fn field_data_type_to_int_width(dt: FieldDataType) -> st_ir::IntWidth {
 
 /// Convert a [`NativeFbLayout`] into a compiled [`st_ir::MemoryLayout`].
 ///
-/// The slot order matches `layout.fields` exactly, so `execute()` can index
-/// its `&mut [Value]` slice by the same positions.
-pub fn layout_to_memory_layout(layout: &NativeFbLayout) -> st_ir::MemoryLayout {
+/// For scalar fields, offset increments by 1 (one `Value` slot).
+/// For array fields, offset increments by the element count (elements stored
+/// inline in the FB's `Vec<Value>`).
+///
+/// `type_defs` is appended with `TypeDef::Array` entries for array fields.
+/// `type_def_base` is the current length of the caller's type_defs vec
+/// (so `VarType::Array(idx)` references are correct).
+pub fn layout_to_memory_layout(
+    layout: &NativeFbLayout,
+    type_defs: &mut Vec<st_ir::TypeDef>,
+    type_def_base: u16,
+) -> st_ir::MemoryLayout {
     let mut offset = 0;
     let slots = layout
         .fields
         .iter()
         .map(|f| {
-            let ty = field_data_type_to_var_type(f.data_type);
+            let elem_ty = field_data_type_to_var_type(f.data_type);
             let int_width = field_data_type_to_int_width(f.data_type);
-            let size = ty.size();
-            let slot = st_ir::VarSlot {
-                name: f.name.clone(),
-                ty,
-                offset,
-                size,
-                retain: false,
-                persistent: false,
-                int_width,
-            };
-            offset += size;
-            slot
+
+            if let Some(dims) = &f.dimensions {
+                // Array field: create TypeDef, use expanded size
+                let td_idx = type_def_base + type_defs.len() as u16;
+                type_defs.push(st_ir::TypeDef::Array {
+                    element_type: elem_ty,
+                    dimensions: dims.clone(),
+                });
+                let count: usize = dims.iter().map(|(lo, hi)| (hi - lo + 1) as usize).product();
+                let slot = st_ir::VarSlot {
+                    name: f.name.clone(),
+                    ty: st_ir::VarType::Array(td_idx),
+                    offset,
+                    size: count,
+                    retain: false,
+                    persistent: false,
+                    int_width,
+                };
+                offset += count;
+                slot
+            } else {
+                // Scalar field: 1 Value slot regardless of byte size
+                let slot = st_ir::VarSlot {
+                    name: f.name.clone(),
+                    ty: elem_ty,
+                    offset,
+                    size: 1,
+                    retain: false,
+                    persistent: false,
+                    int_width,
+                };
+                offset += 1;
+                slot
+            }
         })
         .collect();
     st_ir::MemoryLayout { slots }
+}
+
+/// Compute the expanded size of a native FB's field slice (total `Value` count).
+///
+/// For scalar fields: 1. For array fields: element count. This is the size
+/// of the `&mut [Value]` slice that `execute()` receives.
+pub fn expanded_field_count(layout: &NativeFbLayout) -> usize {
+    layout.fields.iter().map(|f| {
+        if let Some(dims) = &f.dimensions {
+            dims.iter().map(|(lo, hi)| (hi - lo + 1) as usize).product()
+        } else {
+            1
+        }
+    }).sum()
 }
 
 // ---------------------------------------------------------------------------
@@ -337,6 +408,7 @@ mod tests {
                         name: "count".to_string(),
                         data_type: FieldDataType::Int,
                         var_kind: NativeFbVarKind::Var,
+                        dimensions: None,
                     }],
                 },
             }
@@ -436,21 +508,25 @@ fields:
                     name: "flag".to_string(),
                     data_type: FieldDataType::Bool,
                     var_kind: NativeFbVarKind::Var,
+                    dimensions: None,
                 },
                 NativeFbField {
                     name: "count".to_string(),
                     data_type: FieldDataType::Int,
                     var_kind: NativeFbVarKind::Var,
+                    dimensions: None,
                 },
                 NativeFbField {
                     name: "value".to_string(),
                     data_type: FieldDataType::Real,
                     var_kind: NativeFbVarKind::Var,
+                    dimensions: None,
                 },
             ],
         };
 
-        let mem = layout_to_memory_layout(&layout);
+        let mut td = Vec::new();
+        let mem = layout_to_memory_layout(&layout, &mut td, 0);
         assert_eq!(mem.slots.len(), 3);
 
         assert_eq!(mem.slots[0].name, "flag");

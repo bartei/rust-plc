@@ -510,14 +510,27 @@ impl DapSession {
             if matches!(fb_slot.ty, st_ir::VarType::FbInstance(_) | st_ir::VarType::ClassInstance(_)) {
                 continue; // skip nested FB/class instances in the summary
             }
-            let val = fb_state
-                .and_then(|s| s.get(j))
-                .cloned()
-                .unwrap_or(st_ir::Value::Void);
-            if val == st_ir::Value::Void {
-                continue;
+            let vj = fb_func.locals.expanded_index(j);
+            if let st_ir::VarType::Array(_) = fb_slot.ty {
+                // Show array as compact summary: DO=[T,F,T,...]
+                let arr_parts: Vec<String> = (0..fb_slot.size.min(8))
+                    .map(|k| {
+                        let v = fb_state.and_then(|s| s.get(vj + k)).cloned().unwrap_or(st_ir::Value::Void);
+                        st_engine::debug::format_value(&v)
+                    })
+                    .collect();
+                let suffix = if fb_slot.size > 8 { ",..." } else { "" };
+                parts.push(format!("{}=[{}{}]", fb_slot.name, arr_parts.join(","), suffix));
+            } else {
+                let val = fb_state
+                    .and_then(|s| s.get(vj))
+                    .cloned()
+                    .unwrap_or(st_ir::Value::Void);
+                if val == st_ir::Value::Void {
+                    continue;
+                }
+                parts.push(format!("{}={}", fb_slot.name, st_engine::debug::format_value(&val)));
             }
-            parts.push(format!("{}={}", fb_slot.name, st_engine::debug::format_value(&val)));
             if parts.len() >= 4 {
                 parts.push("...".to_string());
                 break;
@@ -827,13 +840,13 @@ impl DapSession {
                     let serial_layout = st_comm_api::NativeFbLayout {
                         type_name: "SerialLink".to_string(),
                         fields: vec![
-                            st_comm_api::NativeFbField { name: "port".into(), data_type: st_comm_api::FieldDataType::String, var_kind: st_comm_api::NativeFbVarKind::VarInput },
-                            st_comm_api::NativeFbField { name: "baud".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::VarInput },
-                            st_comm_api::NativeFbField { name: "parity".into(), data_type: st_comm_api::FieldDataType::String, var_kind: st_comm_api::NativeFbVarKind::VarInput },
-                            st_comm_api::NativeFbField { name: "data_bits".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::VarInput },
-                            st_comm_api::NativeFbField { name: "stop_bits".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::VarInput },
-                            st_comm_api::NativeFbField { name: "connected".into(), data_type: st_comm_api::FieldDataType::Bool, var_kind: st_comm_api::NativeFbVarKind::Var },
-                            st_comm_api::NativeFbField { name: "error_code".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::Var },
+                            st_comm_api::NativeFbField { name: "port".into(), data_type: st_comm_api::FieldDataType::String, var_kind: st_comm_api::NativeFbVarKind::VarInput, dimensions: None },
+                            st_comm_api::NativeFbField { name: "baud".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::VarInput, dimensions: None },
+                            st_comm_api::NativeFbField { name: "parity".into(), data_type: st_comm_api::FieldDataType::String, var_kind: st_comm_api::NativeFbVarKind::VarInput, dimensions: None },
+                            st_comm_api::NativeFbField { name: "data_bits".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::VarInput, dimensions: None },
+                            st_comm_api::NativeFbField { name: "stop_bits".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::VarInput, dimensions: None },
+                            st_comm_api::NativeFbField { name: "connected".into(), data_type: st_comm_api::FieldDataType::Bool, var_kind: st_comm_api::NativeFbVarKind::Var, dimensions: None },
+                            st_comm_api::NativeFbField { name: "error_code".into(), data_type: st_comm_api::FieldDataType::Int, var_kind: st_comm_api::NativeFbVarKind::Var, dimensions: None },
                         ],
                     };
                     registry.register(Box::new(
@@ -1302,16 +1315,12 @@ impl DapSession {
                 let fb_state = vm.fb_instances_ref().get(&instance_key);
 
                 for (j, fb_slot) in fb_func.locals.slots.iter().enumerate() {
-                    let fb_value = fb_state
-                        .and_then(|s| s.get(j))
-                        .cloned()
-                        .unwrap_or(st_ir::Value::Void);
+                    let vj = fb_func.locals.expanded_index(j);
 
                     // Nested FBs get their own variablesReference for further expansion.
-                    let child_ref = if let st_ir::VarType::FbInstance(nested_idx) = fb_slot.ty {
+                    if let st_ir::VarType::FbInstance(nested_idx) = fb_slot.ty {
                         let id = self.next_var_ref;
                         self.next_var_ref += 1;
-                        // caller_id for nested = (parent_slot << 16) | parent_fb_func
                         let nested_caller =
                             ((fb_ref.slot_idx as u32) << 16) | (fb_ref.fb_func_idx as u32);
                         self.fb_var_refs.insert(
@@ -1322,24 +1331,52 @@ impl DapSession {
                                 fb_func_idx: nested_idx,
                             },
                         );
-                        id
+                        variables.push(Variable {
+                            name: fb_slot.name.clone(),
+                            value: "(FB)".to_string(),
+                            type_field: Some("FUNCTION_BLOCK".to_string()),
+                            variables_reference: id,
+                            ..Default::default()
+                        });
+                    } else if let st_ir::VarType::Array(_) = fb_slot.ty {
+                        // Array field: show each element
+                        for k in 0..fb_slot.size {
+                            let arr_val = fb_state
+                                .and_then(|s| s.get(vj + k))
+                                .cloned()
+                                .unwrap_or(st_ir::Value::Void);
+                            variables.push(Variable {
+                                name: format!("{}[{k}]", fb_slot.name),
+                                value: st_engine::debug::format_value(&arr_val),
+                                type_field: Some(
+                                    st_engine::debug::format_var_type_with_width(
+                                        fb_slot.ty,
+                                        fb_slot.int_width,
+                                    ).to_string(),
+                                ),
+                                variables_reference: 0,
+                                ..Default::default()
+                            });
+                        }
                     } else {
-                        0
-                    };
-
-                    variables.push(Variable {
-                        name: fb_slot.name.clone(),
-                        value: st_engine::debug::format_value(&fb_value),
-                        type_field: Some(
-                            st_engine::debug::format_var_type_with_width(
-                                fb_slot.ty,
-                                fb_slot.int_width,
-                            )
-                            .to_string(),
-                        ),
-                        variables_reference: child_ref,
-                        ..Default::default()
-                    });
+                        let fb_value = fb_state
+                            .and_then(|s| s.get(vj))
+                            .cloned()
+                            .unwrap_or(st_ir::Value::Void);
+                        variables.push(Variable {
+                            name: fb_slot.name.clone(),
+                            value: st_engine::debug::format_value(&fb_value),
+                            type_field: Some(
+                                st_engine::debug::format_var_type_with_width(
+                                    fb_slot.ty,
+                                    fb_slot.int_width,
+                                )
+                                .to_string(),
+                            ),
+                            variables_reference: 0,
+                            ..Default::default()
+                        });
+                    }
                 }
                 return ok(
                     seq,
