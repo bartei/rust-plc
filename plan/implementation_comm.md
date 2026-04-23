@@ -15,7 +15,7 @@
 - [x] `DeviceProfile::to_native_fb_layout()` — simulated profile → layout conversion
 - [x] `DeviceProfile::to_modbus_rtu_device_layout()` — modbus-rtu profile → layout (link, slave_id, refresh_rate, diagnostics, profile fields)
 - [x] `field_data_type_to_var_type()` / `field_data_type_to_int_width()` helpers
-- [x] `layout_to_memory_layout()` — NativeFbLayout → st_ir::MemoryLayout
+- [x] `layout_to_memory_layout()` — NativeFbLayout → st_ir::MemoryLayout (with TypeDef generation for array fields)
 - [x] Unit tests: registry operations, profile-to-layout, type mappings
 
 ### Semantic Analyzer (`st-semantics`)
@@ -198,6 +198,24 @@
 - [x] Modbus RTU: consecutive output coils batched via FC0F (write_multiple_coils)
 - [x] Modbus TCP: consecutive output coils batched via FC0F (write_multiple_coils)
 - [x] Single coils still use FC05 (write_single_coil) for efficiency
+
+---
+
+## Array Fields in Device Profiles (COMPLETED)
+
+- [x] `ProfileField.count` — declares N consecutive registers as one array field
+- [x] `NativeFbField.dimensions` — array type info for layout/compiler/semantics
+- [x] `layout_to_memory_layout()` — creates `TypeDef::Array`, inline expansion (Value-count offsets)
+- [x] `LoadFieldIndex` / `StoreFieldIndex` IR instructions for `fb.field[i]` access
+- [x] Semantic analyzer: registers array fields as `Ty::Array` (3-part chains already work)
+- [x] Compiler: 3-part access chains (`fb.field[i]` load and store), `resolve_field_expanded_offset()`
+- [x] VM: new instruction handlers, expanded FB instance init for native FBs
+- [x] `MemoryLayout::expanded_index()` / `expanded_len()` / `has_expanded_arrays()` helpers
+- [x] DAP: array field expansion in variable viewer (shows `DO[0]`, `DO[1]`, ...)
+- [x] PLC monitor: array field expansion in variable catalog and snapshot
+- [x] Forced variables: uses `expanded_index()` for correct slot-to-value mapping
+- [x] Modbus TCP device FB: `expand_registers()` for batched array I/O
+- [x] Playground: `waveshare_8_relay.yaml` profile with `count: 8`, array access in demo
 
 ---
 
