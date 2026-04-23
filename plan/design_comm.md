@@ -90,7 +90,6 @@ OS resource (serial port, TCP socket) and provides send/receive primitives.
 | Link Type | VAR_INPUT Parameters | Transport |
 |-----------|---------------------|-----------|
 | `SerialLink` | port, baud, parity, data_bits, stop_bits | RS-232/RS-485 serial |
-| `TcpLink` | host, port, timeout | TCP socket |
 | `SimulatedLink` | *(none)* | In-memory (for testing) |
 
 Link FBs are called once per cycle. On first call, they open the connection. On
@@ -98,21 +97,27 @@ subsequent calls, they maintain the connection and set `connected := TRUE/FALSE`
 The link's `execute()` does not perform any protocol I/O — it just manages the
 transport layer.
 
+> **Note:** Modbus TCP does not use a separate link FB — the device FB owns its TCP
+> connection directly. See [Modbus TCP Protocol](#modbus-tcp-protocol) below.
+
 ### Devices — Protocol Endpoints
 
 A **device** is a native FB that implements a protocol (Modbus RTU, Modbus TCP, etc.)
-and is parameterized by a YAML device profile (register map). It takes a link reference
-as a VAR_INPUT parameter.
+and is parameterized by a YAML device profile (register map).
 
-| Device Type | Protocol | Link Type |
-|-------------|----------|-----------|
-| `ModbusRtuDevice` | Modbus RTU over serial | `SerialLink` |
-| `ModbusTcpDevice` | Modbus TCP over Ethernet | `TcpLink` |
-| `SimulatedDevice` | In-memory registers + web UI | None (simulated) |
+| Device Type | Protocol | Transport | Link? |
+|-------------|----------|-----------|-------|
+| `ModbusRtuDevice` | Modbus RTU over serial | `SerialLink` | Yes — shared bus |
+| `ModbusTcpDevice` | Modbus TCP over Ethernet | Built-in TCP | No — point-to-point |
+| `SimulatedDevice` | In-memory registers + web UI | None | No |
+
+Modbus RTU devices take a `link` parameter referencing a SerialLink (shared half-duplex
+bus). Modbus TCP devices own their connection directly via `host`/`port` parameters
+(point-to-point, no bus sharing needed).
 
 The device's `execute()`:
 1. Checks if `refresh_rate` interval has elapsed (multi-rate scheduling)
-2. Uses the link to send protocol requests and receive responses
+2. Uses the transport to send protocol requests and receive responses
 3. Maps register values to/from the FB's field slots via the profile
 
 ### Link-Device Binding
@@ -355,6 +360,88 @@ The shared state is accessible via:
 - **Web UI** (HTTP + WebSocket): toggle inputs, observe outputs in browser
 - **Variables API**: read/write via `GET/POST /api/v1/variables`
 - **Force mechanism**: forced values survive `execute()` calls
+
+---
+
+## Modbus TCP Protocol
+
+### Protocol Overview
+
+Modbus TCP is a TCP/IP variant of the Modbus protocol. Unlike RTU (shared serial bus),
+each TCP connection is point-to-point — one connection per remote device. No bus
+coordination or inter-frame timing is needed.
+
+**Frame format (MBAP — Modbus Application Protocol header):**
+```
+[Transaction ID: 2B] [Protocol ID: 2B = 0x0000] [Length: 2B] [Unit ID: 1B] [PDU...]
+```
+
+No CRC is needed — TCP handles data integrity. The PDU (function code + data) is
+identical to RTU.
+
+### Architecture
+
+Unlike Modbus RTU (which uses a two-layer model with shared SerialLink + BusManager),
+Modbus TCP uses a **unified model**: each device FB owns its own TCP connection and
+background I/O thread directly. This is simpler because TCP connections are
+point-to-point — no bus sharing to coordinate.
+
+```
+[PLC] ──── TCP ──── [Device 1: 192.168.1.100:502]
+      ──── TCP ──── [Device 2: 192.168.1.101:502]
+```
+
+Implementation: `st-comm-modbus-tcp` crate (self-contained, independent of
+`st-comm-serial` and `st-comm-modbus`).
+
+### ModbusTcpDevice NativeFb
+
+```
+FUNCTION_BLOCK ModbusTcpDevice
+VAR_INPUT
+    host           : STRING;    (* '192.168.1.100' *)
+    port           : INT;       (* 502 — default Modbus TCP port *)
+    unit_id        : INT;       (* Modbus unit identifier *)
+    refresh_rate   : TIME;      (* Polling interval *)
+END_VAR
+VAR
+    connected        : BOOL;
+    error_code       : INT;
+    io_cycles        : UDINT;
+    last_response_ms : REAL;
+    (* ... profile fields generated from YAML ... *)
+END_VAR
+END_FUNCTION_BLOCK
+```
+
+**Implementation (`execute()`):**
+
+1. **First call:** Spawn a dedicated background I/O thread with a TCP connection
+2. **Background thread:** Connect → loop { read batched inputs, write batched outputs,
+   update diagnostics, sleep for `refresh_rate` }. Auto-reconnect on connection failure.
+3. **Subsequent calls:** Copy cached read values from IoState, queue write values
+   (non-blocking — never blocks the scan cycle)
+
+### Usage
+
+```st
+PROGRAM Main
+VAR
+    io : Waveshare8RelayOutput;
+END_VAR
+    io(host := '10.1.2.133', port := 502, unit_id := 1, refresh_rate := T#50ms);
+    io.DO0 := TRUE;
+END_PROGRAM
+```
+
+Device profiles use `protocol: modbus-tcp` and share the same register map format as
+RTU profiles.
+
+### Register Grouping
+
+Same optimization as RTU: consecutive registers are batched into single multi-register
+read/write requests. Consecutive coils use FC0F (Write Multiple Coils) instead of
+individual FC05 calls.
 
 ---
 

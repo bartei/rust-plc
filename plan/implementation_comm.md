@@ -149,6 +149,7 @@
 ### Remaining
 
 - [x] Register grouping optimizer (merge consecutive registers into multi-read/write)
+- [x] Batched coil writes (consecutive coils via FC0F instead of individual FC05)
 - [ ] Retry logic (1 retry on timeout)
 
 ### Two-Layer Architecture (COMPLETED)
@@ -173,13 +174,34 @@
 
 ---
 
+## Modbus TCP Protocol (COMPLETED)
+
+- [x] `st-comm-modbus-tcp` crate (self-contained, independent of `st-comm-serial`/`st-comm-modbus`)
+- [x] `TcpTransport`: connect/disconnect, send/receive_exact, auto-reconnect on failure
+- [x] MBAP frame builder/parser (transaction ID, protocol ID, length, unit ID)
+- [x] `TcpModbusClient`: high-level API (read_coils, read_holding_registers, write_single_coil, etc.)
+- [x] `ModbusTcpDeviceNativeFb`: generic device FB with dedicated I/O thread per device
+- [x] Unified transport+protocol: device FB owns its own TCP connection (no separate TcpLink)
+- [x] Batched register reads/writes (consecutive registers in single Modbus transaction)
+- [x] Batched coil writes (consecutive coils via FC0F instead of individual FC05)
+- [x] `DeviceProfile::to_modbus_tcp_device_layout()` in `st-comm-api`
+- [x] Registration in CLI (`comm_setup.rs`), LSP (`document.rs`), DAP (`server.rs`)
+- [x] Device profiles use `protocol: modbus-tcp` (register map is protocol-independent)
+- [x] 25 unit tests: frame building/parsing, MBAP header, transport, layout, slot constants
+- [x] Playground: `playground/modbus_tcp_demo/` with Waveshare 8-relay profile
+- [x] Manual test: real hardware with Waveshare 8-relay output over TCP (verified)
+
+---
+
+## Batched Coil Writes (COMPLETED)
+
+- [x] Modbus RTU: consecutive output coils batched via FC0F (write_multiple_coils)
+- [x] Modbus TCP: consecutive output coils batched via FC0F (write_multiple_coils)
+- [x] Single coils still use FC05 (write_single_coil) for efficiency
+
+---
+
 ## Future Work
-
-### Modbus TCP
-
-- [x] `ModbusTcpDevice` NativeFb (Modbus TCP/IP, MBAP header instead of CRC) — `st-comm-modbus-tcp` crate
-- [x] Device profiles same as RTU (register map is protocol-independent, `protocol: modbus-tcp`)
-- [x] Unified transport+protocol: device FB owns its own TCP connection (no separate TcpLink needed)
 
 ### Plugin System
 
