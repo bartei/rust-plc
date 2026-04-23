@@ -161,20 +161,60 @@ fields:
     register: { address: 0, kind: input_register, scale: 0.1, unit: mA }
 ```
 
+### Array Fields
+
+Fields can declare `count: N` to represent N consecutive registers as an array.
+This avoids repeating near-identical field declarations and enables `FOR` loop
+access in ST code via `fb.field[i]`.
+
+```yaml
+name: Waveshare8Relay
+protocol: modbus-tcp
+fields:
+  - name: DO
+    type: BOOL
+    direction: output
+    count: 8
+    register: { address: 0, kind: coil }
+```
+
+This declares `DO : ARRAY[0..7] OF BOOL` — 8 consecutive coils starting at
+address 0. In ST code:
+
+```st
+FOR i := 0 TO 7 DO
+    io.DO[i] := (i = active_relay);
+END_FOR;
+```
+
+**How it works internally:**
+
+Array elements are stored inline in the FB's `Vec<Value>`. An 8-element BOOL
+array occupies 8 consecutive Value slots, the same as 8 individual scalar fields.
+The `LoadFieldIndex` / `StoreFieldIndex` VM instructions access
+`fb_instances[instance][base_offset + index]` at runtime.
+
+The batched I/O layer expands array fields into individual register entries, so
+consecutive array elements are automatically grouped into single multi-register
+Modbus transactions (e.g., one FC0F write for 8 coils).
+
+### Layout Conversion
+
 `DeviceProfile::to_native_fb_layout()` converts a profile into a `NativeFbLayout`:
 - `link : INT` — link instance handle (VarInput)
 - `slave_id : INT` — Modbus slave address (VarInput)
 - `refresh_rate : TIME` — polling interval (VarInput)
 - Diagnostic fields: `connected`, `error_code`, `io_cycles`, `last_response_ms` (Var)
 - All profile I/O fields (Var — readable and writable from ST)
+- Array fields set `dimensions` on `NativeFbField` and expand inline in the memory layout
 
 ### Field Mapping
 
 | Profile direction | FB var kind | ST access |
 |-------------------|-------------|-----------|
-| input | Var | Read via dot notation (`dev.DI_0`) |
-| output | Var | Read/write via dot notation (`dev.DO_0 := TRUE`) |
-| inout | Var | Read/write via dot notation |
+| input | Var | Read via dot notation (`dev.DI_0`) or array (`dev.AI[i]`) |
+| output | Var | Read/write via dot notation (`dev.DO_0 := TRUE`) or array (`dev.DO[i] := val`) |
+| inout | Var | Read/write via dot notation or array |
 
 All I/O fields use Var (not VarOutput) so the user program can both read and write them.
 
