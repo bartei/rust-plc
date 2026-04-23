@@ -405,13 +405,14 @@ impl Vm {
                         let fb_func = &self.module.functions[fb_idx as usize];
                         let instance_key = (caller_id, i as u16);
                         for (j, fb_slot) in fb_func.locals.slots.iter().enumerate() {
+                            let vj = fb_func.locals.expanded_index(j);
                             let field_key = format!(
                                 "{}.{}.{}", func.name, slot.name, fb_slot.name
                             ).to_uppercase();
                             if let Some(forced_value) = self.forced_variables.get(&field_key) {
                                 field_forces.push((
                                     instance_key,
-                                    j,
+                                    vj,
                                     narrow_value(forced_value.clone(), fb_slot.int_width),
                                 ));
                             }
@@ -700,6 +701,7 @@ impl Vm {
         let fb_func = &self.module.functions[fb_func_idx as usize];
         let fb_state = self.fb_instances.get(instance_key);
         for (j, fb_slot) in fb_func.locals.slots.iter().enumerate() {
+            let vj = fb_func.locals.expanded_index(j);
             match fb_slot.ty {
                 VarType::FbInstance(nested_fb_idx) => {
                     // Recurse into nested FB (e.g., CTU inside FillController)
@@ -716,9 +718,24 @@ impl Vm {
                     );
                 }
                 VarType::ClassInstance(_) => { /* skip */ }
+                VarType::Array(_) => {
+                    // Array field: show each element
+                    for k in 0..fb_slot.size {
+                        let arr_value = fb_state
+                            .and_then(|s| s.get(vj + k))
+                            .cloned()
+                            .unwrap_or(Value::Void);
+                        result.push(VariableInfo {
+                            name: format!("{prefix}.{}[{k}]", fb_slot.name),
+                            value: debug::format_value(&arr_value),
+                            ty: format!("{:?}", fb_slot.ty),
+                            var_ref: 0,
+                        });
+                    }
+                }
                 _ => {
                     let fb_value = fb_state
-                        .and_then(|s| s.get(j))
+                        .and_then(|s| s.get(vj))
                         .cloned()
                         .unwrap_or(Value::Void);
                     result.push(VariableInfo {
@@ -1005,17 +1022,34 @@ impl Vm {
                         if matches!(fb_slot.ty, VarType::FbInstance(_) | VarType::ClassInstance(_)) {
                             continue;
                         }
-                        let fb_value = fb_state
-                            .and_then(|s| s.get(j))
-                            .cloned()
-                            .unwrap_or(Value::Void);
-                        result.push(VariableInfo {
-                            name: format!("{}.{}", slot.name, fb_slot.name),
-                            value: debug::format_value(&fb_value),
-                            ty: debug::format_var_type_with_width(fb_slot.ty, fb_slot.int_width)
-                                .to_string(),
-                            var_ref: 0,
-                        });
+                        let vj = fb_func.locals.expanded_index(j);
+                        if let VarType::Array(_) = fb_slot.ty {
+                            for k in 0..fb_slot.size {
+                                let arr_val = fb_state
+                                    .and_then(|s| s.get(vj + k))
+                                    .cloned()
+                                    .unwrap_or(Value::Void);
+                                result.push(VariableInfo {
+                                    name: format!("{}.{}[{k}]", slot.name, fb_slot.name),
+                                    value: debug::format_value(&arr_val),
+                                    ty: debug::format_var_type_with_width(fb_slot.ty, fb_slot.int_width)
+                                        .to_string(),
+                                    var_ref: 0,
+                                });
+                            }
+                        } else {
+                            let fb_value = fb_state
+                                .and_then(|s| s.get(vj))
+                                .cloned()
+                                .unwrap_or(Value::Void);
+                            result.push(VariableInfo {
+                                name: format!("{}.{}", slot.name, fb_slot.name),
+                                value: debug::format_value(&fb_value),
+                                ty: debug::format_var_type_with_width(fb_slot.ty, fb_slot.int_width)
+                                    .to_string(),
+                                var_ref: 0,
+                            });
+                        }
                     }
                 }
                 VarType::ClassInstance(_) => { /* skip for now */ }
@@ -1551,6 +1585,36 @@ impl Vm {
                     }
                     entry[field_idx as usize] = val;
                 }
+                Instruction::LoadFieldIndex(dst, instance_slot, base_offset, idx_reg) => {
+                    // Read from an array field in an FB instance.
+                    // base_offset is the expanded offset of the array field;
+                    // idx_reg holds the array index (0-based for native FB arrays).
+                    let raw_idx = self.reg_get(idx_reg).as_int();
+                    let flat = base_offset as usize + raw_idx as usize;
+                    let instance_key = (self.caller_identity(), instance_slot);
+                    let val = self.fb_instances
+                        .get(&instance_key)
+                        .and_then(|locals| locals.get(flat))
+                        .cloned()
+                        .unwrap_or(Value::Int(0));
+                    self.reg_set(dst, val);
+                }
+                Instruction::StoreFieldIndex(instance_slot, base_offset, idx_reg, val_reg) => {
+                    // Write to an array field in an FB instance.
+                    let raw_idx = self.reg_get(idx_reg).as_int();
+                    let flat = base_offset as usize + raw_idx as usize;
+                    let instance_key = (self.caller_identity(), instance_slot);
+                    let val = self.reg_get(val_reg).clone();
+                    let entry = self.fb_instances
+                        .entry(instance_key)
+                        .or_insert_with(|| {
+                            vec![Value::default(); flat + 1]
+                        });
+                    while entry.len() <= flat {
+                        entry.push(Value::default());
+                    }
+                    entry[flat] = val;
+                }
 
                 // Pointer operations
                 // Encoding: Ref(scope_tag, slot)
@@ -1796,26 +1860,45 @@ impl Vm {
             .get(func_index as usize)
             .ok_or(VmError::InvalidFunction(func_index))?;
 
-        // Load retained instance locals, or create fresh ones
-        let expected_len = func.locals.slots.len();
+        // Load retained instance locals, or create fresh ones.
+        // For native FBs with array fields, the Vec<Value> is larger than
+        // slots.len() because array elements are stored inline.
+        let is_native = self.module.native_fb_indices.contains(&func_index);
         let mut locals: Vec<Value> = self
             .fb_instances
             .get(&instance_key)
             .cloned()
             .unwrap_or_else(|| {
-                func.locals
-                    .slots
-                    .iter()
-                    .map(|s| Value::default_for_type(s.ty))
-                    .collect()
+                if is_native {
+                    // Native FB: expand array fields inline
+                    let mut vals = Vec::new();
+                    for s in &func.locals.slots {
+                        if let VarType::Array(td_idx) = s.ty {
+                            let elem_ty = self.module.type_defs
+                                .get(td_idx as usize)
+                                .and_then(|td| if let TypeDef::Array { element_type, .. } = td {
+                                    Some(*element_type)
+                                } else { None })
+                                .unwrap_or(VarType::Int);
+                            for _ in 0..s.size {
+                                vals.push(Value::default_for_type(elem_ty));
+                            }
+                        } else {
+                            vals.push(Value::default_for_type(s.ty));
+                        }
+                    }
+                    vals
+                } else {
+                    // Regular FB: one Value per slot
+                    func.locals.slots.iter()
+                        .map(|s| Value::default_for_type(s.ty))
+                        .collect()
+                }
             });
+        let expected_len = locals.len().max(func.locals.slots.len());
         // Ensure locals is at least as long as the function expects
-        // (StoreField may have created a shorter state)
         while locals.len() < expected_len {
-            let ty = func.locals.slots.get(locals.len())
-                .map(|s| s.ty)
-                .unwrap_or(VarType::Int);
-            locals.push(Value::default_for_type(ty));
+            locals.push(Value::default());
         }
 
         // Apply input arguments on top of retained state
@@ -1848,10 +1931,11 @@ impl Vm {
                         let instance_name = &slot_def.name;
                         let fb_func = &self.module.functions[func_index as usize];
                         for (fi, fb_slot) in fb_func.locals.slots.iter().enumerate() {
+                            let vi = fb_func.locals.expanded_index(fi);
                             let qualified = format!("{}.{}.{}", prog_func.name, instance_name, fb_slot.name);
                             if let Some(forced_val) = self.forced_variables.get(&qualified.to_uppercase()) {
-                                if fi < locals.len() {
-                                    locals[fi] = forced_val.clone();
+                                if vi < locals.len() {
+                                    locals[vi] = forced_val.clone();
                                 }
                             }
                         }

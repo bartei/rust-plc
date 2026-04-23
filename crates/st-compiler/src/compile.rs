@@ -46,7 +46,8 @@ pub fn compile_with_native_fbs(
     if let Some(reg) = registry {
         for native_fb in reg.all() {
             let layout = native_fb.layout();
-            let mem_layout = st_comm_api::layout_to_memory_layout(layout);
+            let td_base = ctx.type_defs.len() as u16;
+            let mem_layout = st_comm_api::layout_to_memory_layout(layout, &mut ctx.type_defs, td_base);
             let func_idx = ctx.functions.len() as u16;
             ctx.functions.push(Function {
                 name: layout.type_name.clone(),
@@ -615,7 +616,7 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     /// Resolve a field index for a user-defined type (FB, class, or struct).
-    /// First tries module_functions (for FBs/classes), then type_defs (for structs).
+    /// Returns the slot index (position in the FB's `Vec<Value>`).
     fn resolve_field_index(&self, type_name: &str, field_name: &str) -> Option<u16> {
         // Try FB/class: look up function with matching name, then find field in locals
         if let Some(idx) = self.module_functions.iter()
@@ -637,6 +638,15 @@ impl<'a> FunctionCompiler<'a> {
             }
         }
         None
+    }
+
+    /// Resolve a field's expanded offset for native FB array field access.
+    /// For native FBs, the offset accounts for inline array expansion.
+    fn resolve_field_expanded_offset(&self, type_name: &str, field_name: &str) -> Option<u16> {
+        self.module_functions.iter()
+            .find(|f| f.name.eq_ignore_ascii_case(type_name))
+            .and_then(|f| f.locals.find_slot(field_name))
+            .map(|(_, slot)| slot.offset as u16)
     }
 
     /// Walk the class hierarchy to find a method. Returns the function index.
@@ -848,7 +858,7 @@ impl<'a> FunctionCompiler<'a> {
             }
         }
 
-        // Check for field store: fb_instance.field := value
+        // Check for field store: fb_instance.field := value or fb_instance.field[i] := value
         if target.parts.len() >= 2 {
             if let (Some(AccessPart::Identifier(obj)), Some(AccessPart::Identifier(field))) =
                 (target.parts.first(), target.parts.get(1))
@@ -863,6 +873,19 @@ impl<'a> FunctionCompiler<'a> {
                                 );
                                 0
                             });
+                        // Check for array indexing: fb.field[expr] := value
+                        if let Some(AccessPart::Index(indices)) = target.parts.get(2) {
+                            if !indices.is_empty() {
+                                let base_offset = self.resolve_field_expanded_offset(&type_name, &field.name)
+                                    .unwrap_or(field_idx);
+                                let idx_reg = self.compile_expression(&indices[0]);
+                                self.emit_sourced(
+                                    Instruction::StoreFieldIndex(slot, base_offset, idx_reg, val_reg),
+                                    range,
+                                );
+                                return;
+                            }
+                        }
                         self.emit_sourced(
                             Instruction::StoreField(slot, field_idx, val_reg),
                             range,
@@ -1102,7 +1125,7 @@ impl<'a> FunctionCompiler<'a> {
                             }
                         }
                     }
-                    // Multi-part access: fb_instance.field
+                    // Multi-part access: fb_instance.field or fb_instance.field[index]
                     if let (Some(AccessPart::Identifier(obj)), Some(AccessPart::Identifier(field))) =
                         (va.parts.first(), va.parts.get(1))
                     {
@@ -1117,6 +1140,18 @@ impl<'a> FunctionCompiler<'a> {
                                         );
                                         0
                                     });
+                                // Check for array indexing: fb.field[expr]
+                                if let Some(AccessPart::Index(indices)) = va.parts.get(2) {
+                                    if !indices.is_empty() {
+                                        // Use expanded offset for array field access
+                                        let base_offset = self.resolve_field_expanded_offset(&type_name, &field.name)
+                                            .unwrap_or(field_idx);
+                                        let idx_reg = self.compile_expression(&indices[0]);
+                                        let dst = self.alloc_reg();
+                                        self.emit(Instruction::LoadFieldIndex(dst, slot, base_offset, idx_reg));
+                                        return dst;
+                                    }
+                                }
                                 let dst = self.alloc_reg();
                                 self.emit(Instruction::LoadField(dst, slot, field_idx));
                                 return dst;

@@ -2,8 +2,8 @@
  * Modbus TCP demo
  *
  * Connects to a Modbus TCP device over Ethernet and performs I/O.
- * Unlike RTU, no separate SerialLink is needed — the device FB
- * manages its own TCP connection directly.
+ * Uses array fields: DO is ARRAY[0..7] OF BOOL defined with count: 8
+ * in the device profile.
  *
  * Run:
  *   cargo run -p st-cli -- run playground/modbus_tcp_demo -n 10
@@ -11,16 +11,14 @@
 
 VAR_GLOBAL
     g_connected : BOOL := FALSE;
-    g_ai1       : UINT := 0;
-    g_ai2       : UINT := 0;
     g_cycles    : INT := 0;
-    i : INT;
 END_VAR
 
 PROGRAM Main
 VAR
     io : Waveshare8RelayOutput;
-    // flags : ARRAY[0..7] OF BOOL;
+    i  : INT;
+    active : INT;
 END_VAR
     g_cycles := g_cycles + 1;
 
@@ -31,82 +29,12 @@ END_VAR
         unit_id := 1,
         refresh_rate := T#50ms
     );
-    CASE (g_cycles MOD 8) OF
-        0: 
-            io.DO0 := TRUE;
-            io.DO1 := FALSE;
-            io.DO2 := FALSE;
-            io.DO3 := FALSE;
-            io.DO4 := FALSE;
-            io.DO5 := FALSE;
-            io.DO6 := FALSE;
-            io.DO7 := FALSE;
-        1: 
-            io.DO0 := FALSE;
-            io.DO1 := TRUE;
-            io.DO2 := FALSE;
-            io.DO3 := FALSE;
-            io.DO4 := FALSE;
-            io.DO5 := FALSE;
-            io.DO6 := FALSE;
-            io.DO7 := FALSE;
-        2: 
-            io.DO0 := FALSE;
-            io.DO1 := FALSE;
-            io.DO2 := TRUE;
-            io.DO3 := FALSE;
-            io.DO4 := FALSE;
-            io.DO5 := FALSE;
-            io.DO6 := FALSE;
-            io.DO7 := FALSE;
-        3: 
-            io.DO0 := FALSE;
-            io.DO1 := FALSE;
-            io.DO2 := FALSE;
-            io.DO3 := TRUE;
-            io.DO4 := FALSE;
-            io.DO5 := FALSE;
-            io.DO6 := FALSE;
-            io.DO7 := FALSE;
-        4: 
-            io.DO0 := FALSE;
-            io.DO1 := FALSE;
-            io.DO2 := FALSE;
-            io.DO3 := FALSE;
-            io.DO4 := TRUE;
-            io.DO5 := FALSE;
-            io.DO6 := FALSE;
-            io.DO7 := FALSE;
-        5: 
-            io.DO0 := FALSE;
-            io.DO1 := FALSE;
-            io.DO2 := FALSE;
-            io.DO3 := FALSE;
-            io.DO4 := FALSE;
-            io.DO5 := TRUE;
-            io.DO6 := FALSE;
-            io.DO7 := FALSE;
-        6: 
-            io.DO0 := FALSE;
-            io.DO1 := FALSE;
-            io.DO2 := FALSE;
-            io.DO3 := FALSE;
-            io.DO4 := FALSE;
-            io.DO5 := FALSE;
-            io.DO6 := TRUE;
-            io.DO7 := FALSE;
-        7: 
-            io.DO0 := TRUE;
-            io.DO1 := TRUE;
-            io.DO2 := TRUE;
-            io.DO3 := TRUE;
-            io.DO4 := TRUE;
-            io.DO5 := TRUE;
-            io.DO6 := TRUE;
-            io.DO7 := TRUE;
-            
-    END_CASE;
 
-    (* Copy device state to globals for monitoring *)
+    (* Walking relay pattern using array access *)
+    active := g_cycles MOD 8;
+    FOR i := 0 TO 7 DO
+        io.DO[i] := (i = active);
+    END_FOR;
+
     g_connected := io.connected;
 END_PROGRAM

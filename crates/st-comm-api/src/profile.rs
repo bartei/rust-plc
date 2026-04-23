@@ -44,9 +44,18 @@ pub struct ProfileField {
     /// Register mapping on the physical device.
     pub register: RegisterMapping,
 
+    /// Number of consecutive registers (default 1). When > 1, the field
+    /// becomes an array: `ARRAY[0..count-1] OF data_type`.
+    #[serde(default = "default_field_count")]
+    pub count: u16,
+
     /// Human-readable description.
     #[serde(default)]
     pub description: Option<String>,
+}
+
+fn default_field_count() -> u16 {
+    1
 }
 
 /// Supported data types for profile fields.

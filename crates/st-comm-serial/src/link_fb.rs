@@ -59,37 +59,44 @@ impl SerialLinkNativeFb {
                     name: "port".to_string(),
                     data_type: FieldDataType::String,
                     var_kind: NativeFbVarKind::VarInput,
+                    dimensions: None,
                 },
                 NativeFbField {
                     name: "baud".to_string(),
                     data_type: FieldDataType::Int,
                     var_kind: NativeFbVarKind::VarInput,
+                    dimensions: None,
                 },
                 NativeFbField {
                     name: "parity".to_string(),
                     data_type: FieldDataType::String,
                     var_kind: NativeFbVarKind::VarInput,
+                    dimensions: None,
                 },
                 NativeFbField {
                     name: "data_bits".to_string(),
                     data_type: FieldDataType::Int,
                     var_kind: NativeFbVarKind::VarInput,
+                    dimensions: None,
                 },
                 NativeFbField {
                     name: "stop_bits".to_string(),
                     data_type: FieldDataType::Int,
                     var_kind: NativeFbVarKind::VarInput,
+                    dimensions: None,
                 },
                 // VAR: diagnostics
                 NativeFbField {
                     name: "connected".to_string(),
                     data_type: FieldDataType::Bool,
                     var_kind: NativeFbVarKind::Var,
+                    dimensions: None,
                 },
                 NativeFbField {
                     name: "error_code".to_string(),
                     data_type: FieldDataType::Int,
                     var_kind: NativeFbVarKind::Var,
+                    dimensions: None,
                 },
             ],
         };
