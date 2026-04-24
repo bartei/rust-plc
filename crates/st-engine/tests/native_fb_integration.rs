@@ -208,8 +208,7 @@ END_PROGRAM
     assert!(
         matches!(cycles, Some(Value::Int(n)) if *n == 5) ||
         matches!(cycles, Some(Value::UInt(n)) if *n == 5),
-        "Expected io_cycles=5, got {:?}",
-        cycles
+        "Expected io_cycles=5, got {cycles:?}"
     );
     assert_eq!(vm.get_global("g_error"), Some(&Value::Int(0)));
 }

@@ -121,3 +121,192 @@ impl Watchdog {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime_manager::{CycleStatsSnapshot, RuntimeState};
+
+    fn make_state(status: RuntimeStatus) -> Arc<RwLock<RuntimeState>> {
+        Arc::new(RwLock::new(RuntimeState {
+            status,
+            ..RuntimeState::default()
+        }))
+    }
+
+    fn make_watchdog(
+        state: Arc<RwLock<RuntimeState>>,
+        config: RuntimeConfig,
+    ) -> (Watchdog, tokio::sync::mpsc::Receiver<RuntimeCommand>) {
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(16);
+        (Watchdog::new(state, config, cmd_tx), cmd_rx)
+    }
+
+    fn bump_cycles(state: &Arc<RwLock<RuntimeState>>, count: u64) {
+        let mut s = state.write().unwrap();
+        s.cycle_stats = Some(CycleStatsSnapshot {
+            cycle_count: count,
+            ..CycleStatsSnapshot::default()
+        });
+    }
+
+    /// Pump the watchdog loop N times: advance the virtual clock by `step`
+    /// each tick and yield so the task can observe the new state.
+    async fn pump(ticks: u32, step: Duration) {
+        for _ in 0..ticks {
+            tokio::time::advance(step).await;
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_status_is_noop() {
+        let state = make_state(RuntimeStatus::Idle);
+        let config = RuntimeConfig {
+            watchdog_ms: Some(50),
+            ..RuntimeConfig::default()
+        };
+        let (wd, _rx) = make_watchdog(Arc::clone(&state), config);
+        let handle = tokio::spawn(wd.run());
+        pump(4, Duration::from_millis(60)).await;
+        // Nothing should have changed.
+        let s = state.read().unwrap();
+        assert_eq!(s.restart_count, 0);
+        assert_eq!(s.status, RuntimeStatus::Idle);
+        drop(s);
+        handle.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn debug_paused_does_not_count_as_stall() {
+        let state = make_state(RuntimeStatus::DebugPaused);
+        // Deliberately do NOT bump cycle_count — a stalled engine in DebugPaused
+        // must not trigger restart logic.
+        let config = RuntimeConfig {
+            watchdog_ms: Some(50),
+            ..RuntimeConfig::default()
+        };
+        let (wd, _rx) = make_watchdog(Arc::clone(&state), config);
+        let handle = tokio::spawn(wd.run());
+        pump(10, Duration::from_millis(60)).await;
+        assert_eq!(state.read().unwrap().restart_count, 0);
+        handle.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn error_without_restart_on_crash_does_nothing() {
+        let state = make_state(RuntimeStatus::Error);
+        let config = RuntimeConfig {
+            watchdog_ms: Some(50),
+            restart_on_crash: false,
+            ..RuntimeConfig::default()
+        };
+        let (wd, _rx) = make_watchdog(Arc::clone(&state), config);
+        let handle = tokio::spawn(wd.run());
+        pump(30, Duration::from_millis(60)).await;
+        assert_eq!(state.read().unwrap().restart_count, 0);
+        handle.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn error_status_increments_restart_count() {
+        let state = make_state(RuntimeStatus::Error);
+        let config = RuntimeConfig {
+            watchdog_ms: Some(50),
+            restart_on_crash: true,
+            restart_delay_ms: 100,
+            max_restarts: 5,
+            ..RuntimeConfig::default()
+        };
+        let (wd, _rx) = make_watchdog(Arc::clone(&state), config);
+        let handle = tokio::spawn(wd.run());
+        // One watchdog cycle (50 ms poll + 100 ms restart sleep) = ~150 ms.
+        pump(10, Duration::from_millis(60)).await;
+        let count = state.read().unwrap().restart_count;
+        assert!(count >= 1, "restart_count should have incremented, got {count}");
+        handle.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn error_status_stops_at_max_restarts() {
+        let state = make_state(RuntimeStatus::Error);
+        state.write().unwrap().restart_count = 3;
+        let config = RuntimeConfig {
+            watchdog_ms: Some(50),
+            restart_on_crash: true,
+            restart_delay_ms: 100,
+            max_restarts: 3,
+            ..RuntimeConfig::default()
+        };
+        let (wd, _rx) = make_watchdog(Arc::clone(&state), config);
+        let handle = tokio::spawn(wd.run());
+        pump(30, Duration::from_millis(60)).await;
+        assert_eq!(
+            state.read().unwrap().restart_count,
+            3,
+            "restart_count must not exceed max_restarts"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn healthy_running_clears_stale_restart_count() {
+        let state = make_state(RuntimeStatus::Running);
+        state.write().unwrap().restart_count = 2;
+        let config = RuntimeConfig {
+            watchdog_ms: Some(1000),
+            ..RuntimeConfig::default()
+        };
+        let (wd, _rx) = make_watchdog(Arc::clone(&state), config);
+        let handle = tokio::spawn(wd.run());
+        // Keep cycle_count climbing for >60 simulated seconds so the watchdog
+        // sees sustained progress and resets restart_count.
+        for i in 1..=70u64 {
+            bump_cycles(&state, i);
+            pump(1, Duration::from_secs(1)).await;
+        }
+        assert_eq!(
+            state.read().unwrap().restart_count,
+            0,
+            "restart_count should reset after 60 s of sustained healthy cycles"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn default_poll_interval_when_watchdog_ms_unset() {
+        // No watchdog_ms → falls back to 1 s poll. Just smoke-test that the
+        // loop starts and an Idle task survives a few virtual seconds.
+        let state = make_state(RuntimeStatus::Idle);
+        let config = RuntimeConfig {
+            watchdog_ms: None,
+            ..RuntimeConfig::default()
+        };
+        let (wd, _rx) = make_watchdog(Arc::clone(&state), config);
+        let handle = tokio::spawn(wd.run());
+        pump(5, Duration::from_secs(1)).await;
+        assert_eq!(state.read().unwrap().status, RuntimeStatus::Idle);
+        handle.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn poll_interval_caps_at_1s() {
+        // watchdog_ms > 1000 is clamped to 1 s — verify behavior via timing.
+        let state = make_state(RuntimeStatus::Running);
+        state.write().unwrap().restart_count = 1;
+        let config = RuntimeConfig {
+            watchdog_ms: Some(10_000), // caller asks for 10s, should cap at 1s
+            ..RuntimeConfig::default()
+        };
+        let (wd, _rx) = make_watchdog(Arc::clone(&state), config);
+        let handle = tokio::spawn(wd.run());
+        // Bump cycles for 70 s. If the poll were 10 s, we'd have ~7 ticks;
+        // with the 1 s cap, we have ~70 ticks and healthy_since elapses.
+        for i in 1..=70u64 {
+            bump_cycles(&state, i);
+            pump(1, Duration::from_secs(1)).await;
+        }
+        assert_eq!(state.read().unwrap().restart_count, 0);
+        handle.abort();
+    }
+}

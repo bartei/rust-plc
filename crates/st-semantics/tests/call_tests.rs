@@ -425,8 +425,7 @@ END_PROGRAM
         .collect();
     assert!(
         error_codes.contains(&DiagnosticCode::NoSuchField),
-        "Expected NoSuchField error, got: {:?}",
-        error_codes
+        "Expected NoSuchField error, got: {error_codes:?}"
     );
 }
 

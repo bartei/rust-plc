@@ -12,31 +12,44 @@ use std::time::Duration;
 struct TestClient {
     child: Child,
     request_id: i64,
+    shutdown_sent: bool,
 }
 
 impl TestClient {
-    fn start() -> Self {
-        let bin = std::env::var("ST_CLI_BIN")
-            .unwrap_or_else(|_| {
-                let manifest_dir = env!("CARGO_MANIFEST_DIR");
-                let workspace_root = std::path::Path::new(manifest_dir)
-                    .parent()
-                    .unwrap()
-                    .parent()
-                    .unwrap();
-                // Try multiple target directories (normal build, llvm-cov, etc.)
-                let candidates = [
-                    workspace_root.join("target/debug/st-cli"),
-                    workspace_root.join("target/llvm-cov-target/debug/st-cli"),
-                ];
-                candidates
-                    .iter()
-                    .find(|p| p.exists())
-                    .unwrap_or(&candidates[0])
-                    .to_string_lossy()
-                    .to_string()
-            });
+    /// Resolve `st-cli` from the same target dir as the current test binary.
+    /// Under `cargo llvm-cov` the test binary lives in `target/llvm-cov-target/debug/deps/`,
+    /// so the sibling `st-cli` binary is the coverage-instrumented build — picking it
+    /// here is what makes LSP server coverage show up in the LCOV report.
+    fn find_st_cli() -> String {
+        let test_exe = std::env::current_exe().expect("current_exe failed");
+        let target_dir = test_exe.parent().and_then(|p| p.parent());
+        if let Some(dir) = target_dir {
+            let candidate = dir.join("st-cli");
+            if candidate.exists() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let workspace_root = std::path::Path::new(manifest_dir)
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        for sub in ["target/llvm-cov-target/debug/st-cli", "target/debug/st-cli"] {
+            let p = workspace_root.join(sub);
+            if p.exists() {
+                return p.to_string_lossy().into_owned();
+            }
+        }
+        "st-cli".to_string()
+    }
 
+    fn start() -> Self {
+        let bin = std::env::var("ST_CLI_BIN").unwrap_or_else(|_| Self::find_st_cli());
+
+        // Under `cargo llvm-cov`, the parent test binary inherits LLVM_PROFILE_FILE
+        // with a `%p` placeholder, so each child writes its own .profraw — this
+        // propagates automatically. We do NOT clear the env.
         let child = Command::new(&bin)
             .arg("serve")
             .stdin(Stdio::piped())
@@ -48,6 +61,7 @@ impl TestClient {
         Self {
             child,
             request_id: 0,
+            shutdown_sent: false,
         }
     }
 
@@ -137,19 +151,48 @@ impl TestClient {
     }
 
     fn shutdown(mut self) {
-        let _ = self.request("shutdown", json!(null));
-        self.notify("exit", json!(null));
-        // Give it a moment to exit cleanly
-        std::thread::sleep(Duration::from_millis(100));
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.clean_stop();
+    }
+
+    /// Send LSP `shutdown` + `exit` then wait for the child to terminate on
+    /// its own. Required for llvm-cov to flush the subprocess `.profraw` via
+    /// `__llvm_profile_write_file()` — a SIGKILLed child writes nothing.
+    fn clean_stop(&mut self) {
+        if !self.shutdown_sent {
+            self.shutdown_sent = true;
+            // catch_unwind so a dead stdin pipe doesn't poison the Drop path.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = self.request("shutdown", json!(null));
+                self.notify("exit", json!(null));
+            }));
+            // Close stdin so the server sees EOF — tower-lsp's stdio reader
+            // won't return from serve() until stdin closes, even after receiving
+            // `exit`. Taking stdin here drops the pipe handle.
+            let _ = self.child.stdin.take();
+        }
+        Self::wait_for_clean_exit(&mut self.child, Duration::from_secs(3));
+    }
+
+    fn wait_for_clean_exit(child: &mut Child, timeout: Duration) {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+                Err(_) => break,
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
 impl Drop for TestClient {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // Most tests let the client drop without calling `shutdown()`. Send
+        // the LSP shutdown/exit handshake here too so the subprocess has a
+        // chance to flush its coverage profile before we kill it.
+        self.clean_stop();
     }
 }
 
