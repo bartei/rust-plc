@@ -148,14 +148,19 @@
 - [x] `Vm::monitorable_catalog()` and `Vm::monitorable_variables()`
 - [x] `plc/varCatalog` telemetry event on launch
 
-### Monitor panel UX (COMPLETED)
+### Monitor panel UX (COMPLETED — partially superseded)
 
 - [x] `postMessage`-based incremental DOM updates
 - [x] Watch list table with autocomplete, Force, Remove, Clear all
+      _(superseded: the flat autocomplete list is replaced by the
+      file-backed multi-tab TanStack grid — see "Watch Tables" below)_
 - [x] Per-workspace persistence via `workspaceState`
+      _(superseded: state moves to `*.st-watch` YAML files; only the
+      active tab name remains in `workspaceState`)_
 - [x] Force/Unforce wired to DAP evaluate REPL (local) and WebSocket (remote)
 - [x] Live cycle stats display
 - [x] Tests: `test_watch_list_flow`, `test_var_catalog_emitted_on_launch`
+      _(to be deleted alongside the old watch-list storage)_
 
 
 ### Hierarchical FB instance display
@@ -169,33 +174,225 @@
 - [x] Evaluate handler: `variablesReference > 0` for FB instances in Watch panel
 - [x] Monitor panel: Preact-based webview with virtual DOM diffing
 - [x] Monitor panel: recursive tree view via WatchNodeRow components
+      _(superseded by TanStack Table + TanStack Virtual; see "Watch Tables")_
 - [x] Monitor panel: tree data model (WatchNode tree from server)
 - [x] Monitor panel: telemetry sends nested `children` for expanded FBs
 - [x] Monitor panel: persist expand/collapse state in workspace state
+      _(superseded: expanded paths move into `*.st-watch` YAML)_
 - [x] Monitor panel: Force dialog popup with validation + Trigger (1-cycle force)
 - [x] Monitor panel: Dockerized Playwright E2E tests (19 passing)
+      _(to be re-scoped or retired once the Electron E2E suite in
+      "Watch Tables → Phase E" is in place; both needn't coexist long-term)_
 - [ ] Monitor panel: "Collapse all" / "Expand all" for large FB instances
+      _(folded into TanStack migration — keyboard + button in the new grid)_
 - [ ] `plc/varCatalog`: add `childNames` for FB-typed entries
 - [ ] Tests: DAP tree expansion (single + nested FB)
-- [ ] Tests: Monitor panel tree renders with correct expand/collapse
-- [ ] Tests: tree state persists across panel close/reload
+      _(covered by the Electron E2E matrix below, not a separate item)_
 - [ ] Tests: performance — FB with 50+ fields doesn't bloat telemetry
+      _(kept; not watch-tables-specific)_
 
-### Watch Tables
+### Watch Tables (file-backed, TanStack Table) — see `plan/dap.md` for design
 
-- [ ] Multiple named watch tables with tab strip
-- [ ] Per-table persistence (key: `plcMonitor.watchTables:<workspace>`)
-- [ ] Comment column (editable inline, persisted on blur)
-- [ ] Display format selector per row (dec/hex/bin/bool/ascii/float)
-- [ ] Modify column: one-click force to pre-configured value
-- [ ] Tab management: new / rename / duplicate / delete / drag-reorder
-- [ ] Import/export to `.plc-watch.json`
+Replaces the flat `plcMonitor.watchList:<workspace>` `workspaceState` store
+and the hand-rolled `WatchTable.tsx` recursive renderer. No backwards
+compatibility — the workspaceState key is dropped, and any existing watch
+list is discarded on upgrade.
+
+#### Phase A — YAML parsing (prerequisite)
+
+- [ ] Add `js-yaml` (+ `@types/js-yaml`) to `editors/vscode/package.json`
+      devDependencies; pin to current LTS.
+- [ ] Replace the regex YAML reader in `extension.ts:577-627`
+      (`getTargetsFromConfig`) with `js-yaml.load` + a typed interface.
+- [ ] Delete the regex-based `plc-project.yaml` parser entirely — no
+      fallback path.
+- [ ] Verify `serde_yaml` (already a workspace dep) is used everywhere Rust
+      reads YAML; no hand-rolled parsers left in the codebase.
+
+#### Phase B — `.st-watch` schema + I/O (extension host)
+
+- [ ] New file `editors/vscode/src/watchTables.ts` with TypeScript interfaces
+      mirroring the YAML schema in `plan/dap.md`:
+      `WatchTable { name, expanded[], rows[] }`,
+      `WatchRow { path, comment?, format?, force_value? }`.
+- [ ] `discoverWatchTableFiles(root: Uri): Promise<Uri[]>` — globs
+      `<root>/*.st-watch` via `vscode.workspace.findFiles`.
+- [ ] `loadWatchTable(uri): Promise<WatchTable>` — `workspace.fs.readFile`
+      + `js-yaml.load`; strict schema, reject unknown keys.
+- [ ] `saveWatchTable(uri, table)` — `js-yaml.dump` (stable key order:
+      `name`, `expanded`, `rows`; rows serialized in display order);
+      `workspace.fs.writeFile`.
+- [ ] Debounced save (200 ms per-file) with coalescing — multiple edits
+      within the window collapse to one write.
+- [ ] `vscode.workspace.createFileSystemWatcher('**/*.st-watch')` —
+      reload table on external edit; drop tab if file deleted; create
+      tab if file added.
+- [ ] `createWatchTable(root, name)` — slugify name → `<slug>.st-watch`,
+      handle filename collisions (append `-2`, `-3`…).
+- [ ] `renameWatchTable(uri, newName)` — rename file + update `name:` in
+      YAML atomically.
+- [ ] `deleteWatchTable(uri)` — confirm dialog, then `workspace.fs.delete`.
+- [ ] Drop all `plcMonitor.watchList:…` and `plcMonitor.expandedNodes:…`
+      calls from `monitorPanel.ts:661-697`. Delete `loadWatchList`,
+      `saveWatchList`, `loadExpandedNodes`, `saveExpandedNodes`.
+- [ ] `workspaceState` retains only `plcMonitor.activeWatchTable` (string
+      filename of the active tab).
+
+#### Phase C — TanStack Table adoption (webview)
+
+- [ ] Add `@tanstack/react-table`, `@tanstack/react-virtual`, `@dnd-kit/core`,
+      `@dnd-kit/sortable`, `@preact/signals` to the webview deps.
+- [ ] Configure bundler alias: `react` / `react-dom` → `preact/compat` in
+      `esbuild.webview.mjs`.
+- [ ] Pin `preact >= 10.19` (for stable `useSyncExternalStore`).
+- [ ] Delete `editors/vscode/src/webview/WatchTable.tsx` and its recursive
+      row component.
+- [ ] New `WatchTableGrid.tsx` built on TanStack Table:
+      - `getSubRows` returns FB / struct / array children from server-sent
+        `WatchNode` tree
+      - Row virtualization via `useVirtualizer` from `@tanstack/react-virtual`
+      - Columns: expand toggle, name (tree indent), value, type, comment,
+        format dropdown, force-value input, force/unforce button, remove
+      - Each **live value cell** subscribes to a `signal<VariableValue>` from
+        a per-variable `Map<string, Signal>` — table shell never re-renders
+        on tick, only the affected leaf `<td>`
+- [ ] Tab strip component (`WatchTableTabs.tsx`): new / rename (inline) /
+      duplicate / delete / drag-reorder via `@dnd-kit/sortable`.
+- [ ] Row drag-reorder (within a table) via `@dnd-kit/sortable`; persists
+      to `.st-watch` row order.
+- [ ] Inline-editable comment cell (blur commits).
+- [ ] Format dropdown cell (dec/hex/bin/bool/ascii/float) renders value
+      according to chosen format; persisted per row.
+- [ ] Force-value input cell: accepts typed literal, validates against var
+      type; "Force" button invokes existing DAP/HTTP force path using the
+      stored `force_value`.
+- [ ] `.st-watch` write triggers: add row, remove row, reorder, expand,
+      collapse, comment edit, format change, force-value edit.
+
+#### Phase D — DAP / HTTP wire changes
+
+- [ ] Extend the agent's watch-subscribe message to accept an array of
+      `{path, format}` pairs instead of bare paths. Server stores display
+      preferences per subscription so value strings come back pre-formatted.
+- [ ] Extension sends the union of all open tables' row paths on the wire
+      (a variable watched in multiple tables is sent once); each tab filters
+      the incoming snapshot locally.
+- [ ] Telemetry echoes the chosen `format` in each `VariableValue` so tab
+      switches don't need to re-request.
+
+#### Phase E — E2E tests (`@vscode/test-electron` — real VS Code, no mocks)
+
+All tests run under `editors/vscode/src/test/suite/watchTables.test.ts` and
+drive a real VS Code instance with a fixture workspace that contains
+`plc-project.yaml` + at least one `.st` program.
+
+**File discovery & parsing**
+- [ ] Opens panel on a project with no `.st-watch` files → empty default tab
+      auto-created, file written to disk.
+- [ ] Project with two `.st-watch` files → two tabs in the declared order.
+- [ ] Malformed YAML (`yaml: : :`) → error diagnostic surfaced, other tabs
+      still load.
+- [ ] Unknown keys in YAML → strict load rejects with diagnostic.
+- [ ] File deleted while panel open → tab disappears within 1 s.
+- [ ] File created in the project root while panel open → new tab appears.
+- [ ] External edit (simulated via `workspace.fs.writeFile` from the test) →
+      panel reflects the change within 1 s.
+- [ ] `plc-project.yaml` with `js-yaml` (no regex) — resolves targets
+      identically to the pre-refactor behavior (golden comparison).
+
+**Persistence**
+- [ ] Add row → file written within 500 ms contains the new row.
+- [ ] Remove row → file written without that row.
+- [ ] Reorder rows via drag → file written with new order; close/reopen
+      panel preserves order.
+- [ ] Expand FB → file's `expanded` list contains the path.
+- [ ] Collapse → path removed from `expanded`.
+- [ ] Edit comment → file's `comment` field updated.
+- [ ] Change format → file's `format` field updated.
+- [ ] Edit force-value → file's `force_value` field updated.
+- [ ] Close & reopen VS Code → all per-row state intact (comments, formats,
+      force values, expand/collapse, row order, active tab).
+- [ ] Close panel, reopen → active tab restored from `workspaceState`;
+      other tab state from files.
+- [ ] Rapid edits (10 changes in 100 ms) → exactly one coalesced write.
+
+**Tab management**
+- [ ] `+` button creates a new `.st-watch` file with unique slug.
+- [ ] Slug collision: second "My Table" becomes `my-table-2.st-watch`.
+- [ ] Rename tab → file renamed on disk; other tabs unaffected.
+- [ ] Delete tab → file deleted; confirm dialog shown first.
+- [ ] Drag-reorder tabs → new order persists across reload
+      (stored in `workspaceState`, not in files — tab order is UI).
+- [ ] Duplicate tab → new file with `-copy` suffix; all rows copied.
+
+**Tree rendering (TanStack Table)**
+- [ ] FB root renders with expand chevron; value cell is summary.
+- [ ] Expanding FB reveals children; virtualization keeps DOM node count
+      < 100 for 1000-row tables.
+- [ ] Nested FB (3 levels) — each level expands independently.
+- [ ] Array variable renders indexed children `[0]..[N-1]`.
+- [ ] Struct renders field children.
+- [ ] Keyboard: Arrow down/up moves selection; Right expands, Left collapses.
+- [ ] Expand-all / collapse-all buttons.
+
+**Live updates via signals**
+- [ ] Value updates at 20 Hz don't cause full table re-render
+      (instrument with `preact/devtools` counter or a simple ref-count
+      assertion on a sentinel cell).
+- [ ] Adding a row mid-session starts receiving values within one tick.
+- [ ] Removing the last subscriber to a path stops updates (agent unsubscribes).
+
+**Force / unforce**
+- [ ] Per-row force button forces to the stored `force_value`.
+- [ ] Force button disabled if `force_value` is null.
+- [ ] Unforce button appears on forced rows and clears the force.
+- [ ] Forced state renders with a distinct style.
+- [ ] Force persists across panel close/reopen (state from agent, not file).
+
+**Format column**
+- [ ] INT value displays as `255`, `16#FF`, `2#1111_1111`, `"\xff"`,
+      depending on format selection.
+- [ ] REAL with float format shows decimal; with hex shows bit pattern.
+- [ ] BOOL with bool format shows `TRUE`/`FALSE`; with dec shows `0`/`1`.
+- [ ] Invalid format for type (e.g., ascii on REAL) falls back to dec with
+      a warning tooltip.
+
+**Smoke / regression**
+- [ ] `npm run compile` + `build:webview` produce no warnings after TanStack
+      migration.
+- [ ] Bundle size for `out/webview/monitor.js` stays under 250 KB gzipped
+      (assertion in CI).
+- [ ] No usage of `plcMonitor.watchList:…` remains in the codebase
+      (grep assertion in the E2E test setup).
+- [ ] No regex YAML parsing remains (grep assertion).
+- [ ] Monitor-tree unit tests in `editors/vscode/test/monitor-tree.test.js`
+      either pass unchanged or are updated for the new tree model and still
+      pass.
+
+**Multi-file / cross-file**
+- [ ] Watch paths from files in subdirectories resolve correctly.
+- [ ] `plc-project.yaml` with multiple source dirs — all watched paths work.
+
+**CI wiring**
+- [ ] `vscode-electron` CI job (already added) picks up the new suite;
+      timeout bumped if needed.
+- [ ] Fixture workspace committed under
+      `editors/vscode/src/test/fixtures/watch-tables/` with `plc-project.yaml`,
+      a sample program, and golden `.st-watch` files.
+
+#### Phase F — Docs
+
+- [ ] `docs/src/monitor/watch-tables.md` — user-facing guide:
+      creating tables, committing to git, YAML schema, per-row features.
+- [ ] Update top-level README's monitor section.
+- [ ] Remove any reference to the old `workspaceState` watch list in docs.
+
+#### Deferred / out of scope for this effort (follow-up tickets)
+
 - [ ] TIA Portal `.tww` import
-- [ ] DAP v2 wire protocol (`watchVariablesV2` with display preferences)
 - [ ] Trigger expressions (boolean ST expression, sample only when true)
 - [ ] Snapshot / Compare (capture + side-by-side diff)
 - [ ] Charting view (sparkline / line chart for numeric variables)
-- [ ] Documentation: `docs/src/cli/watch-tables.md`
 
 ---
 

@@ -200,6 +200,126 @@ Should also declare (already supported): none additional currently — but as fe
 
 ---
 
+## Watch Tables — file-backed design
+
+Watch tables replace the current `workspaceState`-backed flat-list watch list with
+**project-folder YAML files** that sit next to `plc-project.yaml`. The extension
+loads all `*.st-watch` files on panel open, shows one tab per table, and
+auto-saves every user edit back to disk. This is not a migration — we replace the
+storage wholesale.
+
+### Why file-backed
+
+- **Git-trackable / portable** — checking in `*.st-watch` means a teammate or CI
+  job opens the project with the same watch set the author had. `workspaceState`
+  is per-machine and opaque to version control.
+- **Feature headroom** — per-row comments, display formats, pre-configured force
+  values, trigger expressions all require structured storage. A typed YAML
+  schema scales; a key/value store does not.
+- **One source of truth** — the only ephemeral UI state left in `workspaceState`
+  is "which tab is active"; that's session-local, not project state.
+
+### File layout
+
+```
+project-root/
+├── plc-project.yaml
+├── default.st-watch            # auto-loaded; "Default" tab
+├── commissioning.st-watch      # "Commissioning" tab
+└── troubleshoot-filler.st-watch
+```
+
+- Files are discovered by scanning the project root (resolved the same way
+  `plc-project.yaml` is today — workspace folder, editor ancestry walk).
+- Tab display name comes from the `name:` key in the YAML, not the filename
+  (so users can rename tabs without renaming files); filename is the persistent
+  key (rename-tab = rename-file).
+
+### Schema
+
+```yaml
+# default.st-watch
+name: Default                   # tab label (string)
+expanded:                       # paths currently expanded in the tree
+  - Main.filler
+  - Main.filler.counter
+rows:
+  - path: Main.counter
+    comment: "Cycle count since last reset"
+    format: dec                 # dec | hex | bin | bool | ascii | float
+    force_value: null           # one-click force target; null if unset
+  - path: Main.filler.CV
+    comment: ""
+    format: hex
+    force_value: "16#FF"
+  - path: Main.status
+    format: bool                # every field except `path` is optional
+```
+
+Default values: `comment: ""`, `format: dec`, `force_value: null`, `expanded: []`.
+Unknown fields fail the load with a diagnostic — we're not committing to
+free-form extensibility until the feature matures.
+
+### Runtime behavior
+
+- **Load** on panel open: scan project root for `*.st-watch`, parse each, build
+  one `WatchTable` object per file, populate the tab strip.
+- **Save** on every user edit: debounced (~200 ms) write of the affected table
+  only. Writes go through `vscode.workspace.fs` so VS Code's file watchers see
+  the change and external edits round-trip cleanly.
+- **External edits** (user edits the YAML by hand in another editor): watch the
+  directory; on change, reload the affected file and reconcile with the panel.
+- **New table**: tab strip `+` button creates `<slug>.st-watch` with a sensible
+  default name.
+- **Delete table**: confirm, then `vscode.workspace.fs.delete`.
+- **Rename table**: prompt for new name; if new filename is available, rename
+  the file and update in-memory state.
+- **Active tab**: stored in `workspaceState` under `plcMonitor.activeWatchTable`
+  (not in the YAML — it's UI state, not project state).
+
+### YAML parsing
+
+The tree-sitter-regex parser in `editors/vscode/src/extension.ts:577-627` is
+replaced workspace-wide by **`js-yaml`** for the TypeScript side and
+**`serde_yaml`** (already a workspace dep) everywhere in Rust. No regex parsing
+survives. `plc-project.yaml` target resolution switches to `js-yaml` as part of
+the same change.
+
+### Tree rendering
+
+The hand-rolled recursive `WatchTable.tsx` is retired. We adopt **TanStack
+Table v8** + **TanStack Virtual**, with optional **@dnd-kit/core** for row
+drag-reorder, all under `preact/compat`. TanStack is headless (no fiber
+internals, works cleanly with Preact 10.19+), supports hierarchical rows via
+`getSubRows`, lets each column render arbitrary DOM (force buttons, format
+dropdown, editable comment field, editable force-value field), and ships at
+~25-35 KB gzipped. Detailed selection rationale is in
+`/tmp/test-reports/` (session research, 2026-04-24).
+
+### 20 Hz update strategy
+
+Live values push through **`@preact/signals`**, one signal per watched variable.
+The TanStack row model stays static; only the leaf `<td>` re-renders on each
+WS tick. This decouples update frequency from table size — 1000 rows at 20 Hz
+is still only "changed cells per second" repaints, not "rows × fps".
+
+### Feature parity vs. CODESYS watch/force tables
+
+| Feature | CODESYS | Ours (target) |
+|---|---|---|
+| Multiple named tables | ✅ | ✅ |
+| Project-file persistence (git-trackable) | ❌ (proprietary) | ✅ |
+| Per-row comment | ✅ | ✅ |
+| Per-row display format | ✅ | ✅ |
+| One-click force to pre-configured value | ✅ | ✅ |
+| Drag-reorder rows | ✅ | ✅ |
+| Trigger expressions | ✅ | Tier 2 |
+| Snapshot/compare | ✅ | Tier 2 |
+| Charting (sparkline) | ✅ | Tier 2 |
+| TIA Portal `.tww` import | — | Tier 3 |
+
+---
+
 ## Key Files
 
 | File | Purpose |
