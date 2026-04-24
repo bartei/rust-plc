@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [master, staging]
   pull_request:
-    branches: [master]
+    branches: [master, staging]
 
 env:
   CARGO_TERM_COLOR: always
@@ -92,6 +92,107 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories sources
+
+  # ── VS Code webview unit tests (monitor-tree) ───────────────────────
+  vscode-unit:
+    name: VS Code Unit (monitor-tree)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: Build extension + webview
+        working-directory: editors/vscode
+        run: |
+          npm ci --ignore-scripts
+          npm run compile
+          npm run build:webview
+      - name: Run monitor-tree unit tests
+        working-directory: editors/vscode
+        run: node test/monitor-tree.test.js
+
+  # ── VS Code electron extension tests (@vscode/test-electron) ────────
+  vscode-electron:
+    name: VS Code Electron
+    runs-on: ubuntu-latest
+    needs: [build]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libudev-dev pkg-config \
+            xvfb xauth \
+            libnss3 libasound2t64 libgtk-3-0 libgbm1 \
+            libxkbcommon0 libx11-xcb1 libsecret-1-0
+      # The extension's debug adapter shells out to `st-cli debug` — the
+      # electron tests fail with "Debug session should start" without this.
+      - name: Build st-cli
+        run: cargo build -p st-cli
+      - name: Build extension + webview
+        working-directory: editors/vscode
+        run: |
+          npm ci --ignore-scripts
+          npm run compile
+          npm run build:webview
+      - name: Run electron tests under xvfb
+        working-directory: editors/vscode
+        run: xvfb-run -a node ./out/test/runTest.js
+
+  # ── Playwright UI tests (monitor panel webview) ─────────────────────
+  playwright:
+    name: Playwright UI
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      # Spec file boots monitor-test-server + a static fixture server;
+      # the test harness needs both.
+      - name: Build monitor-test-server
+        run: cargo build -p st-monitor --bin monitor-test-server
+      - name: Build VS Code webview
+        working-directory: editors/vscode
+        run: |
+          npm ci --ignore-scripts
+          npm run compile
+          npm run build:webview
+      - name: Install Playwright + browsers
+        working-directory: editors/vscode/test/ui
+        run: |
+          npm init -y > /dev/null
+          npm install --no-save @playwright/test@1.52.0
+          npx playwright install --with-deps chromium
+      - name: Run Playwright tests
+        working-directory: editors/vscode/test/ui
+        run: npx playwright test
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: editors/vscode/test/ui/playwright-report
+          retention-days: 7
 
   # ── E2E tests (QEMU x86_64) ─────────────────────────────────────────
   e2e-x86_64:
