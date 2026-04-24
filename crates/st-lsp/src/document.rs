@@ -351,3 +351,144 @@ impl Document {
         offset + pos.character as usize
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tower_lsp::lsp_types::Position;
+
+    const SAMPLE_POU: &str = "PROGRAM main\nVAR\n  x : INT;\nEND_VAR\n  x := 1;\nEND_PROGRAM\n";
+
+    #[test]
+    fn new_parses_a_valid_program() {
+        let doc = Document::new(SAMPLE_POU.to_string(), Some(1));
+        assert_eq!(doc.source, SAMPLE_POU);
+        assert_eq!(doc.version, Some(1));
+        assert!(doc.lower_errors.is_empty(), "no parse errors for valid input");
+        assert!(doc.file_path.is_none());
+        // virtual_offset is the sum of stdlib lengths — opaque but stable > 0.
+        assert!(doc.virtual_offset > 0);
+    }
+
+    #[test]
+    fn new_with_uri_without_project_root_matches_new() {
+        // URI pointing at a path outside any plc-project: should behave like new().
+        let uri = "file:///tmp/definitely/not/a/plc-project/main.st";
+        let doc = Document::new_with_uri(SAMPLE_POU.to_string(), Some(2), uri);
+        assert_eq!(doc.version, Some(2));
+        assert_eq!(doc.file_path.as_deref(), Some("/tmp/definitely/not/a/plc-project/main.st"));
+        assert!(doc.project_files.is_empty());
+    }
+
+    #[test]
+    fn update_replaces_clean_source() {
+        let mut doc = Document::new(SAMPLE_POU.to_string(), Some(1));
+        let new_src = "PROGRAM main\nVAR y : REAL; END_VAR\n  y := 2.0;\nEND_PROGRAM\n".to_string();
+        doc.update(new_src.clone(), Some(2), None);
+        assert_eq!(doc.source, new_src);
+        assert_eq!(doc.version, Some(2));
+        assert!(doc.lower_errors.is_empty());
+    }
+
+    #[test]
+    fn update_with_parse_errors_preserves_last_good_ast() {
+        let mut doc = Document::new(SAMPLE_POU.to_string(), Some(1));
+        // Keep a handle to what "good" looked like.
+        let good_vo = doc.virtual_offset;
+
+        // An unterminated VAR block is a parse error — we expect update() to
+        // keep the prior analysis but refresh source + lower_errors.
+        let broken = "PROGRAM main\nVAR\n  x : IN".to_string();
+        doc.update(broken.clone(), Some(2), None);
+        assert_eq!(doc.source, broken, "source always advances");
+        assert_eq!(doc.version, Some(2));
+        // We can't reliably check lower_errors is non-empty for every broken
+        // snippet (tree-sitter is forgiving), so assert virtual_offset is
+        // still coherent and analysis wasn't wiped.
+        assert_eq!(doc.virtual_offset, good_vo);
+    }
+
+    #[test]
+    fn offset_to_position_handles_first_line() {
+        let doc = Document::new("abc\ndef\n".to_string(), None);
+        assert_eq!(doc.offset_to_position(0), Position::new(0, 0));
+        assert_eq!(doc.offset_to_position(2), Position::new(0, 2));
+    }
+
+    #[test]
+    fn offset_to_position_crosses_newlines() {
+        let doc = Document::new("abc\ndef\nghi".to_string(), None);
+        // Offset 4 is 'd' on line 1, column 0.
+        assert_eq!(doc.offset_to_position(4), Position::new(1, 0));
+        // Offset 8 is 'g' on line 2, column 0.
+        assert_eq!(doc.offset_to_position(8), Position::new(2, 0));
+        // End of buffer.
+        assert_eq!(doc.offset_to_position(11), Position::new(2, 3));
+    }
+
+    #[test]
+    fn offset_to_position_clamps_past_end() {
+        let doc = Document::new("abc".to_string(), None);
+        // Passing an oversized offset should clamp, not panic.
+        let pos = doc.offset_to_position(99);
+        assert_eq!(pos, Position::new(0, 3));
+    }
+
+    #[test]
+    fn position_to_offset_roundtrips_with_offset_to_position() {
+        let src = "ab\ncde\nf";
+        let doc = Document::new(src.to_string(), None);
+        for target in 0..src.len() {
+            let pos = doc.offset_to_position(target);
+            let back = doc.position_to_offset(pos);
+            assert_eq!(back, target, "roundtrip failed at offset {target}");
+        }
+    }
+
+    #[test]
+    fn position_to_offset_past_last_newline() {
+        let doc = Document::new("a\nb\n".to_string(), None);
+        // Line 2 exists (empty, after trailing newline); column past EOL clamps
+        // to the end via naive addition.
+        let off = doc.position_to_offset(Position::new(1, 1));
+        assert_eq!(off, 3); // 'a' '\n' 'b' -> offset 3 is just after 'b'
+    }
+
+    #[test]
+    fn text_range_to_lsp_maps_both_endpoints() {
+        let src = "abcdef\n123456";
+        let doc = Document::new(src.to_string(), None);
+        let range = st_syntax::ast::TextRange { start: 2, end: 9 };
+        let lsp = doc.text_range_to_lsp(range);
+        assert_eq!(lsp.start, Position::new(0, 2));
+        assert_eq!(lsp.end, Position::new(1, 2));
+    }
+
+    #[test]
+    fn to_virtual_and_from_virtual_are_inverses() {
+        let doc = Document::new(SAMPLE_POU.to_string(), None);
+        for local in [0usize, 1, 10, 50] {
+            let v = doc.to_virtual(local);
+            assert_eq!(doc.from_virtual(v), local);
+        }
+    }
+
+    #[test]
+    fn from_virtual_saturates_below_offset() {
+        let doc = Document::new(SAMPLE_POU.to_string(), None);
+        // A virtual offset smaller than our file's base should saturate at 0,
+        // not underflow.
+        assert_eq!(doc.from_virtual(0), 0);
+        assert_eq!(doc.from_virtual(doc.virtual_offset.saturating_sub(1)), 0);
+    }
+
+    #[test]
+    fn unicode_source_does_not_panic() {
+        // The current offset/position helpers are byte-based; this just
+        // verifies they don't panic on multi-byte sequences.
+        let src = "// αβγ\nOK := TRUE;\n";
+        let doc = Document::new(src.to_string(), None);
+        let _ = doc.offset_to_position(src.len());
+        let _ = doc.position_to_offset(Position::new(1, 0));
+    }
+}

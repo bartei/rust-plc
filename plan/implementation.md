@@ -466,3 +466,73 @@ All date/time types share `Value::Time(i64)` in milliseconds (no separate Value/
 - [x] Devcontainer
 - [x] Error quality: line:column locations, severity, diagnostic codes
 - [ ] IEC 61131-3 compliance tracking checklist
+
+---
+
+## Test Coverage Improvements
+
+Tracked from the coverage gap analysis in `/tmp/test-reports/COVERAGE_GAPS.md`
+(baseline 65.05 % line coverage on 2026-04-23). After Phase 1, line coverage
+is now **71.78 %** (+6.73 pp).
+
+### Done (2026-04-23)
+
+- [x] Subprocess coverage in `lsp_integration.rs`: `find_st_cli()` via
+      `current_exe()`, `TestClient::clean_stop()` sends `shutdown` + `exit`
+      and closes `child.stdin` so tower-lsp returns from `serve()` and the
+      `.profraw` flushes before SIGKILL. Result: **`st-lsp/src/server.rs`
+      0 % → 58.6 %**, `st-lsp` crate 27 % → 67 %.
+- [x] Coverage now includes `st-comm-modbus` (50.6 %) and `st-comm-serial`
+      (60.1 %) via the `show-env` workflow (no longer excluded).
+- [x] `st-target-agent/src/watchdog.rs` — 8 new unit tests using
+      `tokio::time::pause()`: **0 % → 96.94 %**.
+- [x] `st-lsp/src/document.rs` — 13 new direct unit tests for offset↔position,
+      virtual-space mapping, update happy/error paths: **53.6 % → 75.5 %**.
+
+### Phase 2 — high-ROI targeted tests (deferred)
+
+- [ ] **`st-target-agent/src/api/program.rs`** (73.5 % → 90 %): error-path tests
+      for invalid programs, multipart-upload edge cases.
+- [ ] **`st-target-agent/src/api/monitor_ws.rs`** (65.8 % → 85 %): WS
+      subscribe/unsubscribe/force error paths, catalog-empty edge case.
+- [ ] **`st-engine/src/retain_store.rs`** (58.9 % → 85 %):
+      `capture_instance_fields`, warm vs. cold `restore_snapshot`, `save_to_file` /
+      `load_from_file` error branches, `is_compatible` corner cases.
+- [ ] **`st-target-agent/src/dap_attach_handler.rs`** (56.5 % → 80 %):
+      request-level unit tests using an in-memory DAP transport recorder. Cover
+      `disconnect`, `stackTrace` edge cases, `variables` for FB fields, and
+      breakpoint resolution at `virtual_offset`.
+
+### Phase 3 — external-dependency gated (need fakes/fixtures)
+
+- [ ] **`st-comm-modbus-tcp/src/client.rs`** (0 %): table-driven tests against
+      a mock `TcpStream` (tokio `DuplexStream`).
+- [ ] **`st-comm-modbus-tcp/src/device_fb.rs`** (40.2 %) and `transport.rs`
+      (48.8 %): use `st-comm-sim` as a fake or add an in-process TCP fixture.
+- [ ] **`st-deploy/src/ssh.rs`** (37.8 %): small integration suite against the
+      existing QEMU x86_64 VM; harness already exists in
+      `tests/e2e-deploy/vm/`.
+- [ ] **`st-deploy/src/installer.rs`** (0 %, 230 lines, no tests at all):
+      unit-test `find_static_binary`; integration-test `install`/`uninstall`
+      against the QEMU fixture.
+
+### Phase 4 — infrastructure / refactor
+
+- [ ] Split `st-cli/src/main.rs` (907 uncovered lines) into a thin shim over a
+      library entrypoint `st_cli::run(argv) -> ExitCode`, then unit-test the
+      library surface.
+- [ ] Decide on `st-comm-sim/src/web.rs` (0 %, 211 lines): delete if dead
+      code, otherwise add `reqwest`-based smoke tests.
+- [ ] Binary-search the 525 uncovered lines in `st-dap/src/server.rs` (73.9 %)
+      via `cargo llvm-cov --html` and add targeted tests for `exceptionInfo`,
+      `modules`, `loadedSources`, `setExpression`, breakpoint hit-counts, and
+      log-message conditions.
+
+### Wait-and-see
+
+- [ ] `st-engine/src/vm.rs` (78.4 %): 353 uncovered lines mostly in rare
+      opcodes and error paths; diminishing returns below 80 %, re-evaluate
+      after Phase 2.
+- [ ] `st-target-agent/src/runtime_manager.rs` (70.3 %): 203 uncovered lines
+      in command dispatcher branches; will improve as Phase 2 tests exercise
+      the API layer more thoroughly.
