@@ -27,13 +27,15 @@ VAR
     serial : SerialLink;
     input  : WaveshareAnalogInput;
     output : WaveshareAnalogOutput;
+    digital_io : WaveshareDigitalIO;
+    i : INT;
 END_VAR
     g_cycles := g_cycles + 1;
 
     (* Open the serial port — shared by all devices on this bus *)
     serial(
         port := '/dev/ttyACM0',
-        baud := 9600,
+        baud := 115200,
         parity := 'N',
         data_bits := 8,
         stop_bits := 1
@@ -51,6 +53,16 @@ END_VAR
         slave_id := 21,
         refresh_rate := T#50ms
     );
+
+    digital_io(
+        link := serial.port,
+        slave_id := 22,
+        refresh_rate := T#50ms
+    );
+
+    FOR i := 0 TO 7 DO
+        digital_io.DO[i] := i = (digital_io.io_cycles MOD 8);
+    END_FOR;
 
     output.AO2 := input.AI1 * 10;
     SupplyVoltage := input.AI1;
