@@ -196,7 +196,7 @@ fn transport_transaction_framed_roundtrip() {
     let mut response = [0u8; 64];
     let mut parser = FixedLenParser(7);
     let n = transport
-        .transaction_framed(&request, &mut response, &mut parser)
+        .transaction_framed(&request, &mut response, &mut parser, Duration::from_millis(500), Duration::ZERO)
         .unwrap();
 
     assert_eq!(n, 7, "Expected exactly 7 response bytes, got {n}");
@@ -265,7 +265,7 @@ fn transaction_framed_returns_before_timeout_when_frame_complete() {
 
     let started = Instant::now();
     let n = transport
-        .transaction_framed(&request, &mut response, &mut parser)
+        .transaction_framed(&request, &mut response, &mut parser, timeout, Duration::ZERO)
         .expect("framed transaction failed");
     let elapsed = started.elapsed();
 
@@ -330,7 +330,7 @@ fn transaction_framed_times_out_on_truncated_response() {
     let mut parser = FixedLenParser(7);
 
     let started = Instant::now();
-    let result = transport.transaction_framed(&request, &mut response, &mut parser);
+    let result = transport.transaction_framed(&request, &mut response, &mut parser, timeout, Duration::ZERO);
     let elapsed = started.elapsed();
 
     assert!(result.is_err(), "Expected timeout error, got {result:?}");
@@ -483,7 +483,7 @@ fn serial_link_fb_shared_transport_usable() {
     let mut response = [0u8; 16];
     let mut parser = FixedLenParser(test_data.len());
     let n = transport
-        .transaction_framed(&test_data, &mut response, &mut parser)
+        .transaction_framed(&test_data, &mut response, &mut parser, Duration::from_millis(500), Duration::ZERO)
         .unwrap();
     assert_eq!(n, 3, "Expected 3 echoed bytes");
     assert_eq!(&response[..3], &test_data, "Echoed data should match");

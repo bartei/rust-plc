@@ -22,14 +22,40 @@ use st_comm_serial::framing::{FrameParser, FrameStatus};
 
 /// Parses a single Modbus RTU response frame as bytes stream in.
 ///
-/// One instance is created per transaction. The parser is stateless beyond
-/// what it can derive from the buffer it has already seen, so it is also
-/// safe to reuse an instance across transactions if a caller wishes to.
-pub struct RtuFrameParser;
+/// One instance is created per transaction. The parser validates that the
+/// response slave_id and function code match the request — leftover bytes
+/// from a previous transaction (e.g. a slave that responded after the
+/// master timed out) are rejected immediately rather than being mistaken
+/// for the current response.
+pub struct RtuFrameParser {
+    /// Expected slave_id from the matching request. `None` disables the
+    /// check (used by tests that exercise frame-shape parsing only).
+    expected_slave_id: Option<u8>,
+    /// Expected function code (low 7 bits) from the matching request.
+    /// `None` disables the check.
+    expected_fc: Option<u8>,
+}
 
 impl RtuFrameParser {
+    /// Build a parser bound to the slave_id and function code of a request.
+    ///
+    /// Use this in production: any response whose first two bytes don't
+    /// match the request will be reported as [`FrameStatus::Invalid`]
+    /// before its CRC is even checked.
+    pub fn for_request(slave_id: u8, fc: u8) -> Self {
+        Self {
+            expected_slave_id: Some(slave_id),
+            expected_fc: Some(fc & 0x7F),
+        }
+    }
+
+    /// Build a permissive parser that accepts any slave_id and function
+    /// code. Intended for unit tests of frame-length logic.
     pub fn new() -> Self {
-        Self
+        Self {
+            expected_slave_id: None,
+            expected_fc: None,
+        }
     }
 }
 
@@ -41,12 +67,32 @@ impl Default for RtuFrameParser {
 
 impl FrameParser for RtuFrameParser {
     fn parse(&mut self, buf: &[u8]) -> FrameStatus {
+        // Validate slave_id as soon as it's available.
+        if let (Some(expected), Some(&got)) = (self.expected_slave_id, buf.first()) {
+            if got != expected {
+                return FrameStatus::Invalid(format!(
+                    "Slave ID mismatch: expected 0x{expected:02X}, got 0x{got:02X}"
+                ));
+            }
+        }
+
         // Need slave_id and function code before we can decide anything.
         if buf.len() < 2 {
             return FrameStatus::Need(2);
         }
 
         let fc = buf[1];
+
+        // Validate function code (allowing the exception bit) against the
+        // request once we have it.
+        if let Some(expected_fc) = self.expected_fc {
+            if (fc & 0x7F) != expected_fc {
+                return FrameStatus::Invalid(format!(
+                    "Function code mismatch: expected 0x{expected_fc:02X} (or exception), \
+                     got 0x{fc:02X}"
+                ));
+            }
+        }
 
         // Exception response — high bit of FC is set. Fixed 5-byte frame.
         if fc & 0x80 != 0 {
@@ -201,6 +247,51 @@ mod tests {
         // FC10 + 0x80 = 0x90 → exception still 5 bytes
         let mut p = RtuFrameParser::new();
         assert_complete(p.parse(&[0x01, 0x90, 0x04, 0xCC, 0xDD]), 5);
+    }
+
+    #[test]
+    fn slave_id_mismatch_is_invalid() {
+        // Sent to slave 20, response arrived from slave 21 (e.g. a previous
+        // device's late frame still in the OS buffer).
+        let mut p = RtuFrameParser::for_request(20, 0x02);
+        match p.parse(&[21, 0x02, 0x01, 0x00, 0xCC, 0xDD]) {
+            FrameStatus::Invalid(msg) => {
+                assert!(msg.contains("0x14"), "expected error to mention 0x14: {msg}");
+                assert!(msg.contains("0x15"), "expected error to mention 0x15: {msg}");
+            }
+            other => panic!("Expected Invalid for slave mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn function_code_mismatch_is_invalid() {
+        // Sent FC02, response FC03 — wrong frame.
+        let mut p = RtuFrameParser::for_request(1, 0x02);
+        match p.parse(&[0x01, 0x03, 0x02, 0x00, 0x05, 0xCC, 0xDD]) {
+            FrameStatus::Invalid(msg) => {
+                assert!(msg.contains("0x02"), "should mention expected: {msg}");
+                assert!(msg.contains("0x03"), "should mention got: {msg}");
+            }
+            other => panic!("Expected Invalid for FC mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exception_response_passes_fc_validation() {
+        // Sent FC03, slave returned exception 0x83 — the parser should
+        // accept it as the matching exception variant, not reject it.
+        let mut p = RtuFrameParser::for_request(1, 0x03);
+        assert_complete(p.parse(&[0x01, 0x83, 0x02, 0xCC, 0xDD]), 5);
+    }
+
+    #[test]
+    fn slave_id_validated_before_buffer_has_two_bytes() {
+        // Single byte received — already enough to reject a wrong slave.
+        let mut p = RtuFrameParser::for_request(20, 0x02);
+        match p.parse(&[21]) {
+            FrameStatus::Invalid(_) => {}
+            other => panic!("expected Invalid for slave mismatch on 1 byte, got {other:?}"),
+        }
     }
 
     #[test]

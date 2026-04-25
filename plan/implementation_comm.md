@@ -13,7 +13,7 @@
 - [x] `NativeFbLayout`, `NativeFbField`, `NativeFbVarKind` types
 - [x] `NativeFbRegistry`: register, find (case-insensitive), all, is_empty
 - [x] `DeviceProfile::to_native_fb_layout()` — simulated profile → layout conversion
-- [x] `DeviceProfile::to_modbus_rtu_device_layout()` — modbus-rtu profile → layout (link, slave_id, refresh_rate, diagnostics, profile fields)
+- [x] `DeviceProfile::to_modbus_rtu_device_layout()` — modbus-rtu profile → layout (link, slave_id, refresh_rate, timeout, preamble, diagnostics, profile fields)
 - [x] `field_data_type_to_var_type()` / `field_data_type_to_int_width()` helpers
 - [x] `layout_to_memory_layout()` — NativeFbLayout → st_ir::MemoryLayout (with TypeDef generation for array fields)
 - [x] Unit tests: registry operations, profile-to-layout, type mappings
@@ -150,7 +150,14 @@
 
 - [x] Register grouping optimizer (merge consecutive registers into multi-read/write)
 - [x] Batched coil writes (consecutive coils via FC0F instead of individual FC05)
-- [ ] Retry logic (1 retry on timeout)
+- [x] Per-device `timeout` VAR_INPUT — overrides `DEFAULT_TIMEOUT` (100 ms)
+- [x] Per-device `preamble` VAR_INPUT — minimum bus-silence before each tx, on top of the 3.5-char gap (default 5 ms; eliminates silent request-drops with cheap RS-485 slaves)
+- [x] Diagnostic `error_code` split into `ERR_TIMEOUT` (10), `ERR_CRC` (11), `ERR_SLAVE_MISMATCH` (12), `ERR_FC_MISMATCH` (13), `ERR_MODBUS_EXCEPTION` (14), `ERR_OTHER` (15) — exposed via `st_comm_modbus::device_fb`
+- [x] Slave-id + FC validation in `RtuFrameParser::for_request` — rejects stale frames from other slaves (or our own echo) before they corrupt the response
+- [x] OS input + output buffer purge (`ClearBuffer::All`) at the start of every `transaction_framed`, with hex-logged discard so flushed bytes are observable
+- [x] Per-transaction OS read timeout (`port.set_timeout`) reconciled with the caller's deadline so short transaction timeouts aren't stretched
+- [x] Tracing instrumentation: `tx ok`/`tx timeout`/`tx invalid` lines with hex dumps of request + (partial) response, and per-transaction send/recv timing
+- [ ] Retry logic (1 retry on transient errors — ERR_TIMEOUT/CRC/MISMATCH classes)
 
 ### Two-Layer Architecture (COMPLETED)
 

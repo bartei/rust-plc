@@ -7,7 +7,23 @@
       "Bash(nix-shell:*)",
       "Bash(ls:*)",
       "Bash(find:*)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(PKG_CONFIG_PATH=/nix/store/v38m4px5x7b39fsbcnxbi1l7n5k8a23k-systemd-259.3-dev/lib/pkgconfig cargo test -p st-comm-modbus --lib)",
+      "Bash(PKG_CONFIG_PATH=/nix/store/v38m4px5x7b39fsbcnxbi1l7n5k8a23k-systemd-259.3-dev/lib/pkgconfig cargo test -p st-comm-modbus --tests -- --test-threads=1)",
+      "Bash(PKG_CONFIG_PATH=/nix/store/v38m4px5x7b39fsbcnxbi1l7n5k8a23k-systemd-259.3-dev/lib/pkgconfig cargo clippy --workspace --all-targets -- -D warnings)",
+      "Bash(PKG_CONFIG_PATH=/nix/store/v38m4px5x7b39fsbcnxbi1l7n5k8a23k-systemd-259.3-dev/lib/pkgconfig cargo clippy -p st-comm-modbus -p st-comm-modbus-tcp -p st-comm-api -p st-engine -p st-cli --all-targets -- -D warnings)",
+      "Bash(PKG_CONFIG_PATH=/nix/store/v38m4px5x7b39fsbcnxbi1l7n5k8a23k-systemd-259.3-dev/lib/pkgconfig cargo test -p st-engine --tests)",
+      "Bash(PKG_CONFIG_PATH=/nix/store/v38m4px5x7b39fsbcnxbi1l7n5k8a23k-systemd-259.3-dev/lib/pkgconfig cargo run -p st-cli -- check playground/modbus_demo/plc-project.yaml)",
+      "Bash(PKG_CONFIG_PATH=/nix/store/v38m4px5x7b39fsbcnxbi1l7n5k8a23k-systemd-259.3-dev/lib/pkgconfig cargo build -p st-comm-serial -p st-comm-modbus)",
+      "Bash(PKG_CONFIG_PATH=/nix/store/v38m4px5x7b39fsbcnxbi1l7n5k8a23k-systemd-259.3-dev/lib/pkgconfig cargo test -p st-comm-serial -p st-comm-modbus -- --test-threads=1)",
+      "Bash(PKG_CONFIG_PATH=/nix/store/v38m4px5x7b39fsbcnxbi1l7n5k8a23k-systemd-259.3-dev/lib/pkgconfig cargo clippy -p st-comm-serial -p st-comm-modbus -p st-comm-api -p st-engine -p st-cli -p st-lsp -p st-dap --all-targets -- -D warnings)",
+      "Bash(PKG_CONFIG_PATH=/nix/store/v38m4px5x7b39fsbcnxbi1l7n5k8a23k-systemd-259.3-dev/lib/pkgconfig cargo test -p st-engine --test native_fb_integration -- modbus_rtu_layout_field_slots_match_st_access --nocapture)",
+      "Bash(PKG_CONFIG_PATH=/nix/store/v38m4px5x7b39fsbcnxbi1l7n5k8a23k-systemd-259.3-dev/lib/pkgconfig cargo test -p st-lsp -p st-dap -p st-comm-api --tests)",
+      "Bash(PKG_CONFIG_PATH=/nix/store/v38m4px5x7b39fsbcnxbi1l7n5k8a23k-systemd-259.3-dev/lib/pkgconfig cargo run -q -p st-cli -- check playground/modbus_demo/plc-project.yaml)",
+      "Bash(PKG_CONFIG_PATH=/nix/store/v38m4px5x7b39fsbcnxbi1l7n5k8a23k-systemd-259.3-dev/lib/pkgconfig cargo clippy -p st-comm-serial -p st-comm-modbus --all-targets -- -D warnings)",
+      "Bash(PKG_CONFIG_PATH=/nix/store/v38m4px5x7b39fsbcnxbi1l7n5k8a23k-systemd-259.3-dev/lib/pkgconfig cargo test -p st-comm-modbus -p st-comm-serial -- --test-threads=1)",
+      "Bash(PKG_CONFIG_PATH=/nix/store/v38m4px5x7b39fsbcnxbi1l7n5k8a23k-systemd-259.3-dev/lib/pkgconfig cargo test -p st-comm-modbus --lib -- classify_error combine)",
+      "Read(//tmp/**)"
     ]
   }
 }

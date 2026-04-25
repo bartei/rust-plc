@@ -23,17 +23,60 @@ use std::time::Duration;
 const SLOT_LINK: usize = 0;
 const SLOT_SLAVE_ID: usize = 1;
 const SLOT_REFRESH_RATE: usize = 2;
-const SLOT_CONNECTED: usize = 3;
-const SLOT_ERROR_CODE: usize = 4;
-const SLOT_IO_CYCLES: usize = 5;
-const SLOT_LAST_RESPONSE_MS: usize = 6;
-const PROFILE_FIELD_OFFSET: usize = 7;
+const SLOT_TIMEOUT: usize = 3;
+const SLOT_PREAMBLE: usize = 4;
+const SLOT_CONNECTED: usize = 5;
+const SLOT_ERROR_CODE: usize = 6;
+const SLOT_IO_CYCLES: usize = 7;
+const SLOT_LAST_RESPONSE_MS: usize = 8;
+const PROFILE_FIELD_OFFSET: usize = 9;
+
+// ── Diagnostic error codes exposed via the FB's `error_code` VAR ──────
+// Kept stable so user ST code (and the monitor UI) can compare against
+// them. The poll cycle reports the last non-zero code observed.
+//
+// 0  : OK — no error this cycle.
+// 10 : Receive deadline elapsed before the response was complete.
+// 11 : Response received but CRC didn't match.
+// 12 : Response slave_id didn't match the request (stale frame from
+//      another device, or a spurious frame on the bus).
+// 13 : Response function code didn't match the request (or unknown FC).
+// 14 : Slave returned a Modbus exception (FC | 0x80) — the slave is
+//      reachable but rejected the request.
+// 15 : Other transport / protocol error (short response, I/O error,
+//      buffer-too-small, etc.).
+pub const ERR_OK: i64 = 0;
+pub const ERR_TIMEOUT: i64 = 10;
+pub const ERR_CRC: i64 = 11;
+pub const ERR_SLAVE_MISMATCH: i64 = 12;
+pub const ERR_FC_MISMATCH: i64 = 13;
+pub const ERR_MODBUS_EXCEPTION: i64 = 14;
+pub const ERR_OTHER: i64 = 15;
+
+/// Compute the expanded offset for each profile field.
+/// Returns a vec where `offsets[i]` is the starting index for profile field `i`
+/// in the expanded Value arrays (IoState.read_values/write_values and the
+/// profile-field portion of the `execute()` slice).
+fn compute_field_offsets(profile: &DeviceProfile) -> Vec<usize> {
+    let mut offsets = Vec::with_capacity(profile.fields.len());
+    let mut offset = 0;
+    for pf in &profile.fields {
+        offsets.push(offset);
+        offset += pf.count.max(1) as usize;
+    }
+    offsets
+}
+
+/// Total number of expanded values across all profile fields.
+fn total_expanded_values(profile: &DeviceProfile) -> usize {
+    profile.fields.iter().map(|pf| pf.count.max(1) as usize).sum()
+}
 
 /// Shared state between the scan-cycle thread and the background I/O thread.
 pub(crate) struct IoState {
-    /// Latest values read from the device (indexed by profile field position).
+    /// Latest values read from the device (expanded: one Value per register).
     pub read_values: Vec<Value>,
-    /// Values to write to the device (indexed by profile field position).
+    /// Values to write to the device (expanded: one Value per register).
     pub write_values: Vec<Value>,
     /// Diagnostics
     pub connected: bool,
@@ -59,11 +102,14 @@ impl ModbusRtuDeviceNativeFb {
     /// Create from a device profile and a shared bus manager.
     pub fn new(profile: DeviceProfile, bus_manager: Arc<BusManager>) -> Self {
         let layout = build_modbus_layout(&profile);
-        let default_values: Vec<Value> = profile
-            .fields
-            .iter()
-            .map(|pf| Value::default_for_type(st_comm_api::field_data_type_to_var_type(pf.data_type)))
-            .collect();
+        let total = total_expanded_values(&profile);
+        let mut default_values: Vec<Value> = Vec::with_capacity(total);
+        for pf in &profile.fields {
+            let def = Value::default_for_type(st_comm_api::field_data_type_to_var_type(pf.data_type));
+            for _ in 0..pf.count.max(1) {
+                default_values.push(def.clone());
+            }
+        }
         Self {
             layout,
             bus_manager,
@@ -113,8 +159,24 @@ impl NativeFb for ModbusRtuDeviceNativeFb {
                 let refresh_ms = fields[SLOT_REFRESH_RATE].as_int();
                 let interval = Duration::from_millis(if refresh_ms > 0 { refresh_ms as u64 } else { 50 });
 
+                let timeout_ms = fields[SLOT_TIMEOUT].as_int();
+                let timeout = if timeout_ms > 0 {
+                    Duration::from_millis(timeout_ms as u64)
+                } else {
+                    crate::rtu_client::DEFAULT_TIMEOUT
+                };
+
+                let preamble_ms = fields[SLOT_PREAMBLE].as_int();
+                let preamble = if preamble_ms > 0 {
+                    Duration::from_millis(preamble_ms as u64)
+                } else {
+                    crate::rtu_client::DEFAULT_PREAMBLE
+                };
+
                 let io = ModbusDeviceIo::new(
                     slave_id,
+                    timeout,
+                    preamble,
                     self.profile.clone(),
                     Arc::clone(&self.io_state),
                 );
@@ -124,13 +186,18 @@ impl NativeFb for ModbusRtuDeviceNativeFb {
         }
 
         // Queue output values for the background thread to write
+        let offsets = compute_field_offsets(&self.profile);
         {
             let mut state = self.io_state.lock().unwrap();
             for (i, pf) in self.profile.fields.iter().enumerate() {
                 if matches!(pf.direction, FieldDirection::Output | FieldDirection::Inout) {
-                    let slot = PROFILE_FIELD_OFFSET + i;
-                    if slot < fields.len() {
-                        state.write_values[i] = fields[slot].clone();
+                    let count = pf.count.max(1) as usize;
+                    let base = PROFILE_FIELD_OFFSET + offsets[i];
+                    let io_base = offsets[i];
+                    for j in 0..count {
+                        if base + j < fields.len() && io_base + j < state.write_values.len() {
+                            state.write_values[io_base + j] = fields[base + j].clone();
+                        }
                     }
                 }
             }
@@ -141,9 +208,13 @@ impl NativeFb for ModbusRtuDeviceNativeFb {
             let state = self.io_state.lock().unwrap();
             for (i, pf) in self.profile.fields.iter().enumerate() {
                 if matches!(pf.direction, FieldDirection::Input | FieldDirection::Inout) {
-                    let slot = PROFILE_FIELD_OFFSET + i;
-                    if slot < fields.len() {
-                        fields[slot] = state.read_values[i].clone();
+                    let count = pf.count.max(1) as usize;
+                    let base = PROFILE_FIELD_OFFSET + offsets[i];
+                    let io_base = offsets[i];
+                    for j in 0..count {
+                        if base + j < fields.len() && io_base + j < state.read_values.len() {
+                            fields[base + j] = state.read_values[io_base + j].clone();
+                        }
                     }
                 }
             }
@@ -160,21 +231,28 @@ impl NativeFb for ModbusRtuDeviceNativeFb {
 /// Protocol-specific I/O for a Modbus RTU device on a serial bus.
 struct ModbusDeviceIo {
     slave_id: u8,
+    timeout: Duration,
+    preamble: Duration,
     profile: DeviceProfile,
     io_state: Arc<Mutex<IoState>>,
 }
 
 impl ModbusDeviceIo {
-    fn new(slave_id: u8, profile: DeviceProfile, io_state: Arc<Mutex<IoState>>) -> Self {
-        Self { slave_id, profile, io_state }
+    fn new(
+        slave_id: u8,
+        timeout: Duration,
+        preamble: Duration,
+        profile: DeviceProfile,
+        io_state: Arc<Mutex<IoState>>,
+    ) -> Self {
+        Self { slave_id, timeout, preamble, profile, io_state }
     }
 }
 
 impl BusDeviceIo for ModbusDeviceIo {
     fn poll(&mut self, transport: &Arc<Mutex<SerialTransport>>) -> bool {
-        let client = RtuClient::new(Arc::clone(transport));
+        let client = RtuClient::with_timing(Arc::clone(transport), self.timeout, self.preamble);
         let start = std::time::Instant::now();
-        let mut had_error = false;
 
         // Snapshot write values
         let write_snapshot: Vec<Value> = {
@@ -182,22 +260,24 @@ impl BusDeviceIo for ModbusDeviceIo {
         };
 
         // Read inputs (batched)
-        had_error |= read_batched_io(&client, self.slave_id, &self.profile, &self.io_state);
+        let read_err = read_batched_io(&client, self.slave_id, &self.profile, &self.io_state);
 
         // Write outputs (batched)
-        had_error |= write_batched_io(&client, self.slave_id, &self.profile, &write_snapshot);
+        let write_err = write_batched_io(&client, self.slave_id, &self.profile, &write_snapshot);
+
+        let cycle_err = combine_cycle_errors(read_err, write_err);
 
         // Update diagnostics
         {
             let elapsed = start.elapsed();
             let mut state = self.io_state.lock().unwrap();
-            state.connected = !had_error;
-            state.error_code = if had_error { 10 } else { 0 };
+            state.connected = cycle_err == ERR_OK;
+            state.error_code = cycle_err;
             state.io_cycles += 1;
             state.last_response_ms = elapsed.as_secs_f64() * 1000.0;
         }
 
-        !had_error
+        cycle_err == ERR_OK
     }
 }
 
@@ -212,39 +292,108 @@ fn build_modbus_layout(profile: &DeviceProfile) -> NativeFbLayout {
 
 // ── Batched I/O helpers ───────────────────────────────────────────────
 
+/// An expanded register entry: one register in the flat expanded list.
+struct ExpandedReg {
+    /// Index in IoState.read_values / write_values (expanded).
+    io_idx: usize,
+    /// Register address on the device.
+    address: u16,
+    /// Register kind (coil, discrete_input, holding_register, input_register).
+    kind: RegisterKind,
+    /// Data type for scaling.
+    data_type: FieldDataType,
+    /// Register mapping (for scale/offset).
+    register: st_comm_api::profile::RegisterMapping,
+    /// Profile field name (for logging).
+    field_name: String,
+}
+
+/// Expand profile fields into a flat register list, accounting for `count`.
+fn expand_registers(
+    profile: &DeviceProfile,
+    direction_filter: impl Fn(&FieldDirection) -> bool,
+) -> Vec<ExpandedReg> {
+    let offsets = compute_field_offsets(profile);
+    let mut regs = Vec::new();
+    for (i, pf) in profile.fields.iter().enumerate() {
+        if !direction_filter(&pf.direction) {
+            continue;
+        }
+        let count = pf.count.max(1) as usize;
+        for j in 0..count {
+            regs.push(ExpandedReg {
+                io_idx: offsets[i] + j,
+                address: pf.register.address as u16 + j as u16,
+                kind: pf.register.kind,
+                data_type: pf.data_type,
+                register: pf.register.clone(),
+                field_name: pf.name.clone(),
+            });
+        }
+    }
+    regs
+}
+
+/// Map a transaction error message to a numeric error code. Pattern
+/// matches against the strings produced by `transport.rs`, `frame.rs`,
+/// and `frame_parser.rs`. Anything we don't recognise falls into
+/// [`ERR_OTHER`] so an unfamiliar error never silently looks like OK.
+fn classify_error(msg: &str) -> i64 {
+    if msg.contains("Receive timeout") {
+        ERR_TIMEOUT
+    } else if msg.contains("CRC") {
+        ERR_CRC
+    } else if msg.contains("Slave ID mismatch") {
+        ERR_SLAVE_MISMATCH
+    } else if msg.contains("Function code mismatch")
+        || msg.contains("Unrecognised Modbus function code")
+    {
+        ERR_FC_MISMATCH
+    } else if msg.contains("Modbus exception") {
+        ERR_MODBUS_EXCEPTION
+    } else {
+        ERR_OTHER
+    }
+}
+
+/// Combine two cycle-level error codes, preferring the later (post-read,
+/// i.e. write-pass) one when both are non-zero. A zero in either slot
+/// means "that pass was clean," so the other pass's code wins.
+fn combine_cycle_errors(read_err: i64, write_err: i64) -> i64 {
+    if write_err != ERR_OK { write_err } else { read_err }
+}
+
 /// Read input-direction fields in batches, storing results into `io_state`.
+/// Returns the last non-zero error code observed, or [`ERR_OK`] if every
+/// transaction succeeded.
 fn read_batched_io(
     client: &RtuClient,
     slave_id: u8,
     profile: &DeviceProfile,
     io_state: &Arc<Mutex<IoState>>,
-) -> bool {
-    let mut had_error = false;
-
-    let input_fields: Vec<(usize, &st_comm_api::profile::ProfileField)> = profile
-        .fields
-        .iter()
-        .enumerate()
-        .filter(|(_, pf)| matches!(pf.direction, FieldDirection::Input | FieldDirection::Inout))
-        .collect();
+) -> i64 {
+    let mut last_err = ERR_OK;
+    let regs = expand_registers(profile, |d| {
+        matches!(d, FieldDirection::Input | FieldDirection::Inout)
+    });
 
     let mut i = 0;
-    while i < input_fields.len() {
-        let (_, first_pf) = input_fields[i];
+    while i < regs.len() {
+        let first = &regs[i];
 
-        if first_pf.register.kind == RegisterKind::Virtual {
+        if first.kind == RegisterKind::Virtual {
             i += 1;
             continue;
         }
 
         // Find consecutive registers of the same kind
-        let start_addr = first_pf.register.address as u16;
-        let kind = first_pf.register.kind;
+        let start_addr = first.address;
+        let kind = first.kind;
         let mut end = i + 1;
-        while end < input_fields.len() {
-            let (_, next_pf) = input_fields[end];
+        while end < regs.len() {
+            let next = &regs[end];
             let expected_addr = start_addr + (end - i) as u16;
-            if next_pf.register.kind != kind || next_pf.register.address as u16 != expected_addr {
+            if next.kind != kind || next.address != expected_addr {
                 break;
             }
             end += 1;
@@ -252,119 +401,119 @@ fn read_batched_io(
         let count = (end - i) as u16;
 
         let result = match kind {
-            RegisterKind::Coil => {
-                client.read_coils(slave_id, start_addr, count).map(|bools| {
+            RegisterKind::Coil => client.read_coils(slave_id, start_addr, count).map(|bools| {
+                let mut state = io_state.lock().unwrap();
+                for (j, &val) in bools.iter().enumerate() {
+                    state.read_values[regs[i + j].io_idx] = Value::Bool(val);
+                }
+            }),
+            RegisterKind::DiscreteInput => client
+                .read_discrete_inputs(slave_id, start_addr, count)
+                .map(|bools| {
                     let mut state = io_state.lock().unwrap();
                     for (j, &val) in bools.iter().enumerate() {
-                        let (idx, _) = input_fields[i + j];
-                        state.read_values[idx] = Value::Bool(val);
+                        state.read_values[regs[i + j].io_idx] = Value::Bool(val);
                     }
-                })
-            }
-            RegisterKind::DiscreteInput => {
-                client.read_discrete_inputs(slave_id, start_addr, count).map(|bools| {
+                }),
+            RegisterKind::HoldingRegister => client
+                .read_holding_registers(slave_id, start_addr, count)
+                .map(|regs_data| {
                     let mut state = io_state.lock().unwrap();
-                    for (j, &val) in bools.iter().enumerate() {
-                        let (idx, _) = input_fields[i + j];
-                        state.read_values[idx] = Value::Bool(val);
+                    for (j, &raw) in regs_data.iter().enumerate() {
+                        let r = &regs[i + j];
+                        state.read_values[r.io_idx] =
+                            register_to_value(raw, r.data_type, &r.register);
                     }
-                })
-            }
-            RegisterKind::HoldingRegister => {
-                client.read_holding_registers(slave_id, start_addr, count).map(|regs| {
+                }),
+            RegisterKind::InputRegister => client
+                .read_input_registers(slave_id, start_addr, count)
+                .map(|regs_data| {
                     let mut state = io_state.lock().unwrap();
-                    for (j, &raw) in regs.iter().enumerate() {
-                        let (idx, pf) = input_fields[i + j];
-                        state.read_values[idx] = register_to_value(raw, pf.data_type, &pf.register);
+                    for (j, &raw) in regs_data.iter().enumerate() {
+                        let r = &regs[i + j];
+                        state.read_values[r.io_idx] =
+                            register_to_value(raw, r.data_type, &r.register);
                     }
-                })
-            }
-            RegisterKind::InputRegister => {
-                client.read_input_registers(slave_id, start_addr, count).map(|regs| {
-                    let mut state = io_state.lock().unwrap();
-                    for (j, &raw) in regs.iter().enumerate() {
-                        let (idx, pf) = input_fields[i + j];
-                        state.read_values[idx] = register_to_value(raw, pf.data_type, &pf.register);
-                    }
-                })
-            }
+                }),
             RegisterKind::Virtual => Ok(()),
         };
 
         if let Err(e) = result {
-            tracing::debug!("Modbus batch read {}.{}: {e}", profile.name, first_pf.name);
-            had_error = true;
+            tracing::debug!(
+                "modbus read fail profile={} field={} slave={} kind={:?} addr={} count={}: {e}",
+                profile.name, first.field_name, slave_id, kind, start_addr, count,
+            );
+            last_err = classify_error(&e);
         }
 
         i = end;
     }
-    had_error
+    last_err
 }
 
 /// Write output-direction fields in batches from a snapshot of write values.
+/// Returns the last non-zero error code observed, or [`ERR_OK`] if every
+/// transaction succeeded.
 fn write_batched_io(
     client: &RtuClient,
     slave_id: u8,
     profile: &DeviceProfile,
     write_values: &[Value],
-) -> bool {
-    let mut had_error = false;
-
-    let output_fields: Vec<(usize, &st_comm_api::profile::ProfileField)> = profile
-        .fields
-        .iter()
-        .enumerate()
-        .filter(|(_, pf)| matches!(pf.direction, FieldDirection::Output | FieldDirection::Inout))
-        .collect();
+) -> i64 {
+    let mut last_err = ERR_OK;
+    let regs = expand_registers(profile, |d| {
+        matches!(d, FieldDirection::Output | FieldDirection::Inout)
+    });
 
     let mut i = 0;
-    while i < output_fields.len() {
-        let (first_idx, first_pf) = output_fields[i];
+    while i < regs.len() {
+        let first = &regs[i];
 
-        match first_pf.register.kind {
+        match first.kind {
             RegisterKind::Coil => {
                 // Batch consecutive coils into a single FC0F write
-                let start_addr = first_pf.register.address as u16;
+                let start_addr = first.address;
                 let mut end = i + 1;
-                while end < output_fields.len() {
-                    let (_, next_pf) = output_fields[end];
+                while end < regs.len() {
+                    let next = &regs[end];
                     let expected_addr = start_addr + (end - i) as u16;
-                    if next_pf.register.kind != RegisterKind::Coil
-                        || next_pf.register.address as u16 != expected_addr
-                    {
+                    if next.kind != RegisterKind::Coil || next.address != expected_addr {
                         break;
                     }
                     end += 1;
                 }
                 let count = end - i;
                 if count == 1 {
-                    let val = write_values[first_idx].as_bool();
+                    let val = write_values[first.io_idx].as_bool();
                     if let Err(e) = client.write_single_coil(slave_id, start_addr, val) {
-                        tracing::debug!("Modbus write {}.{}: {e}", profile.name, first_pf.name);
-                        had_error = true;
+                        tracing::debug!(
+                            "modbus write fail profile={} field={} slave={} kind=Coil addr={} count=1 op=single: {e}",
+                            profile.name, first.field_name, slave_id, start_addr,
+                        );
+                        last_err = classify_error(&e);
                     }
                 } else {
                     let coils: Vec<bool> = (i..end)
-                        .map(|j| {
-                            let (idx, _) = output_fields[j];
-                            write_values[idx].as_bool()
-                        })
+                        .map(|j| write_values[regs[j].io_idx].as_bool())
                         .collect();
                     if let Err(e) = client.write_multiple_coils(slave_id, start_addr, &coils) {
-                        tracing::debug!("Modbus batch write {}.{}: {e}", profile.name, first_pf.name);
-                        had_error = true;
+                        tracing::debug!(
+                            "modbus write fail profile={} field={} slave={} kind=Coil addr={} count={} op=multi: {e}",
+                            profile.name, first.field_name, slave_id, start_addr, coils.len(),
+                        );
+                        last_err = classify_error(&e);
                     }
                 }
                 i = end;
             }
             RegisterKind::HoldingRegister => {
-                let start_addr = first_pf.register.address as u16;
+                let start_addr = first.address;
                 let mut end = i + 1;
-                while end < output_fields.len() {
-                    let (_, next_pf) = output_fields[end];
+                while end < regs.len() {
+                    let next = &regs[end];
                     let expected_addr = start_addr + (end - i) as u16;
-                    if next_pf.register.kind != RegisterKind::HoldingRegister
-                        || next_pf.register.address as u16 != expected_addr
+                    if next.kind != RegisterKind::HoldingRegister
+                        || next.address != expected_addr
                     {
                         break;
                     }
@@ -372,21 +521,31 @@ fn write_batched_io(
                 }
                 let count = end - i;
                 if count == 1 {
-                    let raw = value_to_register(&write_values[first_idx], first_pf.data_type, &first_pf.register);
+                    let raw = value_to_register(
+                        &write_values[first.io_idx],
+                        first.data_type,
+                        &first.register,
+                    );
                     if let Err(e) = client.write_single_register(slave_id, start_addr, raw) {
-                        tracing::debug!("Modbus write {}.{}: {e}", profile.name, first_pf.name);
-                        had_error = true;
+                        tracing::debug!(
+                            "modbus write fail profile={} field={} slave={} kind=HoldingRegister addr={} count=1 op=single: {e}",
+                            profile.name, first.field_name, slave_id, start_addr,
+                        );
+                        last_err = classify_error(&e);
                     }
                 } else {
                     let values: Vec<u16> = (i..end)
                         .map(|j| {
-                            let (idx, pf) = output_fields[j];
-                            value_to_register(&write_values[idx], pf.data_type, &pf.register)
+                            let r = &regs[j];
+                            value_to_register(&write_values[r.io_idx], r.data_type, &r.register)
                         })
                         .collect();
                     if let Err(e) = client.write_multiple_registers(slave_id, start_addr, &values) {
-                        tracing::debug!("Modbus batch write {}.{}: {e}", profile.name, first_pf.name);
-                        had_error = true;
+                        tracing::debug!(
+                            "modbus write fail profile={} field={} slave={} kind=HoldingRegister addr={} count={} op=multi: {e}",
+                            profile.name, first.field_name, slave_id, start_addr, values.len(),
+                        );
+                        last_err = classify_error(&e);
                     }
                 }
                 i = end;
@@ -396,7 +555,7 @@ fn write_batched_io(
             }
         }
     }
-    had_error
+    last_err
 }
 
 // ── Value conversion helpers ──────────────────────────────────────────
@@ -479,6 +638,46 @@ mod tests {
     }
 
     #[test]
+    fn classify_error_recognises_each_failure_class() {
+        // Strings here are samples of the actual error messages produced
+        // by the transport / parser code paths, so this test would catch
+        // a future rewording that breaks classification.
+        assert_eq!(
+            classify_error("Receive timeout: got 0 of expected 5+ bytes within 100ms"),
+            ERR_TIMEOUT
+        );
+        assert_eq!(classify_error("CRC mismatch"), ERR_CRC);
+        assert_eq!(
+            classify_error("Slave ID mismatch: expected 0x14, got 0x15"),
+            ERR_SLAVE_MISMATCH
+        );
+        assert_eq!(
+            classify_error(
+                "Function code mismatch: expected 0x02 (or exception), got 0x03"
+            ),
+            ERR_FC_MISMATCH
+        );
+        assert_eq!(
+            classify_error("Unrecognised Modbus function code 0x42 in response"),
+            ERR_FC_MISMATCH
+        );
+        assert_eq!(
+            classify_error("Modbus exception: Illegal data address (code 2)"),
+            ERR_MODBUS_EXCEPTION
+        );
+        assert_eq!(classify_error("Serial read error: Connection reset"), ERR_OTHER);
+    }
+
+    #[test]
+    fn combine_cycle_errors_prefers_write_error_when_both_present() {
+        assert_eq!(combine_cycle_errors(ERR_OK, ERR_OK), ERR_OK);
+        assert_eq!(combine_cycle_errors(ERR_TIMEOUT, ERR_OK), ERR_TIMEOUT);
+        assert_eq!(combine_cycle_errors(ERR_OK, ERR_CRC), ERR_CRC);
+        // Write pass happens after the read pass, so its error supersedes.
+        assert_eq!(combine_cycle_errors(ERR_TIMEOUT, ERR_CRC), ERR_CRC);
+    }
+
+    #[test]
     fn value_to_register_inverse_scaling() {
         let reg = st_comm_api::profile::RegisterMapping {
             address: 0, kind: RegisterKind::HoldingRegister, bit: None,
@@ -486,6 +685,40 @@ mod tests {
             byte_order: st_comm_api::profile::ByteOrder::BigEndian, word_count: 1,
         };
         assert_eq!(value_to_register(&Value::Real(45.0), FieldDataType::Real, &reg), 450);
+    }
+
+    #[test]
+    fn array_field_expands_offsets_and_total() {
+        let profile = DeviceProfile::from_yaml(r#"
+name: ArrayCounts
+protocol: modbus-rtu
+fields:
+  - { name: DO, type: BOOL, direction: output, count: 8, register: { address: 0, kind: coil } }
+  - { name: DI, type: BOOL, direction: input,  count: 8, register: { address: 0, kind: discrete_input } }
+  - { name: AI, type: INT,  direction: input,  count: 4, register: { address: 0, kind: input_register } }
+"#).unwrap();
+
+        // DO occupies 0..8, DI occupies 8..16, AI occupies 16..20.
+        assert_eq!(compute_field_offsets(&profile), vec![0, 8, 16]);
+        assert_eq!(total_expanded_values(&profile), 20);
+    }
+
+    #[test]
+    fn array_field_expands_into_consecutive_registers() {
+        let profile = DeviceProfile::from_yaml(r#"
+name: ExpandRegs
+protocol: modbus-rtu
+fields:
+  - { name: DI, type: BOOL, direction: input, count: 8, register: { address: 0, kind: discrete_input } }
+"#).unwrap();
+
+        let regs = expand_registers(&profile, |d| matches!(d, FieldDirection::Input));
+        assert_eq!(regs.len(), 8);
+        for (j, r) in regs.iter().enumerate() {
+            assert_eq!(r.io_idx, j);
+            assert_eq!(r.address, j as u16);
+            assert_eq!(r.kind, RegisterKind::DiscreteInput);
+        }
     }
 
     #[test]
@@ -500,8 +733,8 @@ fields:
 
         let layout = build_modbus_layout(&profile);
         assert_eq!(layout.type_name, "TestModbus");
-        // 7 fixed + 2 profile fields
-        assert_eq!(layout.fields.len(), 9);
+        // 9 fixed + 2 profile fields
+        assert_eq!(layout.fields.len(), 11);
         assert_eq!(layout.fields[SLOT_LINK].name, "link");
         assert_eq!(layout.fields[SLOT_SLAVE_ID].name, "slave_id");
         assert_eq!(layout.fields[PROFILE_FIELD_OFFSET].name, "DI_0");
@@ -524,11 +757,13 @@ fields:
         assert_eq!(layout.fields[SLOT_LINK].name, "link");
         assert_eq!(layout.fields[SLOT_SLAVE_ID].name, "slave_id");
         assert_eq!(layout.fields[SLOT_REFRESH_RATE].name, "refresh_rate");
+        assert_eq!(layout.fields[SLOT_TIMEOUT].name, "timeout");
+        assert_eq!(layout.fields[SLOT_PREAMBLE].name, "preamble");
         assert_eq!(layout.fields[SLOT_CONNECTED].name, "connected");
         assert_eq!(layout.fields[SLOT_ERROR_CODE].name, "error_code");
         assert_eq!(layout.fields[SLOT_IO_CYCLES].name, "io_cycles");
         assert_eq!(layout.fields[SLOT_LAST_RESPONSE_MS].name, "last_response_ms");
-        assert_eq!(PROFILE_FIELD_OFFSET, 7);
+        assert_eq!(PROFILE_FIELD_OFFSET, 9);
         assert_eq!(layout.fields[PROFILE_FIELD_OFFSET].name, "F0");
     }
 
