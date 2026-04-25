@@ -1,0 +1,17 @@
+name: WaveshareDigitalIO
+vendor: Waveshare
+protocol: modbus-rtu
+description: "Waveshare Digial Input Output 8CH"
+
+fields:
+  - name: DO
+    type: BOOL
+    direction: output
+    count: 8
+    register: { address: 0, kind: coil }
+
+  - name: DI
+    type: BOOL
+    direction: input
+    count: 8
+    register: { address: 0, kind: discrete_input }
