@@ -4,9 +4,10 @@
 //! Skipped automatically if socat is not in PATH.
 
 use st_comm_api::NativeFb; // for execute()
+use st_comm_serial::framing::{FrameParser, FrameStatus};
 use std::io::{Read, Write};
 use std::process::{Child, Command};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn socat_available() -> bool {
     Command::new("socat")
@@ -124,11 +125,13 @@ fn transport_send_receive_loopback() {
     let request = [0x01, 0x03, 0x00, 0x00, 0x00, 0x0A]; // Modbus-like read request
     transport.send(&request).expect("Send failed");
 
-    // Read the echoed response
+    // Read the echoed response with a known length (1 marker + request).
+    let expected_len = 1 + request.len();
     let mut response = [0u8; 64];
-    let n = transport.receive(&mut response).expect("Receive failed");
+    transport
+        .receive_exact(&mut response, expected_len)
+        .expect("receive_exact failed");
 
-    assert!(n > 0, "Expected response bytes, got 0");
     assert_eq!(response[0], 0xAA, "Expected echo marker byte");
     assert_eq!(&response[1..1 + request.len()], &request, "Echoed data mismatch");
 
@@ -137,8 +140,22 @@ fn transport_send_receive_loopback() {
     socat.kill().unwrap();
 }
 
+/// A minimal fixed-length frame parser used to drive `transaction_framed`
+/// without depending on any specific protocol — exercises the generic
+/// transport API end-to-end.
+struct FixedLenParser(usize);
+impl FrameParser for FixedLenParser {
+    fn parse(&mut self, buf: &[u8]) -> FrameStatus {
+        if buf.len() < self.0 {
+            FrameStatus::Need(self.0)
+        } else {
+            FrameStatus::Complete(self.0)
+        }
+    }
+}
+
 #[test]
-fn transport_transaction_roundtrip() {
+fn transport_transaction_framed_roundtrip() {
     if !socat_available() {
         eprintln!("Skipping (socat not available)");
         return;
@@ -155,7 +172,7 @@ fn transport_transaction_roundtrip() {
     let mut transport = st_comm_serial::transport::SerialTransport::new(config);
     transport.open().unwrap();
 
-    // Slave: read request, respond with fixed data
+    // Slave: read request, respond with fixed-length data.
     let slave = serialport::new(&port_b, 19200)
         .timeout(Duration::from_millis(500))
         .open()
@@ -167,7 +184,7 @@ fn transport_transaction_roundtrip() {
         let mut buf = [0u8; 256];
         if let Ok(n) = port.read(&mut buf) {
             if n > 0 {
-                // Respond with a Modbus-like response: slave_id, func_code, byte_count, data
+                // Modbus-shaped response: slave, fc, byte_count, 4 data bytes
                 let response = [0x01, 0x03, 0x04, 0x00, 0x01, 0x00, 0x02];
                 let _ = port.write_all(&response);
                 let _ = port.flush();
@@ -175,17 +192,204 @@ fn transport_transaction_roundtrip() {
         }
     });
 
-    // Use transaction() for send+receive
     let request = [0x01, 0x03, 0x00, 0x00, 0x00, 0x02];
     let mut response = [0u8; 64];
-    let n = transport.transaction(&request, &mut response).unwrap();
+    let mut parser = FixedLenParser(7);
+    let n = transport
+        .transaction_framed(&request, &mut response, &mut parser)
+        .unwrap();
 
-    assert!(n >= 7, "Expected at least 7 response bytes, got {n}");
+    assert_eq!(n, 7, "Expected exactly 7 response bytes, got {n}");
     assert_eq!(response[0], 0x01, "Slave ID mismatch");
     assert_eq!(response[1], 0x03, "Function code mismatch");
     assert_eq!(response[2], 0x04, "Byte count mismatch");
 
     responder.join().unwrap();
+    drop(slave);
+    socat.kill().unwrap();
+}
+
+/// Regression test for the original performance bug: a healthy transaction
+/// must NOT block until the configured timeout once the response has been
+/// fully received. This is the whole point of the [`FrameParser`] abstraction.
+///
+/// We set a very generous timeout (1 second) and assert the transaction
+/// completes in under ~50 ms. With the old "read until buffer full or
+/// timeout fires" code, this test would take >= 1 second.
+#[test]
+fn transaction_framed_returns_before_timeout_when_frame_complete() {
+    if !socat_available() {
+        eprintln!("Skipping (socat not available)");
+        return;
+    }
+
+    let (mut socat, port_a, port_b) = spawn_virtual_serial();
+
+    let timeout = Duration::from_millis(1000);
+    let config = st_comm_serial::transport::SerialConfig {
+        port: port_a,
+        baud_rate: 115200,
+        timeout,
+        ..Default::default()
+    };
+    let mut transport = st_comm_serial::transport::SerialTransport::new(config);
+    transport.open().unwrap();
+
+    let slave = serialport::new(&port_b, 115200)
+        .timeout(Duration::from_millis(500))
+        .open()
+        .unwrap();
+
+    // Slave responds promptly with a 7-byte FC03 frame, then stays silent.
+    // The transport must NOT wait for further bytes once the frame is complete.
+    let slave_clone = slave.try_clone().unwrap();
+    let responder = std::thread::spawn(move || {
+        let mut port = slave_clone;
+        let mut buf = [0u8; 256];
+        if let Ok(n) = port.read(&mut buf) {
+            if n > 0 {
+                let response = [0x01, 0x03, 0x04, 0x00, 0x2A, 0x00, 0x2B];
+                let _ = port.write_all(&response);
+                let _ = port.flush();
+            }
+        }
+        // Deliberately stays idle — DOES NOT close the port. This is the
+        // condition that used to cause the receive() loop to drain until
+        // the inactivity timeout fired.
+        std::thread::sleep(Duration::from_secs(2));
+    });
+
+    let request = [0x01, 0x03, 0x00, 0x00, 0x00, 0x02];
+    let mut response = [0u8; 64];
+    let mut parser = FixedLenParser(7);
+
+    let started = Instant::now();
+    let n = transport
+        .transaction_framed(&request, &mut response, &mut parser)
+        .expect("framed transaction failed");
+    let elapsed = started.elapsed();
+
+    assert_eq!(n, 7, "Expected exactly 7 bytes, got {n}");
+    // The bug used to add a full timeout (1s here) of dead time. Allow a
+    // generous CI margin (well under the timeout) to keep the test stable.
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "Transaction took {elapsed:?} — should return immediately after the \
+         frame is complete, not wait for the {timeout:?} inactivity timeout"
+    );
+
+    drop(slave);
+    socat.kill().unwrap();
+    // Don't join responder — it is sleeping so the port stays open.
+    drop(responder);
+}
+
+/// Confirms that the inactivity timeout still fires correctly when a frame
+/// never finishes arriving — i.e. we removed the buggy drain without
+/// removing the legitimate timeout safety net.
+#[test]
+fn transaction_framed_times_out_on_truncated_response() {
+    if !socat_available() {
+        eprintln!("Skipping (socat not available)");
+        return;
+    }
+
+    let (mut socat, port_a, port_b) = spawn_virtual_serial();
+
+    let timeout = Duration::from_millis(150);
+    let config = st_comm_serial::transport::SerialConfig {
+        port: port_a,
+        baud_rate: 115200,
+        timeout,
+        ..Default::default()
+    };
+    let mut transport = st_comm_serial::transport::SerialTransport::new(config);
+    transport.open().unwrap();
+
+    let slave = serialport::new(&port_b, 115200)
+        .timeout(Duration::from_millis(500))
+        .open()
+        .unwrap();
+
+    // Slave sends only 3 bytes, then stays silent — frame is incomplete.
+    let slave_clone = slave.try_clone().unwrap();
+    let responder = std::thread::spawn(move || {
+        let mut port = slave_clone;
+        let mut buf = [0u8; 256];
+        if let Ok(n) = port.read(&mut buf) {
+            if n > 0 {
+                let _ = port.write_all(&[0x01, 0x03, 0x04]); // header only
+                let _ = port.flush();
+            }
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    });
+
+    let request = [0x01, 0x03, 0x00, 0x00, 0x00, 0x02];
+    let mut response = [0u8; 64];
+    let mut parser = FixedLenParser(7);
+
+    let started = Instant::now();
+    let result = transport.transaction_framed(&request, &mut response, &mut parser);
+    let elapsed = started.elapsed();
+
+    assert!(result.is_err(), "Expected timeout error, got {result:?}");
+    let err = result.unwrap_err();
+    assert!(err.contains("timeout"), "Error should mention timeout: {err}");
+    // The error should fire close to the configured timeout — not 10x it.
+    assert!(
+        elapsed < timeout * 3,
+        "Transaction took {elapsed:?}, expected close to {timeout:?}"
+    );
+
+    drop(slave);
+    socat.kill().unwrap();
+    drop(responder);
+}
+
+/// Confirms `receive_exact` does the right thing for fixed-length protocols
+/// and doesn't wait past the requested byte count.
+#[test]
+fn receive_exact_returns_immediately_when_bytes_available() {
+    if !socat_available() {
+        eprintln!("Skipping (socat not available)");
+        return;
+    }
+
+    let (mut socat, port_a, port_b) = spawn_virtual_serial();
+
+    let timeout = Duration::from_millis(1000);
+    let config = st_comm_serial::transport::SerialConfig {
+        port: port_a,
+        baud_rate: 115200,
+        timeout,
+        ..Default::default()
+    };
+    let mut transport = st_comm_serial::transport::SerialTransport::new(config);
+    transport.open().unwrap();
+
+    let mut slave = serialport::new(&port_b, 115200)
+        .timeout(Duration::from_millis(500))
+        .open()
+        .unwrap();
+
+    // Slave dumps 5 bytes, then sits idle.
+    let payload = [0xDE, 0xAD, 0xBE, 0xEF, 0x42];
+    slave.write_all(&payload).unwrap();
+    slave.flush().unwrap();
+
+    let mut buf = [0u8; 16];
+    let started = Instant::now();
+    transport.receive_exact(&mut buf, payload.len()).unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(&buf[..payload.len()], &payload);
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "receive_exact took {elapsed:?} for {} bytes — should be near-instant",
+        payload.len()
+    );
+
     drop(slave);
     socat.kill().unwrap();
 }
@@ -277,7 +481,10 @@ fn serial_link_fb_shared_transport_usable() {
     let mut transport = handle.lock().unwrap();
     let test_data = [0x42, 0x43, 0x44];
     let mut response = [0u8; 16];
-    let n = transport.transaction(&test_data, &mut response).unwrap();
+    let mut parser = FixedLenParser(test_data.len());
+    let n = transport
+        .transaction_framed(&test_data, &mut response, &mut parser)
+        .unwrap();
     assert_eq!(n, 3, "Expected 3 echoed bytes");
     assert_eq!(&response[..3], &test_data, "Echoed data should match");
 

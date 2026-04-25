@@ -488,3 +488,80 @@ fn wrong_slave_id_timeout() {
 
     teardown(socat, stop, thread);
 }
+
+/// Regression test: a healthy RtuClient transaction must NOT block until the
+/// configured serial timeout. The original `transport.receive()` looped
+/// reading until its 256-byte buffer filled, which always ended on a timeout
+/// — adding ~100ms of dead time to every transaction. With `transaction_framed`
+/// driving an `RtuFrameParser`, we should return as soon as the frame is
+/// complete on the wire.
+///
+/// The transport timeout in `setup_test` is 500ms; this test runs five
+/// transactions (one per FC family) and asserts the total elapsed time is
+/// well under a single timeout, never mind five.
+#[test]
+fn full_transaction_does_not_drain_to_timeout() {
+    let Some((socat, _slave, stop, transport, thread)) = setup_test() else { return };
+    let client = RtuClient::new(Arc::clone(&transport));
+
+    let started = std::time::Instant::now();
+    client.read_discrete_inputs(1, 0, 3).expect("FC02");
+    client.read_input_registers(1, 0, 3).expect("FC04");
+    client.read_holding_registers(1, 0, 2).expect("FC03");
+    client.read_coils(1, 0, 3).expect("FC01");
+    client.write_single_register(1, 7, 0xBEEF).expect("FC06");
+    let elapsed = started.elapsed();
+
+    // Five transactions at 9600 baud should each take ~10-30ms (mostly the
+    // 4ms inter-frame gap × 2 plus byte-shift time). The bug used to add
+    // ~500ms (the configured timeout) per transaction → 2.5s total. Allow a
+    // generous bound of 250ms for slow CI machines while still catching any
+    // regression.
+    assert!(
+        elapsed < std::time::Duration::from_millis(250),
+        "Five transactions took {elapsed:?} — would be ≥ 2.5s with the old \
+         timeout-drain bug. Frame parsing regression?"
+    );
+
+    teardown(socat, stop, thread);
+}
+
+/// Verify that the `RtuFrameParser` correctly handles exception responses
+/// end-to-end without timing out. (The slave sends an exception when given
+/// an FC it doesn't recognise — the simulator returns "Illegal function".)
+#[test]
+fn exception_response_round_trip_is_fast() {
+    let Some((socat, _slave, stop, transport, thread)) = setup_test() else { return };
+
+    // Issue a request directly through the transport so we can use a
+    // function code the simulator rejects (FC07 — read exception status,
+    // not implemented in our simulator).
+    let request = {
+        let mut frame = vec![0x01, 0x07];
+        let (lo, hi) = st_comm_modbus::crc::crc16(&frame);
+        frame.push(lo);
+        frame.push(hi);
+        frame
+    };
+    let mut response = [0u8; 256];
+    let mut parser = st_comm_modbus::frame_parser::RtuFrameParser::new();
+
+    let started = std::time::Instant::now();
+    let n = transport
+        .lock()
+        .unwrap()
+        .transaction_framed(&request, &mut response, &mut parser)
+        .expect("transaction_framed");
+    let elapsed = started.elapsed();
+
+    assert_eq!(n, 5, "Exception responses are exactly 5 bytes");
+    assert_eq!(response[0], 0x01, "slave id");
+    assert_eq!(response[1], 0x87, "FC|0x80 for exception");
+    assert_eq!(response[2], 0x01, "Illegal function code");
+    assert!(
+        elapsed < std::time::Duration::from_millis(150),
+        "Exception transaction took {elapsed:?} — should be near-instant"
+    );
+
+    teardown(socat, stop, thread);
+}

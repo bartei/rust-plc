@@ -13,9 +13,11 @@
 pub mod transport;
 pub mod shared;
 pub mod bus;
+pub mod framing;
 mod link_fb;
 
 pub use transport::SerialTransport;
 pub use shared::{TransportMap, new_transport_map};
 pub use link_fb::SerialLinkNativeFb;
 pub use bus::{BusManager, BusDeviceIo};
+pub use framing::{FrameParser, FrameStatus};

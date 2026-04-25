@@ -1,7 +1,7 @@
 [package]
 name = "st-comm-serial"
 description = "RS-485/RS-232 serial link for PLC communication"
-version.workspace = true
+version = "0.3.1"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
