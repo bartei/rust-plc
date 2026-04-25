@@ -206,7 +206,7 @@ Modbus transactions (e.g., one FC0F write for 8 coils).
 - `refresh_rate : TIME` — polling interval (VarInput, defaults to 50 ms when `T#0ms`)
 - `timeout : TIME` — per-transaction response deadline (VarInput, defaults to `DEFAULT_TIMEOUT` = 100 ms when `T#0ms`)
 - `preamble : TIME` — minimum bus-silence enforced *before* each transaction, on top of the protocol-mandatory 3.5-character inter-frame gap (VarInput, defaults to `DEFAULT_PREAMBLE` = 5 ms when `T#0ms`). See the **Preamble** subsection below.
-- Diagnostic fields: `connected`, `error_code`, `io_cycles`, `last_response_ms` (Var)
+- Diagnostic fields: `connected`, `error_code`, `errors_count`, `io_cycles`, `last_response_ms` (Var). `errors_count : UDINT` is a cumulative counter incremented once per poll cycle whose `error_code` was non-zero, useful for spotting transient issues over long-running deployments (it's never reset, so `errors_count / io_cycles` is the lifetime failure rate).
 - All profile I/O fields (Var — readable and writable from ST)
 - Array fields set `dimensions` on `NativeFbField` and expand inline in the memory layout
 
@@ -310,6 +310,7 @@ END_VAR
 VAR
     connected      : BOOL;
     error_code     : INT;
+    errors_count   : UDINT;   (* Cumulative count of cycles with error_code != 0 *)
     io_cycles      : UDINT;
     last_response_ms : REAL;
     (* ... profile fields generated from YAML ... *)

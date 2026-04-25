@@ -280,8 +280,10 @@ END_PROGRAM
     assert_eq!(fb_func.locals.slots[3].name, "timeout");
     assert_eq!(fb_func.locals.slots[4].name, "preamble");
     assert_eq!(fb_func.locals.slots[5].name, "connected");
-    assert_eq!(fb_func.locals.slots[9].name, "AI_0");
-    assert_eq!(fb_func.locals.slots[10].name, "AI_1");
+    assert_eq!(fb_func.locals.slots[6].name, "error_code");
+    assert_eq!(fb_func.locals.slots[7].name, "errors_count");
+    assert_eq!(fb_func.locals.slots[10].name, "AI_0");
+    assert_eq!(fb_func.locals.slots[11].name, "AI_1");
 
     // Run and verify the program doesn't crash (execute is no-op for LayoutOnly)
     let arc_reg = Arc::new(registry);

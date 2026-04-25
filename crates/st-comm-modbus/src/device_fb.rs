@@ -27,9 +27,10 @@ const SLOT_TIMEOUT: usize = 3;
 const SLOT_PREAMBLE: usize = 4;
 const SLOT_CONNECTED: usize = 5;
 const SLOT_ERROR_CODE: usize = 6;
-const SLOT_IO_CYCLES: usize = 7;
-const SLOT_LAST_RESPONSE_MS: usize = 8;
-const PROFILE_FIELD_OFFSET: usize = 9;
+const SLOT_ERRORS_COUNT: usize = 7;
+const SLOT_IO_CYCLES: usize = 8;
+const SLOT_LAST_RESPONSE_MS: usize = 9;
+const PROFILE_FIELD_OFFSET: usize = 10;
 
 // ── Diagnostic error codes exposed via the FB's `error_code` VAR ──────
 // Kept stable so user ST code (and the monitor UI) can compare against
@@ -81,6 +82,10 @@ pub(crate) struct IoState {
     /// Diagnostics
     pub connected: bool,
     pub error_code: i64,
+    /// Cumulative count of poll cycles that ended with `error_code != ERR_OK`
+    /// since the FB instance was created. Never reset; useful for spotting
+    /// transient reliability issues over long uptimes.
+    pub errors_count: u64,
     pub io_cycles: u64,
     pub last_response_ms: f64,
 }
@@ -118,6 +123,7 @@ impl ModbusRtuDeviceNativeFb {
                 write_values: default_values,
                 connected: false,
                 error_code: 0,
+                errors_count: 0,
                 io_cycles: 0,
                 last_response_ms: 0.0,
             })),
@@ -220,6 +226,7 @@ impl NativeFb for ModbusRtuDeviceNativeFb {
             }
             fields[SLOT_CONNECTED] = Value::Bool(state.connected);
             fields[SLOT_ERROR_CODE] = Value::Int(state.error_code);
+            fields[SLOT_ERRORS_COUNT] = Value::UInt(state.errors_count);
             fields[SLOT_IO_CYCLES] = Value::UInt(state.io_cycles);
             fields[SLOT_LAST_RESPONSE_MS] = Value::Real(state.last_response_ms);
         }
@@ -274,6 +281,9 @@ impl BusDeviceIo for ModbusDeviceIo {
             state.connected = cycle_err == ERR_OK;
             state.error_code = cycle_err;
             state.io_cycles += 1;
+            if cycle_err != ERR_OK {
+                state.errors_count = state.errors_count.saturating_add(1);
+            }
             state.last_response_ms = elapsed.as_secs_f64() * 1000.0;
         }
 
@@ -733,8 +743,8 @@ fields:
 
         let layout = build_modbus_layout(&profile);
         assert_eq!(layout.type_name, "TestModbus");
-        // 9 fixed + 2 profile fields
-        assert_eq!(layout.fields.len(), 11);
+        // 10 fixed + 2 profile fields
+        assert_eq!(layout.fields.len(), 12);
         assert_eq!(layout.fields[SLOT_LINK].name, "link");
         assert_eq!(layout.fields[SLOT_SLAVE_ID].name, "slave_id");
         assert_eq!(layout.fields[PROFILE_FIELD_OFFSET].name, "DI_0");
@@ -761,9 +771,10 @@ fields:
         assert_eq!(layout.fields[SLOT_PREAMBLE].name, "preamble");
         assert_eq!(layout.fields[SLOT_CONNECTED].name, "connected");
         assert_eq!(layout.fields[SLOT_ERROR_CODE].name, "error_code");
+        assert_eq!(layout.fields[SLOT_ERRORS_COUNT].name, "errors_count");
         assert_eq!(layout.fields[SLOT_IO_CYCLES].name, "io_cycles");
         assert_eq!(layout.fields[SLOT_LAST_RESPONSE_MS].name, "last_response_ms");
-        assert_eq!(PROFILE_FIELD_OFFSET, 9);
+        assert_eq!(PROFILE_FIELD_OFFSET, 10);
         assert_eq!(layout.fields[PROFILE_FIELD_OFFSET].name, "F0");
     }
 
