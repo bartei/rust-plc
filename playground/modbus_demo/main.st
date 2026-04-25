@@ -45,26 +45,32 @@ END_VAR
     input(
         link := serial.port,
         slave_id := 20,
-        refresh_rate := T#50ms
+        refresh_rate := T#30ms,
+        timeout := T#10ms,
+        preamble := T#5ms
     );
 
     output(
         link := serial.port,
         slave_id := 21,
-        refresh_rate := T#50ms
+        refresh_rate := T#30ms,
+        timeout := T#10ms,
+        preamble := T#5ms
     );
 
     digital_io(
         link := serial.port,
         slave_id := 22,
-        refresh_rate := T#50ms
+        refresh_rate := T#30ms,
+        timeout := T#10ms,
+        preamble := T#5ms
     );
 
     FOR i := 0 TO 7 DO
         digital_io.DO[i] := i = (digital_io.io_cycles MOD 8);
     END_FOR;
 
-    output.AO2 := input.AI1 * 10;
+    // output.AO2 := input.AI1;
     SupplyVoltage := input.AI1;
     SupplyVoltage2 := input.AI2;
 

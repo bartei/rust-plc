@@ -185,6 +185,14 @@ fn run_check(path: Option<&str>, args: &[String]) {
 }
 
 fn run_program_cmd(args: &[String]) {
+    // Honour RUST_LOG so users can debug runtime issues (modbus traces, etc.)
+    // without recompiling. Quietly succeeds if a subscriber is already set
+    // (e.g. test harness).
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .try_init();
+
     // Parse flags first
     let mut cycles: u64 = 1;
     let mut path_arg: Option<&str> = None;

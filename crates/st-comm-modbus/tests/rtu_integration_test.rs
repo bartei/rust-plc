@@ -544,13 +544,19 @@ fn exception_response_round_trip_is_fast() {
         frame
     };
     let mut response = [0u8; 256];
-    let mut parser = st_comm_modbus::frame_parser::RtuFrameParser::new();
+    let mut parser = st_comm_modbus::frame_parser::RtuFrameParser::for_request(0x01, 0x07);
 
     let started = std::time::Instant::now();
     let n = transport
         .lock()
         .unwrap()
-        .transaction_framed(&request, &mut response, &mut parser)
+        .transaction_framed(
+            &request,
+            &mut response,
+            &mut parser,
+            std::time::Duration::from_millis(500),
+            std::time::Duration::ZERO,
+        )
         .expect("transaction_framed");
     let elapsed = started.elapsed();
 

@@ -200,13 +200,17 @@ Modbus transactions (e.g., one FC0F write for 8 coils).
 
 ### Layout Conversion
 
-`DeviceProfile::to_native_fb_layout()` converts a profile into a `NativeFbLayout`:
-- `link : INT` — link instance handle (VarInput)
-- `slave_id : INT` — Modbus slave address (VarInput)
-- `refresh_rate : TIME` — polling interval (VarInput)
+`DeviceProfile::to_modbus_rtu_device_layout()` converts a profile into a `NativeFbLayout`:
+- `link : STRING` — port path from a `SerialLink` instance (VarInput, e.g. `serial.port`)
+- `slave_id : INT` — Modbus slave address 1–247 (VarInput)
+- `refresh_rate : TIME` — polling interval (VarInput, defaults to 50 ms when `T#0ms`)
+- `timeout : TIME` — per-transaction response deadline (VarInput, defaults to `DEFAULT_TIMEOUT` = 100 ms when `T#0ms`)
+- `preamble : TIME` — minimum bus-silence enforced *before* each transaction, on top of the protocol-mandatory 3.5-character inter-frame gap (VarInput, defaults to `DEFAULT_PREAMBLE` = 5 ms when `T#0ms`). See the **Preamble** subsection below.
 - Diagnostic fields: `connected`, `error_code`, `io_cycles`, `last_response_ms` (Var)
 - All profile I/O fields (Var — readable and writable from ST)
 - Array fields set `dimensions` on `NativeFbField` and expand inline in the memory layout
+
+The Modbus TCP layout (`to_modbus_tcp_device_layout()`) is parallel except it owns its connection (`host`, `port`, `unit_id` instead of `link`).
 
 ### Field Mapping
 
@@ -297,9 +301,11 @@ handles any Modbus RTU device — the profile defines which registers to read/wr
 ```
 FUNCTION_BLOCK ModbusRtuDevice
 VAR_INPUT
-    link         : INT;     (* SerialLink handle *)
+    link         : STRING;  (* Port path from a SerialLink (e.g. serial.port) *)
     slave_id     : INT;     (* Modbus slave address 1-247 *)
-    refresh_rate : TIME;    (* Polling interval *)
+    refresh_rate : TIME;    (* Polling interval; T#0ms → 50 ms default *)
+    timeout      : TIME;    (* Per-transaction response deadline; T#0ms → 100 ms default *)
+    preamble     : TIME;    (* Min bus-silence before each tx (over the 3.5-char gap); T#0ms → 5 ms default *)
 END_VAR
 VAR
     connected      : BOOL;
@@ -337,19 +343,81 @@ separate transactions.
 
 ### Error Handling
 
-| Error | Behavior |
-|-------|----------|
-| No response (timeout) | `connected := FALSE`, `error_code := 1`, retry next cycle |
-| CRC mismatch | `error_code := 2`, discard frame, retry |
-| Modbus exception response | `error_code := exception_code + 100`, log details |
-| Serial port error | `connected := FALSE`, `error_code := 3`, link reconnects |
+The `error_code` VAR exposes a stable diagnostic code so user ST (and the
+monitor UI) can distinguish transient comms losses from configuration or
+protocol problems. The poll cycle reports the *last* non-zero code observed
+across all transactions in the cycle (write-pass codes win on tie since the
+write pass runs after the read pass).
+
+| Code | Constant | Meaning |
+|---|---|---|
+| 0 | `ERR_OK` | All transactions in the cycle succeeded. |
+| 10 | `ERR_TIMEOUT` | Transport deadline elapsed before the response was complete (no/insufficient bytes). |
+| 11 | `ERR_CRC` | Response received but CRC didn't match. |
+| 12 | `ERR_SLAVE_MISMATCH` | Response slave_id didn't match the request — stale frame on the bus, or echo. |
+| 13 | `ERR_FC_MISMATCH` | Response function code didn't match the request, or unknown FC. |
+| 14 | `ERR_MODBUS_EXCEPTION` | Slave responded with `FC | 0x80` — the slave is reachable but rejected the request. |
+| 15 | `ERR_OTHER` | Any other transport / protocol error (short response, OS I/O error, buffer-too-small, etc.). |
+
+These constants are exported from `st_comm_modbus::device_fb`.
+
+### Transaction State Hygiene
+
+Each Modbus RTU transaction goes through `SerialTransport::transaction_framed`,
+which enforces the following invariants in order so that real-bus reliability
+issues (slow slaves, stale frames, RS-485 settling, cheap-firmware quirks)
+cannot poison subsequent transactions:
+
+1. **Per-transaction OS read timeout.** `port.set_timeout` is reconciled against
+   the caller's `timeout` so a short transaction-level deadline is never
+   overshot by a longer port-level OS read timeout left over from earlier.
+2. **Preamble wait.** If the caller specifies a non-zero `preamble`, the
+   call sleeps until at least that long has elapsed since `last_frame_time`.
+   This is on top of, not instead of, the protocol-mandatory 3.5-character
+   inter-frame gap that `send()` always enforces.
+3. **Input + output buffer purge.** The OS's input *and* output buffers are
+   cleared with `ClearBuffer::All` immediately before the request is written.
+   Any bytes pending in the input buffer (a previous slave's late response
+   that arrived after our timeout, an echo from an RS-485 adapter that
+   loops back our TX, etc.) are first read into a temporary buffer and
+   hex-logged at debug level so the discard is observable, *then* cleared.
+4. **Slave-id + FC validation in the parser.** `RtuFrameParser::for_request(slave_id, fc)`
+   makes the parser reject any response whose first two bytes don't match
+   the request, returning `FrameStatus::Invalid` *before* the CRC step
+   would otherwise quietly accept a spec-valid frame addressed to a
+   different slave or carrying a different FC. The exception variant
+   (`fc | 0x80`) is allowed.
 
 ### Timing Constraints
 
 Modbus RTU requires 3.5-character silent intervals between frames. At 9600 baud:
 - 1 character = 11 bits (start + 8 data + parity + stop) = ~1.15ms
 - 3.5 characters = ~4ms minimum inter-frame gap
-- The serial link's `execute()` enforces this timing
+- The serial link's `send()` enforces this minimum based on `last_frame_time`.
+
+### Preamble — Why the Default Is Non-Zero
+
+The 3.5-character gap is the protocol *minimum*, not a guarantee that a
+real slave's firmware is ready to parse the next frame. On a multi-drop
+bus with cheap RS-485 modules (e.g. Waveshare), we observed **silent
+request-drop rates of 12–20 %** when relying on the protocol minimum
+alone — the slave's UART/firmware was still in some post-response state
+and discarded our frame without any indication. Symptoms looked exactly
+like a flaky bus: `ERR_TIMEOUT` with `partial_resp=<empty>` (zero bytes
+back) at random intervals, both with 10 ms and 100 ms timeouts. Reads
+suffered more than writes because the slave's read-handler does more
+work (ADC sampling, GPIO scanning) and stays unready longer.
+
+A 5 ms preamble brought the failure rate to 0 % across all FCs and all
+slaves in the playground; 3 ms was *not* sufficient on the same
+hardware (failures persisted), so we use **5 ms as the default**.
+Strict spec-compliant slaves can override with `preamble := T#0ms`
+to recover the time, and longer values can be set per-device for
+modules with even worse settling behaviour.
+
+The constants `DEFAULT_TIMEOUT` and `DEFAULT_PREAMBLE` are exported from
+`st_comm_modbus::rtu_client` so users (and the runtime) can refer to
+them by name.
 
 ---
 

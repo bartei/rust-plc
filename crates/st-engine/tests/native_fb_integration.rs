@@ -277,9 +277,11 @@ END_PROGRAM
         "Compiled slot 0 must be 'link'.");
     assert_eq!(fb_func.locals.slots[1].name, "slave_id");
     assert_eq!(fb_func.locals.slots[2].name, "refresh_rate");
-    assert_eq!(fb_func.locals.slots[3].name, "connected");
-    assert_eq!(fb_func.locals.slots[7].name, "AI_0");
-    assert_eq!(fb_func.locals.slots[8].name, "AI_1");
+    assert_eq!(fb_func.locals.slots[3].name, "timeout");
+    assert_eq!(fb_func.locals.slots[4].name, "preamble");
+    assert_eq!(fb_func.locals.slots[5].name, "connected");
+    assert_eq!(fb_func.locals.slots[9].name, "AI_0");
+    assert_eq!(fb_func.locals.slots[10].name, "AI_1");
 
     // Run and verify the program doesn't crash (execute is no-op for LayoutOnly)
     let arc_reg = Arc::new(registry);

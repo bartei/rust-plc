@@ -2,4 +2,4 @@ name: ModbusDemo
 version: "1.0.0"
 entryPoint: Main
 engine:
-  cycle_time: 50ms
+  cycle_time: 10ms

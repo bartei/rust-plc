@@ -206,6 +206,8 @@ impl DeviceProfile {
             NativeFbField { name: "link".into(), data_type: FieldDataType::String, var_kind: NativeFbVarKind::VarInput, dimensions: None },
             NativeFbField { name: "slave_id".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::VarInput, dimensions: None },
             NativeFbField { name: "refresh_rate".into(), data_type: FieldDataType::Time, var_kind: NativeFbVarKind::VarInput, dimensions: None },
+            NativeFbField { name: "timeout".into(), data_type: FieldDataType::Time, var_kind: NativeFbVarKind::VarInput, dimensions: None },
+            NativeFbField { name: "preamble".into(), data_type: FieldDataType::Time, var_kind: NativeFbVarKind::VarInput, dimensions: None },
             // -- VAR: diagnostic fields --
             NativeFbField { name: "connected".into(), data_type: FieldDataType::Bool, var_kind: NativeFbVarKind::Var, dimensions: None },
             NativeFbField { name: "error_code".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::Var, dimensions: None },
@@ -538,6 +540,49 @@ fields:
 
         assert_eq!(mem.slots[2].name, "value");
         assert_eq!(mem.slots[2].ty, st_ir::VarType::Real);
+    }
+
+    #[test]
+    fn modbus_rtu_device_layout_exposes_timeout_and_preamble() {
+        // The runtime AND the LSP/checker both consume this layout, so the
+        // field set must be the source of truth for what the user can write
+        // in ST. If a new VAR_INPUT is added it must show up here, in this
+        // exact order, so the slot constants in `st-comm-modbus` keep matching.
+        let profile = crate::profile::DeviceProfile::from_yaml(
+            r#"
+name: TestRtu
+protocol: modbus-rtu
+fields:
+  - { name: F0, type: INT, direction: input, register: { address: 0, kind: input_register } }
+"#,
+        )
+        .unwrap();
+        let layout = profile.to_modbus_rtu_device_layout();
+
+        let names: Vec<&str> = layout.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            &names[..9],
+            &[
+                "link",
+                "slave_id",
+                "refresh_rate",
+                "timeout",
+                "preamble",
+                "connected",
+                "error_code",
+                "io_cycles",
+                "last_response_ms",
+            ],
+            "VAR_INPUT/Var fixed-slot order changed — update st-comm-modbus slot constants and docs",
+        );
+        assert_eq!(layout.fields[9].name, "F0");
+
+        // VAR_INPUT vs Var classification must match what the LSP completion
+        // and the runtime both assume.
+        assert_eq!(layout.fields[3].var_kind, NativeFbVarKind::VarInput); // timeout
+        assert_eq!(layout.fields[4].var_kind, NativeFbVarKind::VarInput); // preamble
+        assert_eq!(layout.fields[3].data_type, FieldDataType::Time);
+        assert_eq!(layout.fields[4].data_type, FieldDataType::Time);
     }
 
     #[test]

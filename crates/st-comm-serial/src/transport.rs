@@ -20,7 +20,7 @@
 //!   timeout drain.
 
 use crate::framing::{FrameParser, FrameStatus};
-use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
+use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits};
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
@@ -81,18 +81,23 @@ pub struct SerialTransport {
     inter_frame_us: u64,
     /// Whether RS-485 mode has been enabled via ioctl.
     rs485_enabled: bool,
+    /// Cached current OS-level read timeout. Tracks `port.set_timeout` so
+    /// per-transaction timeout adjustments are syscall-free when unchanged.
+    current_read_timeout: Duration,
 }
 
 impl SerialTransport {
     /// Create a new transport (not yet connected).
     pub fn new(config: SerialConfig) -> Self {
         let inter_frame_us = compute_inter_frame_us(config.baud_rate, config.data_bits, config.stop_bits);
+        let current_read_timeout = config.timeout;
         Self {
             port: None,
             config,
             last_frame_time: Instant::now(),
             inter_frame_us,
             rs485_enabled: false,
+            current_read_timeout,
         }
     }
 
@@ -132,6 +137,7 @@ impl SerialTransport {
             .map_err(|e| format!("Cannot open {}: {e}", self.config.port))?;
 
         self.port = Some(port);
+        self.current_read_timeout = self.config.timeout;
         self.last_frame_time = Instant::now();
 
         // Try to enable RS-485 mode on Linux (non-fatal if unsupported)
@@ -231,7 +237,71 @@ impl SerialTransport {
         Ok(())
     }
 
+    /// Discard any bytes currently sitting in the OS input or output buffer.
+    ///
+    /// Called at the start of every framed transaction to prevent stale
+    /// bytes from polluting the next transaction:
+    ///
+    /// - **input**: a previous slave's late response that arrived after the
+    ///   master timed out.
+    /// - **output**: bytes left over from a write that errored mid-flight
+    ///   before reaching the wire — without flushing them, they would be
+    ///   prepended to the next request.
+    ///
+    /// When the input buffer is non-empty, the bytes are read into a
+    /// temporary buffer and hex-logged at debug level before the clear,
+    /// so we can see exactly what we're throwing away. (This is the
+    /// usual diagnostic for "the slave's response landed in the wrong
+    /// transaction" or "an echoing RS-485 adapter is feeding us our own
+    /// TX bytes" — both invisible without a log of the discarded bytes.)
+    pub fn clear_input_buffer(&mut self) -> Result<(), String> {
+        let port = self.port.as_mut()
+            .ok_or_else(|| "Serial port not open".to_string())?;
+        let pending = port.bytes_to_read().unwrap_or(0) as usize;
+        if pending > 0 && tracing::enabled!(tracing::Level::DEBUG) {
+            let mut peek = vec![0u8; pending];
+            match port.read(&mut peek) {
+                Ok(n) if n > 0 => tracing::debug!(
+                    "clear_input_buffer discarding {n} byte(s): {}",
+                    hex_dump(&peek[..n])
+                ),
+                _ => {}
+            }
+        }
+        port.clear(ClearBuffer::All)
+            .map_err(|e| format!("Serial clear-buffer error: {e}"))
+    }
+
+    /// Update the OS-level read timeout if it differs from the cached one.
+    ///
+    /// `port.set_timeout` is one syscall; the cache lets back-to-back
+    /// transactions on the same device skip it.
+    fn ensure_read_timeout(&mut self, timeout: Duration) -> Result<(), String> {
+        if timeout == self.current_read_timeout {
+            return Ok(());
+        }
+        let port = self.port.as_mut()
+            .ok_or_else(|| "Serial port not open".to_string())?;
+        port.set_timeout(timeout)
+            .map_err(|e| format!("Serial set-timeout error: {e}"))?;
+        self.current_read_timeout = timeout;
+        Ok(())
+    }
+
     /// Send a request and receive a response framed by `parser`.
+    ///
+    /// `timeout` is the maximum time allowed for the entire response to
+    /// arrive after the request is on the wire. The OS-level read timeout
+    /// is updated to match, so a short transaction timeout will not be
+    /// stretched by a longer port-level timeout left over from earlier.
+    ///
+    /// `preamble` is the minimum bus-silence the caller wants since the
+    /// last frame on the wire, before the request is transmitted. The
+    /// protocol's mandatory 3.5-character inter-frame gap is always
+    /// enforced; `preamble` lets a slow slave demand more (e.g. some
+    /// cheap RS-485 modules need several ms of quiet before they will
+    /// reliably parse the next request). Pass `Duration::ZERO` when
+    /// the protocol minimum is enough.
     ///
     /// The parser is consulted after every successful read; once it reports
     /// [`FrameStatus::Complete`] the call returns immediately, without any
@@ -239,16 +309,39 @@ impl SerialTransport {
     /// first read so that it can tell us how many bytes to wait for up
     /// front.
     ///
+    /// The OS input buffer is cleared after the preamble wait and before
+    /// the request is sent, so any late bytes left over from a previous
+    /// transaction (or that arrived during the wait) cannot pollute this
+    /// one.
+    ///
     /// Returns the length of the parsed frame (`buf[..len]`).
     pub fn transaction_framed<P: FrameParser>(
         &mut self,
         request: &[u8],
         response_buf: &mut [u8],
         parser: &mut P,
+        timeout: Duration,
+        preamble: Duration,
     ) -> Result<usize, String> {
+        self.ensure_read_timeout(timeout)?;
+
+        // Honour the caller's minimum-silence requirement on top of the
+        // mandatory inter-frame gap that `send()` already enforces.
+        if !preamble.is_zero() {
+            let elapsed = self.last_frame_time.elapsed();
+            if elapsed < preamble {
+                std::thread::sleep(preamble - elapsed);
+            }
+        }
+
+        self.clear_input_buffer()?;
+        let t_send_start = Instant::now();
         self.send(request)?;
-        let deadline = Instant::now() + self.config.timeout;
+        let t_send_done = Instant::now();
+        let deadline = t_send_done + timeout;
         let mut total = 0;
+        let mut empty_reads = 0u32;
+        let mut data_reads = 0u32;
 
         loop {
             match parser.parse(&response_buf[..total]) {
@@ -258,9 +351,25 @@ impl SerialTransport {
                             "FrameParser returned Complete({n}) but only {total} bytes were read"
                         ));
                     }
+                    tracing::trace!(
+                        "tx ok req={} resp={} send_us={} recv_us={} reads={}/{}",
+                        hex_dump(request),
+                        hex_dump(&response_buf[..n]),
+                        (t_send_done - t_send_start).as_micros(),
+                        t_send_done.elapsed().as_micros(),
+                        data_reads,
+                        empty_reads,
+                    );
                     return Ok(n);
                 }
-                FrameStatus::Invalid(msg) => return Err(msg),
+                FrameStatus::Invalid(msg) => {
+                    tracing::debug!(
+                        "tx invalid req={} partial_resp={} reason={msg}",
+                        hex_dump(request),
+                        hex_dump(&response_buf[..total]),
+                    );
+                    return Err(msg);
+                }
                 FrameStatus::Need(min_total) => {
                     if min_total > response_buf.len() {
                         return Err(format!(
@@ -276,18 +385,30 @@ impl SerialTransport {
                     }
                     while total < min_total {
                         if Instant::now() >= deadline {
+                            tracing::debug!(
+                                "tx timeout req={} partial_resp={} need={min_total} got={total} \
+                                 send_ms={:.2} recv_ms={:.2} reads={}/{} timeout={timeout:?}",
+                                hex_dump(request),
+                                hex_dump(&response_buf[..total]),
+                                (t_send_done - t_send_start).as_secs_f64() * 1000.0,
+                                t_send_done.elapsed().as_secs_f64() * 1000.0,
+                                data_reads,
+                                empty_reads,
+                            );
                             return Err(format!(
                                 "Receive timeout: got {total} of expected {min_total}+ bytes \
-                                 within {:?}",
-                                self.config.timeout
+                                 within {timeout:?}"
                             ));
                         }
                         // Read into the rest of the buffer, not just up to min_total —
                         // this lets a single OS read pull more than the parser's current
                         // milestone when data is already queued, avoiding extra syscalls.
                         match self.receive_some(&mut response_buf[total..])? {
-                            0 => continue,
-                            n => total += n,
+                            0 => empty_reads += 1,
+                            n => {
+                                total += n;
+                                data_reads += 1;
+                            }
                         }
                     }
                 }
@@ -325,6 +446,22 @@ impl SerialTransport {
             tracing::debug!("RS-485 ioctl not available on this platform");
         }
     }
+}
+
+/// Format a byte slice as space-separated uppercase hex (`01 02 0A FF`).
+/// Returns `<empty>` for an empty slice so log lines stay self-explanatory.
+fn hex_dump(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return "<empty>".to_string();
+    }
+    let mut out = String::with_capacity(bytes.len() * 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(&format!("{b:02X}"));
+    }
+    out
 }
 
 /// Compute the minimum inter-frame gap in microseconds.
