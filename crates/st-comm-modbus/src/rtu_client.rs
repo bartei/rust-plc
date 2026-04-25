@@ -1,6 +1,7 @@
 //! Modbus RTU client — sends requests and parses responses via SerialTransport.
 
 use crate::frame::{self, FunctionCode};
+use crate::frame_parser::RtuFrameParser;
 use st_comm_serial::transport::SerialTransport;
 use std::sync::{Arc, Mutex};
 
@@ -83,15 +84,18 @@ impl RtuClient {
     }
 
     /// Low-level: send request, receive response, return raw frame.
+    ///
+    /// Uses [`SerialTransport::transaction_framed`] with [`RtuFrameParser`]
+    /// so the call returns as soon as the complete Modbus frame has arrived
+    /// — no inactivity-timeout drain at the tail of every transaction.
     fn transact(&self, request: &[u8]) -> Result<Vec<u8>, String> {
         let mut transport = self.transport.lock()
             .map_err(|e| format!("Transport lock poisoned: {e}"))?;
 
+        // 256 bytes is the maximum legal Modbus RTU PDU including CRC.
         let mut response_buf = [0u8; 256];
-        let n = transport.transaction(request, &mut response_buf)?;
-        if n == 0 {
-            return Err("No response (timeout)".into());
-        }
+        let mut parser = RtuFrameParser::new();
+        let n = transport.transaction_framed(request, &mut response_buf, &mut parser)?;
         Ok(response_buf[..n].to_vec())
     }
 }

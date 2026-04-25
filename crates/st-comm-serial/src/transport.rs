@@ -2,7 +2,24 @@
 //!
 //! Manages the OS serial port resource, provides send/receive primitives,
 //! and enforces RS-485 bus timing (3.5-character inter-frame gap).
+//!
+//! ## Receive primitives
+//!
+//! Three primitives are exposed, each with strict semantics so that
+//! protocols can build on them without inheriting an inactivity-timeout
+//! penalty:
+//!
+//! - [`SerialTransport::receive_some`] — single OS read; returns whatever
+//!   bytes are immediately available (or `Ok(0)` if the OS read times out).
+//!   Useful when a protocol wants to drive its own deadline loop.
+//! - [`SerialTransport::receive_exact`] — read exactly `len` bytes within the
+//!   configured per-transaction timeout, or fail.
+//! - [`SerialTransport::transaction_framed`] — generic send-then-receive
+//!   driven by a [`FrameParser`](crate::framing::FrameParser); returns as
+//!   soon as the parser reports the frame complete, with no trailing
+//!   timeout drain.
 
+use crate::framing::{FrameParser, FrameStatus};
 use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
@@ -156,33 +173,126 @@ impl SerialTransport {
         Ok(())
     }
 
-    /// Receive bytes from the bus. Reads until `expected_len` bytes or timeout.
-    pub fn receive(&mut self, buf: &mut [u8]) -> Result<usize, String> {
+    /// Single-shot read from the OS serial buffer.
+    ///
+    /// Performs exactly one `read()` syscall. Returns the number of bytes
+    /// read. Returns `Ok(0)` if the OS read timed out before any bytes were
+    /// available — callers driving their own deadline can re-check it and
+    /// loop, while callers that simply want "anything available right now"
+    /// can treat 0 as "nothing to do".
+    ///
+    /// Does **not** loop until the buffer fills. Looping until full would
+    /// always end with a timeout-fired read (since we have no protocol
+    /// knowledge of where the frame boundary is) and add a full timeout's
+    /// worth of dead time to every transaction.
+    pub fn receive_some(&mut self, buf: &mut [u8]) -> Result<usize, String> {
         let port = self.port.as_mut()
             .ok_or_else(|| "Serial port not open".to_string())?;
 
-        let mut total = 0;
-        while total < buf.len() {
-            match port.read(&mut buf[total..]) {
-                Ok(0) => break, // EOF
-                Ok(n) => total += n,
-                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => break,
-                Err(e) => return Err(format!("Serial read error: {e}")),
+        match port.read(buf) {
+            Ok(n) => {
+                if n > 0 {
+                    self.last_frame_time = Instant::now();
+                }
+                Ok(n)
             }
+            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => Ok(0),
+            Err(e) => Err(format!("Serial read error: {e}")),
         }
-
-        if total > 0 {
-            self.last_frame_time = Instant::now();
-        }
-        Ok(total)
     }
 
-    /// Send a request and read the response (typical Modbus transaction).
-    /// Enforces inter-frame timing, sends the request, then reads up to
-    /// `max_response_len` bytes with the configured timeout.
-    pub fn transaction(&mut self, request: &[u8], response_buf: &mut [u8]) -> Result<usize, String> {
+    /// Read exactly `len` bytes into the start of `buf` within the
+    /// configured timeout.
+    ///
+    /// Useful for protocols (or sub-frames within a protocol) where the
+    /// expected length is known ahead of time. Fails if the deadline
+    /// elapses before `len` bytes have been received.
+    pub fn receive_exact(&mut self, buf: &mut [u8], len: usize) -> Result<(), String> {
+        if len > buf.len() {
+            return Err(format!(
+                "Buffer too small for receive_exact: need {len}, have {}",
+                buf.len()
+            ));
+        }
+        let deadline = Instant::now() + self.config.timeout;
+        let mut total = 0;
+        while total < len {
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "Receive timeout: got {total}/{len} bytes within {:?}",
+                    self.config.timeout
+                ));
+            }
+            match self.receive_some(&mut buf[total..len])? {
+                0 => continue, // OS read timed out with nothing available; check deadline
+                n => total += n,
+            }
+        }
+        Ok(())
+    }
+
+    /// Send a request and receive a response framed by `parser`.
+    ///
+    /// The parser is consulted after every successful read; once it reports
+    /// [`FrameStatus::Complete`] the call returns immediately, without any
+    /// inactivity-timeout drain. The parser is also consulted before the
+    /// first read so that it can tell us how many bytes to wait for up
+    /// front.
+    ///
+    /// Returns the length of the parsed frame (`buf[..len]`).
+    pub fn transaction_framed<P: FrameParser>(
+        &mut self,
+        request: &[u8],
+        response_buf: &mut [u8],
+        parser: &mut P,
+    ) -> Result<usize, String> {
         self.send(request)?;
-        self.receive(response_buf)
+        let deadline = Instant::now() + self.config.timeout;
+        let mut total = 0;
+
+        loop {
+            match parser.parse(&response_buf[..total]) {
+                FrameStatus::Complete(n) => {
+                    if n > total {
+                        return Err(format!(
+                            "FrameParser returned Complete({n}) but only {total} bytes were read"
+                        ));
+                    }
+                    return Ok(n);
+                }
+                FrameStatus::Invalid(msg) => return Err(msg),
+                FrameStatus::Need(min_total) => {
+                    if min_total > response_buf.len() {
+                        return Err(format!(
+                            "Frame requires {min_total} bytes, response buffer is {} bytes",
+                            response_buf.len()
+                        ));
+                    }
+                    if min_total <= total {
+                        return Err(format!(
+                            "FrameParser asked for Need({min_total}) but already have {total} bytes \
+                             — parser must request strictly more than current length"
+                        ));
+                    }
+                    while total < min_total {
+                        if Instant::now() >= deadline {
+                            return Err(format!(
+                                "Receive timeout: got {total} of expected {min_total}+ bytes \
+                                 within {:?}",
+                                self.config.timeout
+                            ));
+                        }
+                        // Read into the rest of the buffer, not just up to min_total —
+                        // this lets a single OS read pull more than the parser's current
+                        // milestone when data is already queued, avoiding extra syscalls.
+                        match self.receive_some(&mut response_buf[total..])? {
+                            0 => continue,
+                            n => total += n,
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Wait until the inter-frame gap has elapsed since the last frame.
@@ -286,5 +396,21 @@ mod tests {
     fn transport_starts_disconnected() {
         let t = SerialTransport::new(SerialConfig::default());
         assert!(!t.is_open());
+    }
+
+    #[test]
+    fn receive_some_fails_when_not_open() {
+        let mut t = SerialTransport::new(SerialConfig::default());
+        let mut buf = [0u8; 8];
+        let err = t.receive_some(&mut buf).unwrap_err();
+        assert!(err.contains("not open"));
+    }
+
+    #[test]
+    fn receive_exact_rejects_oversized_len() {
+        let mut t = SerialTransport::new(SerialConfig::default());
+        let mut buf = [0u8; 4];
+        let err = t.receive_exact(&mut buf, 8).unwrap_err();
+        assert!(err.contains("Buffer too small"), "Got: {err}");
     }
 }

@@ -6,5 +6,6 @@
 
 pub mod crc;
 pub mod frame;
+pub mod frame_parser;
 pub mod rtu_client;
 pub mod device_fb;
