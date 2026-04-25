@@ -153,6 +153,7 @@
 - [x] Per-device `timeout` VAR_INPUT — overrides `DEFAULT_TIMEOUT` (100 ms)
 - [x] Per-device `preamble` VAR_INPUT — minimum bus-silence before each tx, on top of the 3.5-char gap (default 5 ms; eliminates silent request-drops with cheap RS-485 slaves)
 - [x] Diagnostic `error_code` split into `ERR_TIMEOUT` (10), `ERR_CRC` (11), `ERR_SLAVE_MISMATCH` (12), `ERR_FC_MISMATCH` (13), `ERR_MODBUS_EXCEPTION` (14), `ERR_OTHER` (15) — exposed via `st_comm_modbus::device_fb`
+- [x] Cumulative `errors_count : UDINT` Var — increments once per poll cycle when `error_code != 0`. `saturating_add` so it freezes at `u64::MAX` instead of wrapping. Useful for long-running deployments where transient issues would otherwise be invisible by the time the operator notices.
 - [x] Slave-id + FC validation in `RtuFrameParser::for_request` — rejects stale frames from other slaves (or our own echo) before they corrupt the response
 - [x] OS input + output buffer purge (`ClearBuffer::All`) at the start of every `transaction_framed`, with hex-logged discard so flushed bytes are observable
 - [x] Per-transaction OS read timeout (`port.set_timeout`) reconciled with the caller's deadline so short transaction timeouts aren't stretched

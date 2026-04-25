@@ -211,6 +211,7 @@ impl DeviceProfile {
             // -- VAR: diagnostic fields --
             NativeFbField { name: "connected".into(), data_type: FieldDataType::Bool, var_kind: NativeFbVarKind::Var, dimensions: None },
             NativeFbField { name: "error_code".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::Var, dimensions: None },
+            NativeFbField { name: "errors_count".into(), data_type: FieldDataType::Udint, var_kind: NativeFbVarKind::Var, dimensions: None },
             NativeFbField { name: "io_cycles".into(), data_type: FieldDataType::Udint, var_kind: NativeFbVarKind::Var, dimensions: None },
             NativeFbField { name: "last_response_ms".into(), data_type: FieldDataType::Real, var_kind: NativeFbVarKind::Var, dimensions: None },
         ];
@@ -561,7 +562,7 @@ fields:
 
         let names: Vec<&str> = layout.fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(
-            &names[..9],
+            &names[..10],
             &[
                 "link",
                 "slave_id",
@@ -570,12 +571,13 @@ fields:
                 "preamble",
                 "connected",
                 "error_code",
+                "errors_count",
                 "io_cycles",
                 "last_response_ms",
             ],
             "VAR_INPUT/Var fixed-slot order changed — update st-comm-modbus slot constants and docs",
         );
-        assert_eq!(layout.fields[9].name, "F0");
+        assert_eq!(layout.fields[10].name, "F0");
 
         // VAR_INPUT vs Var classification must match what the LSP completion
         // and the runtime both assume.
@@ -583,6 +585,9 @@ fields:
         assert_eq!(layout.fields[4].var_kind, NativeFbVarKind::VarInput); // preamble
         assert_eq!(layout.fields[3].data_type, FieldDataType::Time);
         assert_eq!(layout.fields[4].data_type, FieldDataType::Time);
+        // errors_count must be UDINT (cumulative counter, never decremented).
+        assert_eq!(layout.fields[7].var_kind, NativeFbVarKind::Var);
+        assert_eq!(layout.fields[7].data_type, FieldDataType::Udint);
     }
 
     #[test]
