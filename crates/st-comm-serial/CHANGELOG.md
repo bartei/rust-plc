@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/bartei/rust-plc/releases/tag/st-comm-serial-v0.3.1) - 2026-04-27
+
+### Added
+
+- *(comm-modbus)* per-device timeout/preamble, error-code split, RTU reliability hardening
+- array fields in device profiles with fb.field[i] access
+- two-layer comm architecture with non-blocking async I/O
+- wire Modbus RTU into NativeFb registry for ST-level usage
+- RS-485/RS-232 serial link crate with virtual serial integration tests
+
+### Other
+
+- *(comm-serial)* protocol-agnostic framed transactions, fix RTU timeout-drain
+- release v0.3.2
+- release v0.3.1
+- release v0.1.3
+- release v0.1.2
+
 ## [0.3.2](https://github.com/bartei/rust-plc/compare/st-comm-serial-v0.3.1...st-comm-serial-v0.3.2) - 2026-04-24
 
 ### Added
