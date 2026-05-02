@@ -175,14 +175,30 @@ impl Document {
                             if let Ok(sources) =
                                 st_syntax::project::load_project_sources(&project)
                             {
+                                // Order matters: `resolve_cross_file_location`
+                                // walks `project_files` in order, computing each
+                                // file's offset in the virtual concatenated
+                                // buffer. The buffer layout is
+                                //   stdlib + project_sources + current_source
+                                // where `project_sources` excludes the current
+                                // file. So `project_files` MUST be ordered the
+                                // same way (siblings first, current file last)
+                                // — otherwise a symbol that lives in the first
+                                // sibling's slice gets reported with the
+                                // current file's URI, which is what the
+                                // cross-file goto-definition test caught.
+                                let mut current_entry: Option<(String, String)> = None;
                                 for (path, content) in sources {
                                     let path_str = path.to_string_lossy().to_string();
-                                    project_files.push((path_str, content.clone()));
-                                    // Skip the current file to avoid double-including
                                     if path == file_path {
+                                        current_entry = Some((path_str, content));
                                         continue;
                                     }
-                                    project_sources.push(content);
+                                    project_sources.push(content.clone());
+                                    project_files.push((path_str, content));
+                                }
+                                if let Some(entry) = current_entry {
+                                    project_files.push(entry);
                                 }
                             }
                         }

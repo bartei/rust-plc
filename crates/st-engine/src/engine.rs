@@ -342,10 +342,6 @@ impl Engine {
     /// Apply an online change from new source code.
     /// Call this between scan cycles (not during execution).
     pub fn online_change(&mut self, new_source: &str) -> Result<crate::online_change::ChangeAnalysis, String> {
-        // Save retain state before applying change (cold restart save point).
-        if let Err(e) = self.save_retain() {
-            tracing::warn!("Retain save before online change failed: {e}");
-        }
         let stdlib = st_syntax::multi_file::builtin_stdlib();
         let mut all: Vec<&str> = stdlib;
         all.push(new_source);
@@ -356,6 +352,21 @@ impl Engine {
 
         let new_module = st_compiler::compile(&parse_result.source_file)
             .map_err(|e| format!("Compilation error: {e}"))?;
+
+        self.online_change_module(new_module)
+    }
+
+    /// Apply an online change from an already-compiled [`Module`].
+    /// Used by the target agent which deserializes the module from a
+    /// program bundle. Call between scan cycles, not during execution.
+    pub fn online_change_module(
+        &mut self,
+        new_module: Module,
+    ) -> Result<crate::online_change::ChangeAnalysis, String> {
+        // Save retain state before applying change (cold restart save point).
+        if let Err(e) = self.save_retain() {
+            tracing::warn!("Retain save before online change failed: {e}");
+        }
 
         let old_module = self.vm.module().clone();
         let analysis = crate::online_change::analyze_change(&old_module, &new_module);

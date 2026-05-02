@@ -94,24 +94,7 @@ pub fn init_logging(initial_level: &str) -> LogLevelHandle {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn validate_log_levels() {
-        // These should all be valid
-        for level in &["trace", "debug", "info", "warn", "error"] {
-            assert!(
-                LevelFilter::from_str(level).is_ok(),
-                "{level} should be valid"
-            );
-        }
-    }
-
-    #[test]
-    fn invalid_level_rejected() {
-        assert!(LevelFilter::from_str("verbose").is_err());
-        assert!(LevelFilter::from_str("foobar").is_err());
-    }
-}
+// Level validation is exercised end-to-end through PUT /api/v1/log-level
+// in `tests/api_integration.rs::test_set_invalid_log_level` and
+// `test_set_log_level`, so the unit tests that previously lived here were
+// removed.

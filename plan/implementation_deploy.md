@@ -206,12 +206,12 @@
 
 ### Online change integration (agent side)
 
-- [ ] `POST /api/v1/program/update` — receive new bundle
-- [ ] Compare old and new bytecode for online-change compatibility
-- [ ] If compatible: apply online change (zero downtime)
-- [ ] If incompatible: full restart (stop → replace → start)
-- [ ] Report update method and downtime in response
-- [ ] Variable migration during online change
+- [x] `POST /api/v1/program/update` — receive new bundle
+- [x] Compare old and new bytecode for online-change compatibility
+- [x] If compatible: apply online change (zero downtime)
+- [x] If incompatible: full restart (stop → replace → start)
+- [x] Report update method and downtime in response
+- [x] Variable migration during online change
 - [ ] Rollback on online-change failure (keep old program running)
 
 ### CLI: update command
@@ -224,8 +224,8 @@
 
 ### VS Code extension: update integration
 
-- [ ] "Update" command in command palette
-- [ ] "Update" button in target status bar
+- [x] "Update" command in command palette
+- [x] "Update" button in target status bar
 - [ ] Notification with update result (online change vs restart, downtime)
 - [ ] Debug session survives online change (DAP session stays connected)
 - [ ] Monitor panel continues after update (watch list preserved)

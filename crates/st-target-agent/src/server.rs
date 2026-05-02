@@ -28,6 +28,7 @@ pub struct AppState {
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/v1/program/upload", post(api::program::upload))
+        .route("/api/v1/program/update", post(api::program::update))
         .route("/api/v1/program/info", get(api::program::info))
         .route("/api/v1/program/start", post(api::program::start))
         .route("/api/v1/program/stop", post(api::program::stop))

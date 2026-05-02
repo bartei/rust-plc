@@ -39,3 +39,13 @@ $TMPDIR/
 
 # Retain/persistent variable storage
 .st-retain/
+
+# LLVM / cargo-llvm-cov coverage artifacts (raw profile data dropped by tests)
+*.profraw
+
+# OPC-UA self-signed certificate stores generated at first server start
+crates/st-opcua-server/pki/
+crates/st-target-agent/pki/
+
+# Workspace-local VS Code debug configurations under playground fixtures
+playground/multi_file_project/.vscode/

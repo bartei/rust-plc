@@ -17,6 +17,27 @@ fn socat_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Same gate as `rtu_integration_test::require_socat_or_skip` — skip when
+/// running locally without socat, but panic in CI / coverage runs that
+/// promise socat is present (`ST_REQUIRE_SOCAT=1`). See the corresponding
+/// note in `crates/st-comm-modbus/tests/rtu_integration_test.rs` for why.
+fn require_socat_or_skip(test_name: &str) -> bool {
+    if socat_available() {
+        return true;
+    }
+    let required = std::env::var("ST_REQUIRE_SOCAT")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if required {
+        panic!(
+            "{test_name}: socat required (ST_REQUIRE_SOCAT=1) but not on PATH. \
+             Install via apt-get install -y socat (CI) or nix-shell -p socat (local)."
+        );
+    }
+    eprintln!("Skipping {test_name} (socat not available)");
+    false
+}
+
 /// Spawns socat to create a virtual serial port pair.
 /// Returns (socat_child, port_a_path, port_b_path).
 fn spawn_virtual_serial() -> (Child, String, String) {
@@ -54,8 +75,7 @@ fn spawn_virtual_serial() -> (Child, String, String) {
 
 #[test]
 fn transport_open_virtual_port() {
-    if !socat_available() {
-        eprintln!("Skipping (socat not available)");
+    if !require_socat_or_skip("virtual_serial_test") {
         return;
     }
 
@@ -81,8 +101,7 @@ fn transport_open_virtual_port() {
 
 #[test]
 fn transport_send_receive_loopback() {
-    if !socat_available() {
-        eprintln!("Skipping (socat not available)");
+    if !require_socat_or_skip("virtual_serial_test") {
         return;
     }
 
@@ -156,8 +175,7 @@ impl FrameParser for FixedLenParser {
 
 #[test]
 fn transport_transaction_framed_roundtrip() {
-    if !socat_available() {
-        eprintln!("Skipping (socat not available)");
+    if !require_socat_or_skip("virtual_serial_test") {
         return;
     }
 
@@ -218,8 +236,7 @@ fn transport_transaction_framed_roundtrip() {
 /// timeout fires" code, this test would take >= 1 second.
 #[test]
 fn transaction_framed_returns_before_timeout_when_frame_complete() {
-    if !socat_available() {
-        eprintln!("Skipping (socat not available)");
+    if !require_socat_or_skip("virtual_serial_test") {
         return;
     }
 
@@ -289,8 +306,7 @@ fn transaction_framed_returns_before_timeout_when_frame_complete() {
 /// removing the legitimate timeout safety net.
 #[test]
 fn transaction_framed_times_out_on_truncated_response() {
-    if !socat_available() {
-        eprintln!("Skipping (socat not available)");
+    if !require_socat_or_skip("virtual_serial_test") {
         return;
     }
 
@@ -351,8 +367,7 @@ fn transaction_framed_times_out_on_truncated_response() {
 /// and doesn't wait past the requested byte count.
 #[test]
 fn receive_exact_returns_immediately_when_bytes_available() {
-    if !socat_available() {
-        eprintln!("Skipping (socat not available)");
+    if !require_socat_or_skip("virtual_serial_test") {
         return;
     }
 
@@ -398,8 +413,7 @@ fn receive_exact_returns_immediately_when_bytes_available() {
 
 #[test]
 fn serial_link_fb_connects_to_virtual_port() {
-    if !socat_available() {
-        eprintln!("Skipping (socat not available)");
+    if !require_socat_or_skip("virtual_serial_test") {
         return;
     }
 
@@ -436,8 +450,7 @@ fn serial_link_fb_connects_to_virtual_port() {
 
 #[test]
 fn serial_link_fb_shared_transport_usable() {
-    if !socat_available() {
-        eprintln!("Skipping (socat not available)");
+    if !require_socat_or_skip("virtual_serial_test") {
         return;
     }
 

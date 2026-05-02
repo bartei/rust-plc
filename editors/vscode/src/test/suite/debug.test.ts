@@ -364,4 +364,187 @@ suite("Debug Buttons Test Suite", () => {
       `Should stop near breakpoint line ${bpLine}, got line ${line}`
     );
   });
+
+  // ── Plan item 264 ─────────────────────────────────────────────────────
+  // Force / unforce variable via the DAP `evaluate` custom request.
+  // The PLC monitor test server doesn't implement force, so this *must*
+  // run against a real `st-cli debug` session — exactly what
+  // `request: "launch"` gives us here.
+
+  test("Force / unforce variable via DAP custom request — listForced reflects state", async function () {
+    this.timeout(30000);
+    const session = await launchAndWaitForStop();
+
+    // Sanity: listForced before any force should be empty.
+    const initialList = await session.customRequest("evaluate", {
+      expression: "listForced",
+      context: "repl",
+    });
+    assert.ok(
+      typeof initialList.result === "string"
+        && !initialList.result.toLowerCase().includes("counter"),
+      `listForced before force should not mention counter, got: ${initialList.result}`,
+    );
+
+    // Force `counter` to a sentinel value.
+    const forceResp = await session.customRequest("evaluate", {
+      expression: "force counter = 999",
+      context: "repl",
+    });
+    assert.ok(
+      typeof forceResp.result === "string"
+        && forceResp.result.toLowerCase().includes("forced"),
+      `force should respond with a confirmation, got: ${JSON.stringify(forceResp)}`,
+    );
+    assert.ok(
+      forceResp.result.includes("999"),
+      `force confirmation should echo the value 999, got: ${forceResp.result}`,
+    );
+
+    // listForced must now show `counter` with value 999. This is the
+    // canonical source of truth for force state — `evaluate counter` reads
+    // the live VM slot which the program rewrites every cycle, so we
+    // assert against listForced rather than chasing a moving target.
+    const list = await session.customRequest("evaluate", {
+      expression: "listForced",
+      context: "repl",
+    });
+    assert.ok(
+      typeof list.result === "string"
+        && list.result.toLowerCase().includes("counter")
+        && list.result.includes("999"),
+      `listForced should report counter=999, got: ${list.result}`,
+    );
+
+    // Run a few cycles to prove the force payload survives execution.
+    await session.customRequest("continue", { threadId: 1 });
+    await sleep(400);
+    await session.customRequest("pause", { threadId: 1 });
+    await pollUntilStopped(5000);
+
+    const stillForced = await session.customRequest("evaluate", {
+      expression: "listForced",
+      context: "repl",
+    });
+    assert.ok(
+      stillForced.result.toLowerCase().includes("counter"),
+      `force must persist across cycles, listForced got: ${stillForced.result}`,
+    );
+
+    // Unforce and verify listForced clears the entry.
+    const unforceResp = await session.customRequest("evaluate", {
+      expression: "unforce counter",
+      context: "repl",
+    });
+    assert.ok(
+      typeof unforceResp.result === "string"
+        && unforceResp.result.toLowerCase().includes("unforced"),
+      `unforce should respond with confirmation, got: ${JSON.stringify(unforceResp)}`,
+    );
+
+    const afterList = await session.customRequest("evaluate", {
+      expression: "listForced",
+      context: "repl",
+    });
+    assert.ok(
+      !afterList.result.toLowerCase().includes("counter"),
+      `listForced after unforce should not mention counter, got: ${afterList.result}`,
+    );
+  });
+
+  // ── Plan item 265 ─────────────────────────────────────────────────────
+  // Multi-file project: a breakpoint set in `helper.st` must fire when
+  // execution reaches the helper FB call from `main.st`.
+
+  test("Multi-file project: breakpoints in helper.st fire from main.st", async function () {
+    this.timeout(30000);
+
+    const projDir = path.join(require("os").tmpdir(), "st-multifile-debug-test-" + Date.now());
+    fs.mkdirSync(projDir, { recursive: true });
+    const helperPath = path.join(projDir, "helper.st");
+    const mainPath = path.join(projDir, "main.st");
+    const projYaml = path.join(projDir, "plc-project.yaml");
+
+    fs.writeFileSync(
+      helperPath,
+      `FUNCTION_BLOCK Inc
+VAR_INPUT step : INT; END_VAR
+VAR_OUTPUT total : INT := 0; END_VAR
+    total := total + step;
+END_FUNCTION_BLOCK
+`,
+    );
+    fs.writeFileSync(
+      mainPath,
+      `PROGRAM Main
+VAR
+    inc : Inc;
+    counter : INT := 0;
+END_VAR
+    inc(step := 1);
+    counter := inc.total;
+END_PROGRAM
+`,
+    );
+    fs.writeFileSync(
+      projYaml,
+      "name: MultiFileBp\nversion: '1.0.0'\nentryPoint: Main\n",
+    );
+
+    try {
+      // Launch with the project root as the program path so the DAP picks
+      // up multi-file mode.
+      const config: vscode.DebugConfiguration = {
+        type: "st",
+        name: "MultiFile Debug",
+        request: "launch",
+        program: projDir,
+        stopOnEntry: true,
+      };
+      const started = await vscode.debug.startDebugging(undefined, config);
+      assert.ok(started, "multi-file debug session should start");
+      await pollUntilStopped(10000);
+      const session = vscode.debug.activeDebugSession;
+      assert.ok(session, "multi-file session should be active");
+
+      // Set a breakpoint inside helper.st on the assignment line (line 4 = `total := total + step;`).
+      const bpLine = 4;
+      const setResp = await session!.customRequest("setBreakpoints", {
+        source: { path: helperPath },
+        breakpoints: [{ line: bpLine }],
+      });
+      // The DAP echoes a `breakpoints` array with verification flags.
+      assert.ok(
+        Array.isArray(setResp.breakpoints) && setResp.breakpoints.length === 1,
+        `expected 1 breakpoint, got: ${JSON.stringify(setResp)}`,
+      );
+
+      // Continue and wait for the breakpoint to fire.
+      await session!.customRequest("continue", { threadId: 1 });
+      await pollUntilStopped(10000);
+
+      const st = await session!.customRequest("stackTrace", {
+        threadId: 1, startFrame: 0, levels: 5,
+      });
+      assert.ok(
+        st.stackFrames?.length > 0,
+        "should have at least one stack frame after hitting breakpoint",
+      );
+      const top = st.stackFrames[0];
+      // Source path comparison is filesystem-dependent (symlinks etc.) — match
+      // on basename to keep this robust on macOS/CI volumes.
+      const topSource: string | undefined = top.source?.path;
+      assert.ok(
+        topSource && path.basename(topSource) === "helper.st",
+        `top frame should be in helper.st, got: ${topSource}`,
+      );
+      assert.ok(
+        Math.abs(top.line - bpLine) <= 2,
+        `top frame line should be near ${bpLine}, got ${top.line}`,
+      );
+    } finally {
+      // Clean up
+      try { fs.rmSync(projDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
 });

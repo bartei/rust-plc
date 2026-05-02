@@ -100,11 +100,28 @@ impl Default for RuntimeState {
     }
 }
 
+/// Summary of an online change applied to the running engine.
+/// Returned from `online_change` so the HTTP API can report what
+/// the engine did without re-deriving it from `ChangeAnalysis`.
+#[derive(Debug, Clone, Serialize)]
+pub struct OnlineChangeReport {
+    pub preserved_vars: Vec<String>,
+    pub new_vars: Vec<String>,
+    pub removed_vars: Vec<String>,
+}
+
 /// Command sent to the runtime thread.
 pub enum RuntimeCommand {
     Start(Box<StartParams>),
     Stop,
     Shutdown,
+    /// Apply an online change with the given new module. Engine analyzes
+    /// compatibility and either swaps state or rejects.
+    OnlineChange {
+        new_module: Box<st_ir::Module>,
+        new_program_meta: ProgramMetadata,
+        reply: tokio::sync::oneshot::Sender<Result<OnlineChangeReport, String>>,
+    },
     /// Attach a debug session to the running engine.
     DebugAttach {
         /// Channel for the engine to send events/responses to the debug session.
@@ -275,6 +292,49 @@ impl RuntimeManager {
         let _ = self.cmd_tx.send(RuntimeCommand::Shutdown).await;
     }
 
+    /// Apply an online change to the running engine. Returns a report
+    /// of preserved/new/removed variables on success. Returns an
+    /// `incompatible` error (HTTP 409) when the new module's variable
+    /// layout is not compatible with the running one — the caller is
+    /// expected to fall back to a stop+upload+start path.
+    pub async fn online_change(
+        &self,
+        new_module: st_ir::Module,
+        new_program_meta: ProgramMetadata,
+    ) -> Result<OnlineChangeReport, ApiError> {
+        let current_status = self.state.read().unwrap().status;
+        if current_status != RuntimeStatus::Running
+            && current_status != RuntimeStatus::DebugPaused
+        {
+            return Err(ApiError::not_running());
+        }
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .send(RuntimeCommand::OnlineChange {
+                new_module: Box::new(new_module),
+                new_program_meta,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| ApiError::internal("Runtime thread not responding"))?;
+
+        let result = rx
+            .await
+            .map_err(|_| ApiError::internal("Runtime thread dropped reply"))?;
+
+        result.map_err(|msg| {
+            // Convey "incompatible" as 409 so the API handler can
+            // distinguish it from a true internal failure and decide
+            // to fall back to a full restart.
+            if msg.starts_with("Incompatible change") {
+                ApiError::online_change_incompatible(msg)
+            } else {
+                ApiError::internal(msg)
+            }
+        })
+    }
+
     /// Attach a debug session to the running engine.
     ///
     /// Returns channels for bidirectional communication:
@@ -415,6 +475,11 @@ fn runtime_thread(
             }
             RuntimeCommand::DebugAttach { .. } | RuntimeCommand::DebugDetach => {
                 // Debug commands while idle — ignore (no engine to attach to)
+            }
+            RuntimeCommand::OnlineChange { reply, .. } => {
+                let _ = reply.send(Err(
+                    "Runtime is not running; cannot apply online change".to_string(),
+                ));
             }
             RuntimeCommand::ForceVariable { reply, .. } => {
                 let _ = reply.send(Err("Runtime is not running".to_string()));
@@ -559,6 +624,40 @@ fn run_cycle_loop(
             Ok(RuntimeCommand::Start { .. }) => {
                 // Ignore start while already running
             }
+            Ok(RuntimeCommand::OnlineChange { new_module, new_program_meta, reply }) => {
+                let started = std::time::Instant::now();
+                match engine.online_change_module(*new_module) {
+                    Ok(analysis) => {
+                        // Refresh variable catalog (slot count may have grown).
+                        let catalog: Vec<CatalogEntry> = engine
+                            .vm()
+                            .monitorable_catalog()
+                            .into_iter()
+                            .map(|(name, ty)| CatalogEntry { name, ty })
+                            .collect();
+                        let mut s = state.write().unwrap();
+                        s.variable_catalog = catalog;
+                        s.program = Some(new_program_meta);
+                        drop(s);
+                        tracing::info!(
+                            "Online change applied in {:?}: {} preserved, {} new, {} removed",
+                            started.elapsed(),
+                            analysis.preserved_vars.len(),
+                            analysis.new_vars.len(),
+                            analysis.removed_vars.len(),
+                        );
+                        let _ = reply.send(Ok(OnlineChangeReport {
+                            preserved_vars: analysis.preserved_vars,
+                            new_vars: analysis.new_vars,
+                            removed_vars: analysis.removed_vars,
+                        }));
+                    }
+                    Err(e) => {
+                        tracing::warn!("Online change rejected: {e}");
+                        let _ = reply.send(Err(e));
+                    }
+                }
+            }
             Ok(RuntimeCommand::ForceVariable { name, value, reply }) => {
                 tracing::info!("Engine: force {name} = {value}");
                 let result = handle_force(engine, &name, &value);
@@ -689,6 +788,14 @@ fn handle_debug_commands(
             }
             Ok(RuntimeCommand::Start { .. }) | Ok(RuntimeCommand::ResetStats) => {
                 // Ignore non-critical commands while debugging
+            }
+            Ok(RuntimeCommand::OnlineChange { reply, .. }) => {
+                // Refuse online changes while paused at a breakpoint —
+                // the VM holds a stack frame that would be invalidated by
+                // a module swap. Caller can stop+restart instead.
+                let _ = reply.send(Err(
+                    "Cannot apply online change while debug session is paused".to_string(),
+                ));
             }
             Err(_) => {}
         }
@@ -927,6 +1034,13 @@ fn parse_value_string(s: &str) -> st_ir::Value {
     }
 }
 
+// The runtime lifecycle (idle → starting → running → idle, cycle stat
+// advancement, stop-when-idle errors) is exercised end-to-end by
+// `tests/api_integration.rs::{test_status_idle, test_start_stop,
+// test_stop_when_idle, test_cycle_stats_advance, test_full_lifecycle}`.
+// The remaining unit test below covers a race that's hard to reproduce
+// over HTTP — issuing a second `start` while the runtime thread is still
+// in the brief `Starting` window.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -939,59 +1053,6 @@ mod tests {
         let parse_result = st_syntax::multi_file::parse_multi(&all);
         let module = st_compiler::compile(&parse_result.source_file).unwrap();
         (module, "Main".to_string())
-    }
-
-    #[tokio::test]
-    async fn initial_state_is_idle() {
-        let mgr = RuntimeManager::new(RuntimeConfig::default());
-        let state = mgr.state();
-        assert_eq!(state.status, RuntimeStatus::Idle);
-        assert!(state.cycle_stats.is_none());
-        mgr.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn start_transitions_to_running() {
-        let mgr = RuntimeManager::new(RuntimeConfig::default());
-        let (module, name) = compile_test_module();
-        let meta = ProgramMetadata {
-            name: "Test".to_string(),
-            version: "1.0.0".to_string(),
-            mode: "development".to_string(),
-            compiled_at: "now".to_string(),
-            entry_point: Some("Main".to_string()),
-            bytecode_checksum: "abc".to_string(),
-            deployed_at: "now".to_string(),
-            has_debug_map: false,
-        };
-
-        mgr.start(module, name, Some(Duration::from_millis(10)), meta, None)
-            .await
-            .unwrap();
-
-        // Give the runtime thread time to start
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let state = mgr.state();
-        assert_eq!(state.status, RuntimeStatus::Running);
-        assert!(state.cycle_stats.is_some());
-        assert!(state.cycle_stats.as_ref().unwrap().cycle_count > 0);
-
-        mgr.stop().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let state = mgr.state();
-        assert_eq!(state.status, RuntimeStatus::Idle);
-
-        mgr.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn stop_when_idle_errors() {
-        let mgr = RuntimeManager::new(RuntimeConfig::default());
-        let result = mgr.stop().await;
-        assert!(result.is_err());
-        mgr.shutdown().await;
     }
 
     #[tokio::test]
@@ -1016,38 +1077,6 @@ mod tests {
 
         let result = mgr.start(module, name, Some(Duration::from_millis(10)), meta, None).await;
         assert!(result.is_err());
-
-        mgr.stop().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        mgr.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn cycle_stats_advance() {
-        let mgr = RuntimeManager::new(RuntimeConfig::default());
-        let (module, name) = compile_test_module();
-        let meta = ProgramMetadata {
-            name: "Test".to_string(),
-            version: "1.0.0".to_string(),
-            mode: "development".to_string(),
-            compiled_at: "now".to_string(),
-            entry_point: Some("Main".to_string()),
-            bytecode_checksum: "abc".to_string(),
-            deployed_at: "now".to_string(),
-            has_debug_map: false,
-        };
-
-        mgr.start(module, name, Some(Duration::from_millis(5)), meta, None)
-            .await
-            .unwrap();
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let stats1 = mgr.state().cycle_stats.unwrap().cycle_count;
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let stats2 = mgr.state().cycle_stats.unwrap().cycle_count;
-
-        assert!(stats2 > stats1, "Cycle count should advance: {stats1} -> {stats2}");
 
         mgr.stop().await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;

@@ -1,7 +1,7 @@
 //! Program management API endpoints.
 
 use crate::error::ApiError;
-use crate::runtime_manager::RuntimeStatus;
+use crate::runtime_manager::{OnlineChangeReport, RuntimeStatus};
 use crate::server::AppState;
 use axum::extract::{Multipart, State};
 use axum::Json;
@@ -153,6 +153,152 @@ pub async fn restart(
 
     // Re-start
     start(State(state)).await
+}
+
+/// Method used to apply a `program/update` request.
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateMethod {
+    /// Hot-swapped without stopping the engine. Variables migrated.
+    OnlineChange,
+    /// Engine stopped, new program loaded, engine restarted.
+    Restart,
+    /// Runtime was idle when update arrived; bundle stored, no start.
+    ColdReplace,
+    /// First deployment — no previous program existed.
+    InitialDeploy,
+}
+
+#[derive(Serialize)]
+pub struct UpdateResponse {
+    pub success: bool,
+    pub method: UpdateMethod,
+    pub downtime_ms: u64,
+    pub program: crate::program_store::ProgramMetadata,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub online_change: Option<OnlineChangeReport>,
+}
+
+/// POST /api/v1/program/update — receive a new bundle and apply it.
+///
+/// If the runtime is running and the new bundle is layout-compatible with
+/// the running one, the engine performs an online change (zero downtime,
+/// variable state preserved). Otherwise the runtime is stopped, the new
+/// bundle is stored, and the runtime is restarted from it.
+pub async fn update(
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> Result<Json<UpdateResponse>, ApiError> {
+    // 1. Read the uploaded bundle bytes.
+    let field = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::invalid_bundle(format!("Multipart read error: {e}")))?
+        .ok_or_else(|| ApiError::invalid_bundle("No file field in upload"))?;
+    let data = field
+        .bytes()
+        .await
+        .map_err(|e| ApiError::invalid_bundle(format!("Cannot read upload data: {e}")))?;
+
+    let initial_status = state.runtime_manager.state().status;
+    let had_program_before = state.program_store.read().unwrap().current_program().is_some();
+
+    // 2. Persist the new bundle (extract + verify + write to disk). This
+    //    overwrites the previously deployed program. The running engine
+    //    keeps cycling on its in-memory module copy until we either hot-
+    //    swap or stop/start.
+    let new_meta = {
+        let mut store = state.program_store.write().unwrap();
+        store.store_bundle(&data)?
+    };
+
+    // 3. Decide path based on prior runtime state.
+    match initial_status {
+        RuntimeStatus::Running | RuntimeStatus::DebugPaused => {
+            // Try online change first (zero downtime).
+            let (new_module, _name) = {
+                let store = state.program_store.read().unwrap();
+                store.load_module()?
+            };
+
+            let started = std::time::Instant::now();
+            match state
+                .runtime_manager
+                .online_change(new_module, new_meta.clone())
+                .await
+            {
+                Ok(report) => {
+                    let downtime_ms = started.elapsed().as_millis() as u64;
+                    Ok(Json(UpdateResponse {
+                        success: true,
+                        method: UpdateMethod::OnlineChange,
+                        downtime_ms,
+                        program: new_meta,
+                        online_change: Some(report),
+                    }))
+                }
+                Err(e) if e.code == "online_change_incompatible" => {
+                    // Layout changed — fall back to a full restart.
+                    let downtime_ms = restart_runtime(&state).await?;
+                    Ok(Json(UpdateResponse {
+                        success: true,
+                        method: UpdateMethod::Restart,
+                        downtime_ms,
+                        program: new_meta,
+                        online_change: None,
+                    }))
+                }
+                Err(e) => Err(e),
+            }
+        }
+        RuntimeStatus::Idle | RuntimeStatus::Error => {
+            // No engine to swap — the new bundle is stored, but we don't
+            // auto-start. The caller can POST /program/start when ready.
+            Ok(Json(UpdateResponse {
+                success: true,
+                method: if had_program_before {
+                    UpdateMethod::ColdReplace
+                } else {
+                    UpdateMethod::InitialDeploy
+                },
+                downtime_ms: 0,
+                program: new_meta,
+                online_change: None,
+            }))
+        }
+        RuntimeStatus::Starting | RuntimeStatus::Stopping => {
+            Err(ApiError::internal(
+                "Runtime is transitioning state; retry update in a moment",
+            ))
+        }
+    }
+}
+
+/// Stop the engine, then start it again with whatever bundle is stored.
+/// Returns the wall-clock downtime in milliseconds.
+async fn restart_runtime(state: &Arc<AppState>) -> Result<u64, ApiError> {
+    let started = std::time::Instant::now();
+
+    // Stop the engine if it's still running. Tolerate already-stopped.
+    let _ = state.runtime_manager.stop().await;
+    for _ in 0..100 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        if state.runtime_manager.state().status == RuntimeStatus::Idle {
+            break;
+        }
+    }
+
+    if state.runtime_manager.state().status != RuntimeStatus::Idle {
+        return Err(ApiError::internal(
+            "Engine did not become idle within the restart deadline",
+        ));
+    }
+
+    // Re-start using the freshly stored bundle. Reuse the existing start
+    // handler so it picks up cycle_time + native FBs the same way as upload.
+    let _ = start(State(Arc::clone(state))).await?;
+
+    Ok(started.elapsed().as_millis() as u64)
 }
 
 /// DELETE /api/v1/program — remove the deployed program.

@@ -9,6 +9,7 @@ import {
 
 let client: LanguageClient | undefined;
 let cycleStatusBar: vscode.StatusBarItem | undefined;
+let updateStatusBar: vscode.StatusBarItem | undefined;
 
 interface PlcCycleStats {
   schema: number;
@@ -341,6 +342,33 @@ export function activate(context: vscode.ExtensionContext) {
   cycleStatusBar.text = "$(pulse) PLC";
   context.subscriptions.push(cycleStatusBar);
 
+  // ── Update button: deploys + hot-applies the program to the active
+  //    target. Visible only when the workspace defines at least one target
+  //    in plc-project.yaml; the user can still find the underlying command
+  //    in the command palette (`ST: Online Update PLC Program`).
+  updateStatusBar = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right,
+    99
+  );
+  updateStatusBar.command = "structured-text.targetOnlineUpdate";
+  updateStatusBar.text = "$(cloud-upload) ST Update";
+  updateStatusBar.tooltip = "Build the current project and apply it to the active PLC target (online change when compatible, otherwise a clean restart).";
+  context.subscriptions.push(updateStatusBar);
+  refreshUpdateStatusBarVisibility();
+
+  // Re-evaluate visibility when the workspace changes: opening folders,
+  // editing plc-project.yaml, or switching the active editor.
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => refreshUpdateStatusBarVisibility()),
+    vscode.window.onDidChangeActiveTextEditor(() => refreshUpdateStatusBarVisibility()),
+    vscode.workspace.onDidSaveTextDocument((doc) => {
+      const base = path.basename(doc.fileName);
+      if (base === "plc-project.yaml" || base === "plc-project.yml") {
+        refreshUpdateStatusBarVisibility();
+      }
+    }),
+  );
+
   context.subscriptions.push(
     vscode.debug.registerDebugAdapterTrackerFactory("st", new PlcDapTrackerFactory())
   );
@@ -458,8 +486,12 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.window.showInformationMessage(`Installing PLC runtime on ${target.name} (${target.host})...`);
       const terminal = vscode.window.createTerminal(`PLC Install — ${target.name}`);
       terminal.show();
+      // Match the SSH options st-deploy uses (see crates/st-deploy/src/ssh.rs):
+      // host key verification fully disabled because targets get reflashed
+      // routinely during dev and would otherwise trip strict checking.
+      const sshOpts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o LogLevel=ERROR";
       terminal.sendText(
-        `st-cli target install ${sshTarget} && echo "\\n--- Rebooting ${target.host} ---" && ssh ${sshTarget} "sudo reboot"`
+        `st-cli target install ${sshTarget} && echo "\\n--- Rebooting ${target.host} ---" && ssh ${sshOpts} ${sshTarget} "sudo reboot"`
       );
     }),
 
@@ -474,22 +506,33 @@ export function activate(context: vscode.ExtensionContext) {
       terminal.sendText(`st-cli bundle && curl -X POST -F "file=@$(ls -t *.st-bundle | head -1)" http://${resolved.host}:${resolved.port}/api/v1/program/upload`);
     }),
 
-    vscode.commands.registerCommand("structured-text.targetOnlineUpdate", async (arg?: { host: string; port: number }) => {
+    vscode.commands.registerCommand("structured-text.targetOnlineUpdate", async (arg?: { host: string; port: number; bundlePath?: string }) => {
       const resolved = arg
         ? { host: arg.host, port: arg.port }
         : await resolveActiveTargetWithPort("Online Update");
-      if (!resolved) return;
+      if (!resolved) return undefined;
       const { host, port } = resolved;
-      vscode.window.showInformationMessage(`Online update to ${host}:${port}...`);
-      const terminal = vscode.window.createTerminal(`PLC Online Update — ${host}`);
-      terminal.show();
-      terminal.sendText([
-        "st-cli bundle",
-        `curl -sf -X POST http://${host}:${port}/api/v1/program/stop 2>/dev/null || true`,
-        `curl -sf -X POST -F "file=@$(ls -t *.st-bundle | head -1)" http://${host}:${port}/api/v1/program/upload`,
-        `curl -sf -X POST http://${host}:${port}/api/v1/program/start`,
-        `echo "Update complete" && curl -sf http://${host}:${port}/api/v1/status`,
-      ].join(" && "));
+
+      // Build a fresh bundle if the caller didn't hand one in.
+      let bundlePath = arg?.bundlePath;
+      if (!bundlePath) {
+        const built = await buildBundleInWorkspace();
+        if (!built) return undefined;
+        bundlePath = built;
+      }
+
+      vscode.window.showInformationMessage(`Updating PLC program on ${host}:${port}...`);
+      try {
+        const result = await postProgramUpdate(host, port, bundlePath);
+        const summary = formatUpdateResult(result);
+        vscode.window.showInformationMessage(`Update applied: ${summary}`);
+        const { MonitorPanel } = require("./monitorPanel");
+        if (MonitorPanel.currentPanel) MonitorPanel.currentPanel.pollTargetStatus();
+        return result;
+      } catch (e: any) {
+        vscode.window.showErrorMessage(`Update failed: ${e.message}`);
+        return undefined;
+      }
     }),
 
     vscode.commands.registerCommand("structured-text.targetRun", async () => {
@@ -725,6 +768,146 @@ async function pickOrInputTarget(targets: TargetEntry[], title: string): Promise
 
 export function deactivate(): Thenable<void> | undefined {
   return client?.stop();
+}
+
+/**
+ * Show the "ST Update" status bar item only when the workspace has at
+ * least one target configured (i.e., `targets:` section in
+ * plc-project.yaml resolves to ≥1 entry). Hidden otherwise so we don't
+ * clutter the bar in unrelated workspaces.
+ */
+function refreshUpdateStatusBarVisibility(): void {
+  if (!updateStatusBar) return;
+  const targets = getTargetsFromConfig();
+  if (targets.length === 0) {
+    updateStatusBar.hide();
+    return;
+  }
+  // When more than one target is configured, the click goes through the
+  // existing target picker (handled by `resolveActiveTargetWithPort`); we
+  // just nudge the user towards the active one in the tooltip.
+  const active = targets[0];
+  updateStatusBar.tooltip = targets.length === 1
+    ? `Update ${active.name} (${active.host}:${active.agentPort})`
+    : `Update PLC target — ${targets.length} configured, will prompt`;
+  updateStatusBar.show();
+}
+
+// ─── Online update helpers ────────────────────────────────────────────────
+
+/**
+ * Result reported by the agent's `POST /api/v1/program/update` endpoint.
+ */
+export interface ProgramUpdateResult {
+  success: boolean;
+  method: "online_change" | "restart" | "cold_replace" | "initial_deploy";
+  downtime_ms: number;
+  program: { name: string; version: string; mode: string; bytecode_checksum: string };
+  online_change?: { preserved_vars: string[]; new_vars: string[]; removed_vars: string[] };
+}
+
+function formatUpdateResult(r: ProgramUpdateResult): string {
+  switch (r.method) {
+    case "online_change":
+      return `online change in ${r.downtime_ms}ms (${r.online_change?.preserved_vars.length ?? 0} vars preserved)`;
+    case "restart":
+      return `full restart in ${r.downtime_ms}ms`;
+    case "cold_replace":
+      return "cold replace (engine was idle)";
+    case "initial_deploy":
+      return "initial deploy (no previous program)";
+  }
+}
+
+/**
+ * Build a `.st-bundle` from the workspace by shelling out to `st-cli bundle`,
+ * then return the path to the most recent bundle. Returns `undefined` if the
+ * build fails or no workspace folder is open.
+ */
+async function buildBundleInWorkspace(): Promise<string | undefined> {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder) {
+    vscode.window.showErrorMessage("No workspace folder open — cannot build bundle.");
+    return undefined;
+  }
+  const cwd = folder.uri.fsPath;
+
+  return await new Promise<string | undefined>((resolve) => {
+    const cp = require("child_process") as typeof import("child_process");
+    const proc = cp.spawn("st-cli", ["bundle"], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    proc.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
+    proc.on("error", (e: Error) => {
+      vscode.window.showErrorMessage(`st-cli bundle failed to launch: ${e.message}`);
+      resolve(undefined);
+    });
+    proc.on("close", (code: number | null) => {
+      if (code !== 0) {
+        vscode.window.showErrorMessage(`st-cli bundle exited with ${code}: ${stderr}`);
+        resolve(undefined);
+        return;
+      }
+      // Pick the newest .st-bundle in the workspace root.
+      try {
+        const entries = fs.readdirSync(cwd)
+          .filter((n: string) => n.endsWith(".st-bundle"))
+          .map((n: string) => ({ name: n, mtime: fs.statSync(path.join(cwd, n)).mtimeMs }));
+        if (entries.length === 0) {
+          vscode.window.showErrorMessage("No .st-bundle file produced by st-cli bundle.");
+          resolve(undefined);
+          return;
+        }
+        entries.sort((a: { mtime: number }, b: { mtime: number }) => b.mtime - a.mtime);
+        resolve(path.join(cwd, entries[0].name));
+      } catch (e: any) {
+        vscode.window.showErrorMessage(`Cannot find produced bundle: ${e.message}`);
+        resolve(undefined);
+      }
+    });
+  });
+}
+
+/**
+ * POST a bundle file to `/api/v1/program/update` as multipart/form-data.
+ * Throws on non-2xx. Returns the parsed agent response.
+ */
+async function postProgramUpdate(host: string, port: number, bundlePath: string): Promise<ProgramUpdateResult> {
+  const data = fs.readFileSync(bundlePath);
+  const boundary = "----PlcUpdate" + Date.now().toString(16);
+  const head = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${path.basename(bundlePath)}"\r\n` +
+    `Content-Type: application/octet-stream\r\n\r\n`
+  );
+  const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+  const body = Buffer.concat([head, data, tail]);
+
+  const http = require("http") as typeof import("http");
+  return await new Promise<ProgramUpdateResult>((resolve, reject) => {
+    const req = http.request({
+      hostname: host,
+      port,
+      path: "/api/v1/program/update",
+      method: "POST",
+      headers: {
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+        "Content-Length": body.length,
+      },
+    }, (res) => {
+      let raw = "";
+      res.on("data", (chunk: Buffer) => { raw += chunk.toString(); });
+      res.on("end", () => {
+        if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+          reject(new Error(`HTTP ${res.statusCode}: ${raw}`));
+          return;
+        }
+        try { resolve(JSON.parse(raw)); }
+        catch (e) { reject(new Error(`Invalid JSON: ${raw}`)); }
+      });
+    });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
 }
 
 /**

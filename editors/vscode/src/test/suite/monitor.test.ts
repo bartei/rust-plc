@@ -131,6 +131,57 @@ suite("PLC Monitor Panel Tests", () => {
     // If we get here without throwing, the panel opened successfully
   });
 
+  // ── Plan item 266 ──────────────────────────────────────────────────────
+  // The `structured-text.openMonitor` command must:
+  //   (a) be discoverable via the command palette,
+  //   (b) create a monitor panel with no active debug session,
+  //   (c) reuse the same panel on a second invocation (no leak).
+  // (a) and (b) cover the user-facing contract; (c) catches the bug where
+  // an old panel was discarded but its WebSocket connection lingered.
+
+  test("openMonitor command is registered and creates a panel without a debug session", async function () {
+    this.timeout(15000);
+
+    // (a) command exists in the palette
+    const allCommands = await vscode.commands.getCommands(false);
+    assert.ok(
+      allCommands.includes("structured-text.openMonitor"),
+      "structured-text.openMonitor must appear in the command palette",
+    );
+
+    // (b) running the command without a debug session creates a MonitorPanel
+    const { MonitorPanel } = require("../../monitorPanel");
+    if (MonitorPanel.currentPanel) {
+      MonitorPanel.currentPanel.panel?.dispose?.();
+      await sleep(300);
+    }
+    assert.strictEqual(
+      MonitorPanel.currentPanel,
+      undefined,
+      "panel must start out closed",
+    );
+
+    await openMonitorPanel();
+    assert.ok(
+      MonitorPanel.currentPanel,
+      "openMonitor without a debug session must still create the panel singleton",
+    );
+    const firstPanel = MonitorPanel.currentPanel;
+
+    // (c) calling the command twice reveals the same panel rather than
+    // leaking a second instance.
+    await openMonitorPanel();
+    assert.strictEqual(
+      MonitorPanel.currentPanel,
+      firstPanel,
+      "second openMonitor invocation must reuse the existing panel",
+    );
+
+    // Tidy up so the next test starts from a known state.
+    MonitorPanel.currentPanel.panel?.dispose?.();
+    await sleep(300);
+  });
+
   test("debug session starts and monitor connects", async function () {
     this.timeout(25000);
     const session = await startDebugSession();

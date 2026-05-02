@@ -259,12 +259,12 @@ Infrastructure: `@vscode/test-electron` (real Electron instance) + Playwright (w
 
 ### Remaining E2E tests
 
-- [ ] Hover shows type information on variables
-- [ ] Go-to-definition navigates to symbol
-- [ ] Force/unforce variable via custom request (test server doesn't implement force)
-- [ ] Multi-file project: breakpoints across files
-- [ ] `structured-text.openMonitor` command opens the panel
-- [ ] Headless CI via Xvfb in GitHub Actions
+- [x] Hover shows type information on variables
+- [x] Go-to-definition navigates to symbol
+- [x] Force/unforce variable via custom request (test server doesn't implement force)
+- [x] Multi-file project: breakpoints across files
+- [x] `structured-text.openMonitor` command opens the panel
+- [x] Headless CI via Xvfb in GitHub Actions
 
 ---
 

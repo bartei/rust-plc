@@ -40,6 +40,16 @@ impl ApiError {
         }
     }
 
+    /// Online change rejected because the new module is not layout-compatible
+    /// with the running one. The HTTP `update` handler catches this and falls
+    /// back to a stop+upload+start sequence; tests assert on the `code` field.
+    pub fn online_change_incompatible(msg: impl Into<String>) -> Self {
+        ApiError {
+            error: msg.into(),
+            code: "online_change_incompatible".to_string(),
+        }
+    }
+
     pub fn auth_required() -> Self {
         ApiError {
             error: "Authentication required".to_string(),
@@ -64,7 +74,9 @@ impl ApiError {
     fn status_code(&self) -> StatusCode {
         match self.code.as_str() {
             "program_not_found" => StatusCode::NOT_FOUND,
-            "runtime_already_running" | "runtime_not_running" => StatusCode::CONFLICT,
+            "runtime_already_running"
+            | "runtime_not_running"
+            | "online_change_incompatible" => StatusCode::CONFLICT,
             "invalid_bundle" => StatusCode::BAD_REQUEST,
             "auth_required" => StatusCode::UNAUTHORIZED,
             "forbidden" => StatusCode::FORBIDDEN,
@@ -87,26 +99,7 @@ impl std::fmt::Display for ApiError {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn error_codes_map_to_correct_status() {
-        assert_eq!(ApiError::not_found("x").status_code(), StatusCode::NOT_FOUND);
-        assert_eq!(ApiError::already_running().status_code(), StatusCode::CONFLICT);
-        assert_eq!(ApiError::not_running().status_code(), StatusCode::CONFLICT);
-        assert_eq!(ApiError::invalid_bundle("x").status_code(), StatusCode::BAD_REQUEST);
-        assert_eq!(ApiError::auth_required().status_code(), StatusCode::UNAUTHORIZED);
-        assert_eq!(ApiError::forbidden("x").status_code(), StatusCode::FORBIDDEN);
-        assert_eq!(ApiError::internal("x").status_code(), StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    #[test]
-    fn error_serializes_to_json() {
-        let err = ApiError::not_found("No program deployed");
-        let json = serde_json::to_string(&err).unwrap();
-        assert!(json.contains("program_not_found"));
-        assert!(json.contains("No program deployed"));
-    }
-}
+// Status-code mapping and JSON serialization are exercised end-to-end by
+// `crates/st-target-agent/tests/api_integration.rs` (every error test
+// asserts both the HTTP status and the JSON `error`/`code` fields), so the
+// previously-redundant `mod tests` here was removed.

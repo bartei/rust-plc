@@ -287,6 +287,29 @@ async fn test_cycle_stats_advance() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 }
 
+// Replaces the deleted `program_store::tests::invalid_bundle_rejected` unit test:
+// the HTTP path used to be silently uncovered for malformed bundles, so we
+// now assert the 400 response and the `invalid_bundle` error code shape end-to-end.
+#[tokio::test]
+async fn test_upload_invalid_bundle_returns_400() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    let part = reqwest::multipart::Part::bytes(b"not a real bundle".to_vec())
+        .file_name("garbage.st-bundle");
+    let form = reqwest::multipart::Form::new().part("file", part);
+    let resp = client
+        .post(format!("{base}/api/v1/program/upload"))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "invalid_bundle");
+}
+
 // ─── Upload Replaces ────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -2051,4 +2074,200 @@ async fn test_ws_subscribe_fb_parent_pushes_descendants() {
     ws.close(None).await.ok();
     client.post(format!("{base}/api/v1/program/stop")).send().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+// ─── Program Update (POST /api/v1/program/update) ───────────────────────
+
+/// Multipart helper that posts a bundle to /api/v1/program/update.
+async fn post_update(client: &Client, base: &str, data: &[u8]) -> reqwest::Response {
+    let part = reqwest::multipart::Part::bytes(data.to_vec()).file_name("program.st-bundle");
+    let form = reqwest::multipart::Form::new().part("file", part);
+    client
+        .post(format!("{base}/api/v1/program/update"))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// Two bundles with the same variable layout — online change is compatible.
+fn counter_bundle(name: &str, version: &str, increment: i32) -> Vec<u8> {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("plc-project.yaml"),
+        format!("name: {name}\nversion: '{version}'\nentryPoint: Main\n"),
+    )
+    .unwrap();
+    fs::write(
+        root.join("main.st"),
+        format!(
+            "PROGRAM Main\nVAR\n    counter : INT := 0;\nEND_VAR\n    counter := counter + {increment};\nEND_PROGRAM\n"
+        ),
+    )
+    .unwrap();
+    let bundle = create_bundle(root, &BundleOptions::default()).unwrap();
+    let bundle_path = root.join("test.st-bundle");
+    write_bundle(&bundle, &bundle_path).unwrap();
+    fs::read(&bundle_path).unwrap()
+}
+
+/// First-time deployment to an empty store responds with `initial_deploy`
+/// and does not auto-start the engine.
+#[tokio::test]
+async fn test_update_initial_deploy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    let resp = post_update(&client, &base, &counter_bundle("UpdProj", "1.0.0", 1)).await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["success"], true);
+    assert_eq!(body["method"], "initial_deploy");
+    assert_eq!(body["program"]["version"], "1.0.0");
+
+    // Engine should still be idle — caller must explicitly start.
+    let status: serde_json::Value = client
+        .get(format!("{base}/api/v1/status"))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    assert_eq!(status["status"], "idle");
+}
+
+/// When the engine is running and the new bundle has the same variable
+/// layout, /update applies an online change and keeps cycling.
+#[tokio::test]
+async fn test_update_online_change_preserves_running_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    // Deploy and start v1 (counter += 1)
+    upload_bundle(&client, &base, &counter_bundle("UpdProj", "1.0.0", 1)).await;
+    client.post(format!("{base}/api/v1/program/start")).send().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let cycle_before = client
+        .get(format!("{base}/api/v1/status"))
+        .send().await.unwrap()
+        .json::<serde_json::Value>().await.unwrap()
+        ["cycle_stats"]["cycle_count"].as_u64().unwrap();
+    assert!(cycle_before > 0, "Engine should have advanced before update");
+
+    // Push v2 (counter += 2) via /update — same layout, online change.
+    let resp = post_update(&client, &base, &counter_bundle("UpdProj", "2.0.0", 2)).await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["method"], "online_change", "body={body}");
+    assert_eq!(body["program"]["version"], "2.0.0");
+    // counter is preserved across the swap.
+    let preserved = body["online_change"]["preserved_vars"].as_array().unwrap();
+    assert!(
+        preserved.iter().any(|v| v.as_str().unwrap_or("").to_lowercase().contains("counter")),
+        "Expected counter to be preserved: {preserved:?}"
+    );
+
+    // Engine kept running — cycle count keeps advancing past the swap.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let status: serde_json::Value = client
+        .get(format!("{base}/api/v1/status"))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    assert_eq!(status["status"], "running");
+    let cycle_after = status["cycle_stats"]["cycle_count"].as_u64().unwrap();
+    assert!(
+        cycle_after > cycle_before,
+        "Cycles should advance through online change: {cycle_before} -> {cycle_after}"
+    );
+
+    client.post(format!("{base}/api/v1/program/stop")).send().await.unwrap();
+}
+
+/// When the new bundle changes the variable layout in an incompatible way,
+/// /update transparently falls back to a stop+start sequence.
+#[tokio::test]
+async fn test_update_incompatible_falls_back_to_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    // v1 has `x : INT`
+    let v1 = make_bundle(
+        "Incompat",
+        "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    x := x + 1;\nEND_PROGRAM\n",
+    );
+    upload_bundle(&client, &base, &v1).await;
+    client.post(format!("{base}/api/v1/program/start")).send().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // v2 changes x to REAL — type mismatch is incompatible.
+    let v2 = make_bundle(
+        "Incompat",
+        "PROGRAM Main\nVAR\n    x : REAL := 0.0;\nEND_VAR\n    x := x + 1.5;\nEND_PROGRAM\n",
+    );
+    let resp = post_update(&client, &base, &v2).await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["method"], "restart", "body={body}");
+
+    // Engine is running again with the new program.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let status: serde_json::Value = client
+        .get(format!("{base}/api/v1/status"))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    assert_eq!(status["status"], "running");
+
+    client.post(format!("{base}/api/v1/program/stop")).send().await.unwrap();
+}
+
+/// /update against an idle agent that already has a stored program just
+/// replaces the bundle (cold replace) without auto-starting.
+#[tokio::test]
+async fn test_update_cold_replace_when_idle() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _handle) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    // Initial deploy (no engine running).
+    upload_bundle(&client, &base, &counter_bundle("ColdProj", "1.0.0", 1)).await;
+
+    // Now /update again while idle.
+    let resp = post_update(&client, &base, &counter_bundle("ColdProj", "2.0.0", 2)).await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["method"], "cold_replace");
+    assert_eq!(body["program"]["version"], "2.0.0");
+
+    let status: serde_json::Value = client
+        .get(format!("{base}/api/v1/status"))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    assert_eq!(status["status"], "idle");
+}
+
+/// Read-only mode rejects /update with 403.
+#[tokio::test]
+async fn test_update_rejected_in_read_only_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    config.auth.mode = AuthMode::Token;
+    config.auth.token = Some("ro-token".to_string());
+    config.auth.read_only = true;
+
+    let (base, _handle) = start_agent(config).await;
+    let client = Client::new();
+
+    let bundle = counter_bundle("ROProj", "1.0.0", 1);
+    let part = reqwest::multipart::Part::bytes(bundle).file_name("program.st-bundle");
+    let form = reqwest::multipart::Form::new().part("file", part);
+    let resp = client
+        .post(format!("{base}/api/v1/program/update"))
+        .header("Authorization", "Bearer ro-token")
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
 }

@@ -23,6 +23,32 @@ fn socat_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Decide whether a missing `socat` should panic (CI) or skip (local dev).
+///
+/// In CI we install `socat` as a system dependency on purpose so this entire
+/// test file produces real coverage on the RTU client + framing code. If a
+/// future workflow change drops the package, we'd silently regress ~1.4k
+/// lines of coverage to "0% from acceptance tests" — which is exactly the
+/// state we just spent effort fixing. Setting `ST_REQUIRE_SOCAT=1` (the
+/// `coverage.sh` script and the CI `Test` job both set it) flips the gate
+/// from "skip" to "fail loudly", catching that regression at PR time.
+fn require_socat_or_skip(test_name: &str) -> bool {
+    if socat_available() {
+        return true;
+    }
+    let required = std::env::var("ST_REQUIRE_SOCAT")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if required {
+        panic!(
+            "{test_name}: socat required (ST_REQUIRE_SOCAT=1) but not on PATH. \
+             Install via apt-get install -y socat (CI) or nix-shell -p socat (local)."
+        );
+    }
+    eprintln!("Skipping {test_name} (socat not available)");
+    false
+}
+
 fn spawn_virtual_serial() -> (Child, String, String) {
     let port_a = format!("/tmp/st-modbus-a-{}", std::process::id());
     let port_b = format!("/tmp/st-modbus-b-{}", std::process::id());
@@ -295,8 +321,7 @@ fn run_slave(
 
 #[allow(clippy::type_complexity)]
 fn setup_test() -> Option<(Child, Arc<Mutex<ModbusSlave>>, Arc<std::sync::atomic::AtomicBool>, Arc<Mutex<SerialTransport>>, std::thread::JoinHandle<()>)> {
-    if !socat_available() {
-        eprintln!("Skipping (socat not available)");
+    if !require_socat_or_skip("rtu_integration") {
         return None;
     }
 

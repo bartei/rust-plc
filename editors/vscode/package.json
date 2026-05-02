@@ -234,8 +234,10 @@
       },
       {
         "command": "structured-text.targetOnlineUpdate",
-        "title": "ST: Online Update PLC Program",
-        "category": "Structured Text"
+        "title": "Update PLC Program on Target",
+        "shortTitle": "Update",
+        "category": "Structured Text",
+        "icon": "$(cloud-upload)"
       },
       {
         "command": "structured-text.targetRun",
@@ -291,7 +293,10 @@
     "test:ui:headed": "cd test/ui && npx playwright test --headed",
     "test:remote": "ST_E2E_REMOTE=1 node ./out/test/runRemoteTest.js",
     "test:remote:headed": "ST_E2E_REMOTE=1 ST_HEADED=1 node ./out/test/runRemoteTest.js",
-    "test:remote:qemu": "ST_E2E_REMOTE=qemu node ./out/test/runRemoteTest.js"
+    "test:remote:qemu": "ST_E2E_REMOTE=qemu node ./out/test/runRemoteTest.js",
+    "test:update": "ST_E2E_UPDATE=1 node ./out/test/runUpdateTest.js",
+    "test:update:headed": "ST_E2E_UPDATE=1 ST_HEADED=1 node ./out/test/runUpdateTest.js",
+    "test:update:qemu": "ST_E2E_UPDATE=1 ST_AGENT_PORT=4840 node ./out/test/runUpdateTest.js"
   },
   "dependencies": {
     "preact": "^10.29.1",

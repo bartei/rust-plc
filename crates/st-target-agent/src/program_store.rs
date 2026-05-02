@@ -250,92 +250,12 @@ impl ProgramStore {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use st_deploy::bundle::{create_bundle, write_bundle, BundleOptions};
-
-    fn make_test_bundle() -> Vec<u8> {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        fs::write(
-            root.join("plc-project.yaml"),
-            "name: StoreTest\nversion: '1.0.0'\nentryPoint: Main\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("main.st"),
-            "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    x := x + 1;\nEND_PROGRAM\n",
-        )
-        .unwrap();
-
-        let bundle = create_bundle(root, &BundleOptions::default()).unwrap();
-        let bundle_path = root.join("test.st-bundle");
-        write_bundle(&bundle, &bundle_path).unwrap();
-        fs::read(&bundle_path).unwrap()
-    }
-
-    #[test]
-    fn store_and_retrieve_bundle() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = ProgramStore::new(dir.path()).unwrap();
-        let data = make_test_bundle();
-
-        let meta = store.store_bundle(&data).unwrap();
-        assert_eq!(meta.name, "StoreTest");
-        assert_eq!(meta.version, "1.0.0");
-
-        let current = store.current_program().unwrap();
-        assert_eq!(current.name, "StoreTest");
-    }
-
-    #[test]
-    fn load_module_from_stored_bundle() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = ProgramStore::new(dir.path()).unwrap();
-        let data = make_test_bundle();
-        store.store_bundle(&data).unwrap();
-
-        let (module, entry) = store.load_module().unwrap();
-        assert_eq!(entry, "Main");
-        assert!(module.find_function("Main").is_some());
-    }
-
-    #[test]
-    fn store_replaces_existing() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = ProgramStore::new(dir.path()).unwrap();
-        let data = make_test_bundle();
-
-        store.store_bundle(&data).unwrap();
-        store.store_bundle(&data).unwrap(); // second upload
-        assert!(store.current_program().is_some());
-    }
-
-    #[test]
-    fn remove_clears_current() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = ProgramStore::new(dir.path()).unwrap();
-        let data = make_test_bundle();
-
-        store.store_bundle(&data).unwrap();
-        store.remove_current().unwrap();
-        assert!(store.current_program().is_none());
-    }
-
-    #[test]
-    fn invalid_bundle_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = ProgramStore::new(dir.path()).unwrap();
-        let result = store.store_bundle(b"not a valid bundle");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn load_module_without_program_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ProgramStore::new(dir.path()).unwrap();
-        let result = store.load_module();
-        assert!(result.is_err());
-    }
-}
+// All paths in this module are now exercised end-to-end via
+// `crates/st-target-agent/tests/api_integration.rs`:
+//   - store_bundle           -> test_upload_bundle, test_upload_replaces_existing
+//   - current_program        -> test_program_info
+//   - load_module            -> test_start_stop / test_full_lifecycle
+//   - remove_current         -> test_delete_program
+//   - invalid bundle bytes   -> test_upload_invalid_bundle_returns_400
+//   - load before deploy     -> test_start_without_program (404)
+// The previously-redundant `mod tests` was removed.

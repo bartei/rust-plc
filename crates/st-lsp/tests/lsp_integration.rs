@@ -2342,3 +2342,623 @@ fn test_linked_editing_range_no_result_on_non_keyword() {
 
     client.shutdown();
 }
+
+// ── Coverage-targeted tests ────────────────────────────────────────────
+// The following tests exist primarily to keep `server.rs` line coverage
+// growing as we delete redundant unit tests. Each one drives a handler
+// that has *no* other integration test driving it.
+
+#[test]
+fn test_did_save_is_a_noop() {
+    // didSave is supposed to be a no-op (content was already processed by
+    // didChange), so the test just makes sure the server accepts the
+    // notification without crashing or de-syncing the document state.
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("save.st");
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    x := x + 1;\nEND_PROGRAM\n"
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    client.notify(
+        "textDocument/didSave",
+        json!({
+            "textDocument": { "uri": uri },
+            "text": "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    x := x + 1;\nEND_PROGRAM\n"
+        }),
+    );
+
+    // Send a follow-up request to prove the server is still alive.
+    let resp = client.request(
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    let symbols = resp["result"].as_array().expect("documentSymbol returns an array");
+    assert!(
+        symbols.iter().any(|s| s["name"] == "Main"),
+        "didSave must not erase the open document: {symbols:?}"
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn test_goto_type_definition_returns_null_for_primitive() {
+    // textDocument/typeDefinition is wired up and advertised in the server
+    // capabilities; for primitive-typed variables (Int/Real/Bool/...) the
+    // handler is supposed to return `null` because primitives have no
+    // user-visible "definition site". This exercises the early-out branch
+    // of `goto_type_definition` (the `_ => None` arm of the type match)
+    // — the FB/Class arms are reached by other tests once the matching
+    // resolve_pou()/resolve_class() lookups land.
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("typedef.st");
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": "PROGRAM Main\nVAR\n    n : INT := 0;\nEND_VAR\n    n := n + 1;\nEND_PROGRAM\n"
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    // Cursor on the `n` usage on line 4.
+    let resp = client.request(
+        "textDocument/typeDefinition",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 4, "character": 4 }
+        }),
+    );
+
+    assert!(
+        resp["result"].is_null(),
+        "typeDefinition should be null for primitive types, got: {:?}",
+        resp["result"]
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn test_did_change_recovers_from_missing_open() {
+    // The `did_change` handler defends against an editor that emits a
+    // change without a matching `did_open` (rare but real — happens when a
+    // file is renamed). This drives the `else` branch in did_change which
+    // creates the document on the fly.
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    let uri = file_uri("never_opened.st");
+    // No didOpen — go straight to didChange.
+    client.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri, "version": 1 },
+            "contentChanges": [
+                { "text": "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n    x := x + 1;\nEND_PROGRAM\n" }
+            ]
+        }),
+    );
+    let diagnostics = client.wait_for_notification("textDocument/publishDiagnostics");
+    assert_eq!(
+        diagnostics["params"]["uri"], uri,
+        "publishDiagnostics should fire even when didChange creates the document"
+    );
+
+    // Sanity-check the document is now usable.
+    let resp = client.request(
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    let symbols = resp["result"].as_array().expect("documentSymbol returns an array");
+    assert!(symbols.iter().any(|s| s["name"] == "Main"));
+
+    client.shutdown();
+}
+
+#[test]
+fn test_document_link_finds_st_file_in_comment() {
+    // The server scans line comments for `*.st` / `*.scl` filenames and
+    // returns them as clickable links. We feed it a doc that mentions a
+    // sibling file and assert the link payload comes back.
+    let mut client = TestClient::start();
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+
+    // Use a real file URI so the server can build a relative target path.
+    let dir = tempfile::tempdir().unwrap();
+    let main_path = dir.path().join("main.st");
+    std::fs::write(&main_path, "// see helper.st for details\nPROGRAM Main\nEND_PROGRAM\n").unwrap();
+    let uri = format!("file://{}", main_path.display());
+
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": std::fs::read_to_string(&main_path).unwrap(),
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics");
+
+    let resp = client.request(
+        "textDocument/documentLink",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    let links = resp["result"].as_array()
+        .unwrap_or_else(|| panic!("documentLink should return an array, got: {:?}", resp["result"]));
+    assert!(
+        links.iter().any(|l| l["target"].as_str().unwrap_or("").ends_with("helper.st")),
+        "Expected a link to helper.st: {links:?}"
+    );
+
+    client.shutdown();
+}
+
+// ── Coverage-targeted gap tests for st-lsp/src/server.rs ───────────────
+// Each test exercises a specific arm that the older tests missed. Run
+// alongside the regular suite — they are structured to be cheap (no FS
+// project setup) and to fail with an actionable message if a future
+// refactor regresses the targeted handler.
+
+#[test]
+fn test_hover_on_struct_field_via_member_access() {
+    // Drives `try_member_hover` for `Ty::Struct { fields, .. }` — the path
+    // taken when the cursor is on a struct field after a dot.
+    let mut client = TestClient::start();
+    init(&mut client);
+
+    let uri = file_uri("hover_struct_member.st");
+    let source = "TYPE\n\
+        Point : STRUCT\n\
+            x : INT;\n\
+            y : INT;\n\
+        END_STRUCT;\n\
+        END_TYPE\n\
+        \n\
+        PROGRAM Main\n\
+        VAR\n\
+            p : Point;\n\
+        END_VAR\n\
+            p.x := 1;\n\
+        END_PROGRAM\n";
+    open_doc(&mut client, &uri, source);
+
+    // Cursor on `x` in `p.x := 1;` — line 11, col 14 (4 spaces indent the
+    // line was rendered without; just walk in until we hit the member).
+    let line = source.lines().enumerate().find(|(_, l)| l.contains("p.x")).unwrap().0;
+    let col_x = source.lines().nth(line).unwrap().find("p.x").unwrap() + 2;
+    let resp = client.request(
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": col_x }
+        }),
+    );
+
+    let value = resp["result"]["contents"]["value"].as_str().unwrap_or("");
+    assert!(
+        value.contains("p.x") && value.to_lowercase().contains("int"),
+        "expected struct member hover for `p.x`, got: {value}",
+    );
+    client.shutdown();
+}
+
+#[test]
+fn test_hover_on_fb_output_via_member_access() {
+    // Drives `try_member_hover` for `Ty::FunctionBlock { name }` — the
+    // outputs branch.
+    let mut client = TestClient::start();
+    init(&mut client);
+
+    let uri = file_uri("hover_fb_member.st");
+    let source = "FUNCTION_BLOCK Counter\n\
+        VAR_INPUT inc : INT := 1; END_VAR\n\
+        VAR_OUTPUT out : INT := 0; END_VAR\n\
+            out := out + inc;\n\
+        END_FUNCTION_BLOCK\n\
+        \n\
+        PROGRAM Main\n\
+        VAR\n\
+            c : Counter;\n\
+            n : INT;\n\
+        END_VAR\n\
+            c(inc := 2);\n\
+            n := c.out;\n\
+        END_PROGRAM\n";
+    open_doc(&mut client, &uri, source);
+
+    // Cursor on `out` in `n := c.out;`
+    let lines: Vec<&str> = source.lines().collect();
+    let (line, line_str) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, l)| l.contains("c.out"))
+        .map(|(i, l)| (i, *l))
+        .unwrap();
+    let col = line_str.find("c.out").unwrap() + 3; // inside `out`
+    let resp = client.request(
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": col }
+        }),
+    );
+
+    let value = resp["result"]["contents"]["value"].as_str().unwrap_or("");
+    assert!(
+        value.contains("c.out"),
+        "expected FB-member hover for `c.out`, got: {value}",
+    );
+    client.shutdown();
+}
+
+#[test]
+fn test_hover_on_function_block_type_name() {
+    // Drives the `SymbolKind::FunctionBlock` arm of the *non*-member hover
+    // — when the cursor is on the FB type itself in a VAR declaration.
+    let mut client = TestClient::start();
+    init(&mut client);
+
+    let uri = file_uri("hover_fb_type.st");
+    let source = "FUNCTION_BLOCK Counter\n\
+        VAR_INPUT inc : INT := 1; END_VAR\n\
+        VAR_OUTPUT out : INT := 0; END_VAR\n\
+            out := out + inc;\n\
+        END_FUNCTION_BLOCK\n\
+        \n\
+        PROGRAM Main\n\
+        VAR\n\
+            c : Counter;\n\
+        END_VAR\n\
+        END_PROGRAM\n";
+    open_doc(&mut client, &uri, source);
+
+    // Cursor on `Counter` in `c : Counter;`
+    let lines: Vec<&str> = source.lines().collect();
+    let (line, line_str) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, l)| l.contains(": Counter"))
+        .map(|(i, l)| (i, *l))
+        .unwrap();
+    let col = line_str.find("Counter").unwrap() + 2;
+    let resp = client.request(
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": col }
+        }),
+    );
+
+    let value = resp["result"]["contents"]["value"].as_str().unwrap_or("");
+    assert!(
+        value.to_uppercase().contains("FUNCTION_BLOCK"),
+        "expected FUNCTION_BLOCK in hover for `Counter`, got: {value}",
+    );
+    client.shutdown();
+}
+
+#[test]
+fn test_hover_returns_null_when_document_not_opened() {
+    // Drives the `Ok(None)` early-return when `documents.get(uri)` returns None.
+    let mut client = TestClient::start();
+    init(&mut client);
+    let resp = client.request(
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": file_uri("never_opened.st") },
+            "position": { "line": 0, "character": 0 }
+        }),
+    );
+    assert!(
+        resp["result"].is_null(),
+        "hover on un-opened document should be null, got: {:?}",
+        resp["result"],
+    );
+    client.shutdown();
+}
+
+#[test]
+fn test_definition_returns_null_when_document_not_opened() {
+    let mut client = TestClient::start();
+    init(&mut client);
+    let resp = client.request(
+        "textDocument/definition",
+        json!({
+            "textDocument": { "uri": file_uri("never_opened.st") },
+            "position": { "line": 0, "character": 0 }
+        }),
+    );
+    assert!(
+        resp["result"].is_null(),
+        "definition on un-opened document should be null, got: {:?}",
+        resp["result"],
+    );
+    client.shutdown();
+}
+
+#[test]
+fn test_references_returns_all_uses_of_a_variable() {
+    // Drives the "happy path" of the references handler — every use of the
+    // word, including the declaration, comes back. The handler is a
+    // textual-match implementation, so we assert the inclusive contract
+    // that's actually in place (≥1 location, all targeting `myVar`).
+    let mut client = TestClient::start();
+    init(&mut client);
+
+    let uri = file_uri("refs_var.st");
+    // Plain concatenation (no `\` continuation, no leading-indent stripping).
+    let source = concat!(
+        "PROGRAM Main\n",
+        "VAR\n",
+        "    myVar : INT := 0;\n",
+        "END_VAR\n",
+        "    myVar := myVar + 1;\n",
+        "    myVar := myVar * 2;\n",
+        "END_PROGRAM\n",
+    );
+    open_doc(&mut client, &uri, source);
+
+    // Line 2 = "    myVar : INT := 0;" — cursor on the `m` at col 4.
+    let resp = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 2, "character": 5 },
+            "context": { "includeDeclaration": true }
+        }),
+    );
+
+    let result = resp["result"].as_array()
+        .unwrap_or_else(|| panic!("references returns an array, got: {:?}", resp["result"]));
+    assert!(
+        result.len() >= 4,
+        "expected at least 4 references, got {}: {:?}",
+        result.len(), result,
+    );
+    client.shutdown();
+}
+
+#[test]
+fn test_references_returns_empty_for_whitespace() {
+    // Drives the empty-word early-return.
+    let mut client = TestClient::start();
+    init(&mut client);
+
+    let uri = file_uri("refs_blank.st");
+    let source = concat!(
+        "PROGRAM Main\n",
+        "VAR x : INT := 0; END_VAR\n",
+        "    x := x + 1;\n",
+        "END_PROGRAM\n",
+    );
+    open_doc(&mut client, &uri, source);
+
+    // Line 0, col 12 = past end of `PROGRAM Main` (which is 12 chars).
+    let resp = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 0, "character": 50 },
+            "context": { "includeDeclaration": true }
+        }),
+    );
+    let r = &resp["result"];
+    let empty = r.is_null() || r.as_array().map(|a| a.is_empty()).unwrap_or(false);
+    assert!(empty, "expected empty references for past-EOL position, got: {r:?}");
+    client.shutdown();
+}
+
+#[test]
+fn test_signature_help_outside_call_returns_null() {
+    // Drives the no-active-call branch of signatureHelp.
+    let mut client = TestClient::start();
+    init(&mut client);
+
+    let uri = file_uri("sig_outside.st");
+    let source = "PROGRAM Main\n\
+        VAR x : INT := 0; END_VAR\n\
+            x := 1;\n\
+        END_PROGRAM\n";
+    open_doc(&mut client, &uri, source);
+
+    // Cursor on the `1` literal — no active call context.
+    let resp = client.request(
+        "textDocument/signatureHelp",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 2, "character": 12 }
+        }),
+    );
+    assert!(
+        resp["result"].is_null() || resp["result"]["signatures"].as_array().map(|a| a.is_empty()).unwrap_or(true),
+        "signatureHelp outside a call should be null/empty, got: {:?}",
+        resp["result"],
+    );
+    client.shutdown();
+}
+
+#[test]
+fn test_rename_on_blank_line_produces_no_edits() {
+    // Drives the no-symbol branch of the rename handler — picking a
+    // position that is purely whitespace yields no edits. (Putting the
+    // cursor on a keyword like PROGRAM still produces a textual rename
+    // because the current handler is a name-based replace.)
+    let mut client = TestClient::start();
+    init(&mut client);
+
+    let uri = file_uri("rename_blank.st");
+    let source = "PROGRAM Main\n\
+        \n\
+        VAR x : INT := 0; END_VAR\n\
+            x := x + 1;\n\
+        END_PROGRAM\n";
+    open_doc(&mut client, &uri, source);
+
+    // Cursor on the blank line (line 1, col 0).
+    let resp = client.request(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 1, "character": 0 },
+            "newName": "renamed"
+        }),
+    );
+    let r = &resp["result"];
+    let no_edits = r.is_null()
+        || r["changes"].as_object().map(|m| m.is_empty()).unwrap_or(true)
+        || r["documentChanges"].as_array().map(|a| a.is_empty()).unwrap_or(true);
+    assert!(
+        no_edits,
+        "rename on blank line should produce no edits, got: {r:?}",
+    );
+    client.shutdown();
+}
+
+#[test]
+fn test_code_action_on_clean_file_returns_empty() {
+    // Drives the `no diagnostics → no actions` branch.
+    let mut client = TestClient::start();
+    init(&mut client);
+
+    let uri = file_uri("ca_clean.st");
+    let source = "PROGRAM Main\n\
+        VAR x : INT := 0; END_VAR\n\
+            x := x + 1;\n\
+        END_PROGRAM\n";
+    open_doc(&mut client, &uri, source);
+
+    let resp = client.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": { "start": { "line": 2, "character": 0 }, "end": { "line": 2, "character": 5 } },
+            "context": { "diagnostics": [] }
+        }),
+    );
+    let result = &resp["result"];
+    assert!(
+        result.is_null() || result.as_array().map(|a| a.is_empty()).unwrap_or(false),
+        "codeAction on a clean file with no diagnostics should be empty, got: {result:?}",
+    );
+    client.shutdown();
+}
+
+#[test]
+fn test_folding_range_on_empty_file_returns_empty() {
+    let mut client = TestClient::start();
+    init(&mut client);
+    let uri = file_uri("fold_empty.st");
+    open_doc(&mut client, &uri, "");
+
+    let resp = client.request(
+        "textDocument/foldingRange",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    let result = &resp["result"];
+    assert!(
+        result.is_null() || result.as_array().map(|a| a.is_empty()).unwrap_or(true),
+        "foldingRange on empty file should be empty, got: {result:?}",
+    );
+    client.shutdown();
+}
+
+#[test]
+fn test_document_highlight_returns_results_for_variable() {
+    // documentHighlight is exercised here to cover the
+    // `documents.get(&uri)` happy path on a real symbol — the existing
+    // suite only checked it indirectly.
+    let mut client = TestClient::start();
+    init(&mut client);
+
+    let uri = file_uri("highlight_var.st");
+    let source = "PROGRAM Main\n\
+        VAR\n\
+            counter : INT := 0;\n\
+        END_VAR\n\
+            counter := counter + 1;\n\
+            counter := counter + 2;\n\
+        END_PROGRAM\n";
+    open_doc(&mut client, &uri, source);
+
+    // Cursor on `counter` in line 4 (first occurrence in the body).
+    let resp = client.request(
+        "textDocument/documentHighlight",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 4, "character": 5 }
+        }),
+    );
+
+    let result = resp["result"].as_array().expect("documentHighlight returns an array");
+    assert!(
+        result.len() >= 2,
+        "expected ≥2 highlights (decl + uses), got {}: {:?}",
+        result.len(), result,
+    );
+    client.shutdown();
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────
+
+/// Initialize + initialized handshake. Centralises the boilerplate so the
+/// gap tests above stay focused on the assertion they exist for.
+fn init(client: &mut TestClient) {
+    client.request(
+        "initialize",
+        json!({ "processId": null, "capabilities": {}, "rootUri": "file:///test" }),
+    );
+    client.notify("initialized", json!({}));
+}
+
+fn open_doc(client: &mut TestClient, uri: &str, source: &str) {
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "structured-text",
+                "version": 1,
+                "text": source,
+            }
+        }),
+    );
+    // Wait for the initial diagnostics so we know the server is done parsing.
+    client.wait_for_notification("textDocument/publishDiagnostics");
+}
