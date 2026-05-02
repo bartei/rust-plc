@@ -535,6 +535,68 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }),
 
+    vscode.commands.registerCommand(
+      "structured-text.targetLiveAttach",
+      async (arg?: { host?: string; port?: number; localRoot?: string }): Promise<vscode.DebugSession | undefined> => {
+        // Resolve host + DAP port: prefer explicit args (the Monitor panel
+        // toolbar passes them), then fall back to the active target.
+        let host: string | undefined = arg?.host;
+        let dapPort: number | undefined = arg?.port;
+        if (!host) {
+          const resolved = await resolveActiveTargetWithPort("Live Attach Debugger");
+          if (!resolved) return undefined;
+          host = resolved.host;
+          // resolveActiveTargetWithPort returns the AGENT port; the DAP
+          // proxy listens on agent_port + 1, matching the convention used
+          // by the manual attach launch.json snippet.
+          dapPort = resolved.port + 1;
+        }
+
+        // Sensible default for localRoot — the workspace folder. Without
+        // it, source-mapped breakpoints would not resolve to the agent's
+        // extracted source paths.
+        const localRoot = arg?.localRoot
+          ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+        const config: vscode.DebugConfiguration = {
+          type: "st",
+          name: `Live Attach — ${host}:${dapPort}`,
+          request: "attach",
+          host,
+          port: dapPort,
+          stopOnEntry: false,
+          ...(localRoot ? { localRoot } : {}),
+        };
+
+        const sessionPromise = new Promise<vscode.DebugSession | undefined>((resolve) => {
+          const startD = vscode.debug.onDidStartDebugSession((s) => {
+            startD.dispose();
+            resolve(s);
+          });
+          // Safety: don't wait forever if the session fails to start.
+          setTimeout(() => { startD.dispose(); resolve(undefined); }, 6000);
+        });
+
+        const launched = await vscode.debug.startDebugging(
+          vscode.workspace.workspaceFolders?.[0],
+          config,
+        );
+        if (!launched) {
+          vscode.window.showErrorMessage(
+            `Live Attach failed to start (host=${host}, port=${dapPort}).`,
+          );
+          return undefined;
+        }
+        const session = await sessionPromise;
+        if (session) {
+          vscode.window.showInformationMessage(
+            `Live Attach connected to ${host}:${dapPort} — execution continues, breakpoints active`,
+          );
+        }
+        return session;
+      },
+    ),
+
     vscode.commands.registerCommand("structured-text.targetRun", async () => {
       const { host, port } = await resolveActiveTargetWithPort("Start PLC Program") || {};
       if (!host) return;

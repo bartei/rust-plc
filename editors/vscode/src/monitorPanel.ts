@@ -182,6 +182,17 @@ export class MonitorPanel {
           vscode.commands.executeCommand("structured-text.targetOnlineUpdate");
         }
         break;
+      case "tb:liveAttach":
+        if (this.selectedTargetHost) {
+          // The DAP proxy listens on agent_port + 1 by convention.
+          vscode.commands.executeCommand("structured-text.targetLiveAttach", {
+            host: this.selectedTargetHost,
+            port: this.selectedTargetPort + 1,
+          });
+        } else {
+          vscode.commands.executeCommand("structured-text.targetLiveAttach");
+        }
+        break;
       case "tb:run":
         vscode.commands.executeCommand("structured-text.targetRun");
         break;

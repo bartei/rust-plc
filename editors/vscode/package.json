@@ -240,6 +240,13 @@
         "icon": "$(cloud-upload)"
       },
       {
+        "command": "structured-text.targetLiveAttach",
+        "title": "Live Attach Debugger to Running Target",
+        "shortTitle": "Live Attach",
+        "category": "Structured Text",
+        "icon": "$(debug-alt-small)"
+      },
+      {
         "command": "structured-text.targetRun",
         "title": "ST: Start PLC Program on Target",
         "category": "Structured Text"

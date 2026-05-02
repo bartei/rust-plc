@@ -108,6 +108,13 @@ export function Toolbar({
           <button onClick={() => send("tb:stop")} disabled={!isRunning} title="Stop the PLC program">
             <span class="tb-icon">&#x25A0;</span> Stop
           </button>
+          <button
+            onClick={() => send("tb:liveAttach")}
+            disabled={!isRunning}
+            title="Attach the VS Code debugger to the running program — execution continues, breakpoints fire on demand"
+          >
+            <span class="tb-icon">&#x1F41E;</span> Live Attach
+          </button>
         </div>
         <div class="tb-status">
           <span class={dotClass} />

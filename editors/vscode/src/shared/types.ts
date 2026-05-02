@@ -87,6 +87,7 @@ export type WebviewToHostMessage =
   | { command: "tb:onlineUpdate" }
   | { command: "tb:run" }
   | { command: "tb:stop" }
+  | { command: "tb:liveAttach" }
   | { command: "tb:selectTarget"; host: string; agentPort: number }
   | { command: "tb:refreshTargets" }
   | { command: "tb:fetchTargetInfo" };
