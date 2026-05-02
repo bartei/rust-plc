@@ -226,18 +226,38 @@
 
 - [x] "Update" command in command palette
 - [x] "Update" button in target status bar
-- [ ] Notification with update result (online change vs restart, downtime)
+- [x] Notification with update result (online change vs restart, downtime) —
+      `formatUpdateResult` summarises preserved/new/removed vars
 - [ ] Debug session survives online change (DAP session stays connected)
 - [ ] Monitor panel continues after update (watch list preserved)
 
+### Live Attach (non-intrusive debug, COMPLETED)
+
+- [x] `structured-text.targetLiveAttach` command — `request: "attach"`
+      with `stopOnEntry: false` against the running engine
+- [x] PLC Monitor toolbar "Live Attach" button (disabled unless running)
+- [x] Auto-resolves DAP port from active target's `agent_port + 1`
+- [x] Defaults `localRoot` to the workspace folder so source-mapped
+      breakpoints resolve through the agent's `PathMapper`
+
 ### Tests
 
-- [ ] Online change via agent: compatible update, variables migrated
-- [ ] Full restart via agent: incompatible update, clean restart
+- [x] Online change via agent: compatible update, variables migrated
+      (`api_integration::test_update_online_change_preserves_running_state`)
+- [x] Full restart via agent: incompatible update, clean restart
+      (`api_integration::test_update_incompatible_falls_back_to_restart`)
 - [ ] Rollback test: online change fails, old program continues
 - [ ] Update during debug: DAP session survives
 - [ ] Update during monitor: telemetry continues after brief pause
 - [ ] Dry-run test: reports correct method without applying
+
+### Live Attach — Tests (COMPLETED)
+
+- [x] `attach-running.test.ts` (gated by `ST_E2E_ATTACH=1`, runs under
+      xvfb in CI) — 6 tests covering: stopOnEntry=false leaves engine
+      running, breakpoints freeze + clear+continue resumes, disconnect
+      leaves engine alive, command palette discoverability, command
+      starts the right session config, Toolbar.tsx wiring
 
 ---
 

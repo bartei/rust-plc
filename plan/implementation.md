@@ -226,7 +226,7 @@ Infrastructure: `@vscode/test-electron` (real Electron instance) + Playwright (w
 - [x] Diagnostics appear for undeclared variable
 - [x] Syntax highlighting provides tokens
 
-### Debug button tests (via @vscode/test-electron) — 9 passing
+### Debug button tests (via @vscode/test-electron) — 11 passing
 
 - [x] Launch with `stopOnEntry` pauses at first statement
 - [x] Step In advances to next line
@@ -237,6 +237,34 @@ Infrastructure: `@vscode/test-electron` (real Electron instance) + Playwright (w
 - [x] Stop terminates the session
 - [x] Stop during Continue terminates cleanly
 - [x] Breakpoint hit stops at correct line
+- [x] Force / unforce variable via DAP `evaluate` — `listForced` reflects state
+- [x] Multi-file project: breakpoint in `helper.st` fires from `main.st`
+
+### LSP headless tests (via @vscode/test-electron) — 6 passing
+
+- [x] Hover on INT variable returns type info
+- [x] Hover on REAL variable returns REAL type
+- [x] Hover on whitespace returns no result (handler null path)
+- [x] Go-to-definition on a local variable jumps to its declaration
+- [x] Go-to-definition across files lands in the helper file
+- [x] Go-to-definition on whitespace returns nothing
+
+### Online update headless tests (via @vscode/test-electron) — 5 passing
+
+- [x] Initial deploy via `targetOnlineUpdate` command (cold)
+- [x] Online change applied while engine running (variables preserved)
+- [x] Incompatible update falls back to clean restart
+- [x] `targetOnlineUpdate` command exposed in command palette
+- [x] Status bar item is wired to the update command
+
+### Non-intrusive Live Attach tests (via @vscode/test-electron) — 6 passing
+
+- [x] Attach with `stopOnEntry: false` does NOT pause the running engine
+- [x] Setting a breakpoint freezes the cycle counter, clear+continue resumes
+- [x] Disconnecting the debugger leaves the engine running
+- [x] `targetLiveAttach` command appears in the palette
+- [x] `targetLiveAttach` command starts a non-intrusive debug session
+- [x] `tb:liveAttach` button wired into the Monitor toolbar message handler
 
 ### Playwright webview tests — 19 passing, 2 skipped (Docker)
 
@@ -342,6 +370,25 @@ Infrastructure: `@vscode/test-electron` (real Electron instance) + Playwright (w
 - [x] Call stack cleanup on detach
 - [x] stop() accepts DebugPaused state
 - [ ] E2E QEMU singleton tests (not yet run)
+
+### Phase F — Live Attach UX (COMPLETED)
+
+- [x] `structured-text.targetLiveAttach` command — `request: "attach"` with
+      `stopOnEntry: false`, host/DAP-port/localRoot resolved from active
+      target or explicit args
+- [x] PLC Monitor toolbar: "Live Attach" button next to Run/Stop, disabled
+      unless engine is running
+- [x] Webview message wiring: `tb:liveAttach` posts to host, host forwards
+      to the command with the selected target's host + DAP port
+- [x] Command palette + status-bar discoverability via `shortTitle` + icon
+- [x] TDD acceptance suite (`attach-running.test.ts`, gated by
+      `ST_E2E_ATTACH=1`, runs under xvfb in CI):
+  - [x] attach with `stopOnEntry: false` keeps cycle counter advancing
+  - [x] setBreakpoints freezes counter; clear+continue resumes
+  - [x] disconnect leaves engine running
+  - [x] Live Attach command appears in palette
+  - [x] Live Attach command starts session with the right config
+  - [x] Toolbar.tsx + compiled webview bundle reference `tb:liveAttach`
 
 ---
 

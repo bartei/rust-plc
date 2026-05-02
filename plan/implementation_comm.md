@@ -145,6 +145,9 @@
 - [x] Register scaling/offset from profile
 - [x] Multi-rate I/O via refresh_rate
 - [x] 19 unit tests + 9 integration tests with socat Modbus slave simulator
+- [x] `ST_REQUIRE_SOCAT=1` gate: tests panic loudly (not silently skip) when
+      socat is missing, so a CI workflow change accidentally dropping the
+      apt package can't quietly regress ~1.4k lines of acceptance coverage
 
 ### Remaining
 
@@ -158,7 +161,6 @@
 - [x] OS input + output buffer purge (`ClearBuffer::All`) at the start of every `transaction_framed`, with hex-logged discard so flushed bytes are observable
 - [x] Per-transaction OS read timeout (`port.set_timeout`) reconciled with the caller's deadline so short transaction timeouts aren't stretched
 - [x] Tracing instrumentation: `tx ok`/`tx timeout`/`tx invalid` lines with hex dumps of request + (partial) response, and per-transaction send/recv timing
-- [ ] Retry logic (1 retry on transient errors — ERR_TIMEOUT/CRC/MISMATCH classes)
 
 ### Two-Layer Architecture (COMPLETED)
 
@@ -196,6 +198,10 @@
 - [x] Registration in CLI (`comm_setup.rs`), LSP (`document.rs`), DAP (`server.rs`)
 - [x] Device profiles use `protocol: modbus-tcp` (register map is protocol-independent)
 - [x] 25 unit tests: frame building/parsing, MBAP header, transport, layout, slot constants
+- [x] 10 integration tests in `tests/client_integration.rs`: in-process std-only
+      Modbus TCP slave exercising every `TcpModbusClient` method (FC01-06,
+      FC0F, FC10) plus disconnect/reconnect and transaction-id sequencing —
+      no external deps, runs alongside unit tests in plain `cargo test`
 - [x] Playground: `playground/modbus_tcp_demo/` with Waveshare 8-relay profile
 - [x] Manual test: real hardware with Waveshare 8-relay output over TCP (verified)
 

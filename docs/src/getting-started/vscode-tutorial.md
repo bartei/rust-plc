@@ -479,6 +479,34 @@ The monitor server's WebSocket API also supports **online change** (hot-reload).
 
 This enables an iterative development workflow where you can edit program logic and see the effects immediately in the monitor panel, without losing runtime state.
 
+The Monitor toolbar's **Online Update** button (cloud-upload icon)
+posts the current bundle to the agent's `program/update` endpoint and
+reports back which path was taken (online change vs full restart) and
+the resulting downtime.
+
+### Live Attach: Debug a Running Program Without Pausing It
+
+When the program is running on a target, the Monitor toolbar shows a
+**Live Attach** button next to Run/Stop (the bug icon). Click it to
+attach the VS Code debugger to the live engine without interrupting
+the scan cycle:
+
+- The cycle counter keeps advancing while the debugger is connected.
+- Breakpoints fire on demand — the engine only pauses when execution
+  reaches a breakpoint line.
+- Step / Continue / Pause work exactly as in a normal launch session.
+- Closing the debug session leaves the engine running.
+
+The same surface is available from the command palette as
+**`Live Attach Debugger to Running Target`**, or via a manual
+`launch.json` snippet that sets `stopOnEntry: false`. Use this when
+you need to inspect a production-style target's variables, hit a
+specific code path on demand, or verify that a particular branch is
+exercised — all without halting the scan cycle.
+
+> **Tip:** Live Attach requires a development bundle. Release bundles
+> have no debug info and the agent will reject the connection.
+
 ---
 
 ## Troubleshooting

@@ -328,45 +328,98 @@ The `scripts/build-static.sh aarch64` script sets this automatically.
 
 ## Code Coverage
 
-The project uses `cargo-llvm-cov` for coverage reporting:
+Use `scripts/coverage.sh` — a thin wrapper around `cargo-llvm-cov` that
+fixes a subtle measurement bug for child-process tests (LSP, DAP, agent):
+when a test spawns a binary, the binary needs `-Cinstrument-coverage`
+flags too, otherwise the file the binary executes shows as 0% even
+though the test passes. The script sources `cargo llvm-cov show-env`
+and rebuilds `st-cli` + `st-target-agent` instrumented before running
+the suite.
 
 ```bash
-# Install (one-time)
-cargo install cargo-llvm-cov
+# Install cargo-llvm-cov (one-time)
+cargo install cargo-llvm-cov --locked
 
-# Generate an HTML coverage report
-cargo llvm-cov --workspace --html
+# Run the full workspace coverage. socat is hard-required so the
+# Modbus RTU + serial integration tests can't silently skip and
+# regress ~1.4k lines of comm-stack coverage.
+./scripts/coverage.sh
 
-# Generate a summary to the terminal
-cargo llvm-cov --workspace
+# Skip the comm tests for a fast local loop
+./scripts/coverage.sh --no-comm
 
-# Open the HTML report
-open target/llvm-cov/html/index.html
+# Also produce an HTML report
+./scripts/coverage.sh --html
+
+# Gate: fail if line coverage drops below N (CI uses --fail-under 60)
+./scripts/coverage.sh --fail-under 60
 ```
 
-### Current Coverage
+The script writes `target/llvm-cov/{lcov.info, coverage.json, summary.txt}`
+and (with `--html`) a navigable report at `target/llvm-cov/html/index.html`.
 
-Overall workspace coverage is approximately **87%**, with core logic crates
-achieving higher:
+### `ST_REQUIRE_SOCAT` gate
 
-| Crate | Approximate Coverage |
-|---|---|
-| st-grammar | ~95% |
-| st-syntax (lower.rs) | ~92% |
-| st-semantics (analyze.rs) | ~95% |
-| st-semantics (types.rs) | ~98% |
-| st-semantics (scope.rs) | ~96% |
-| st-ir | ~90% |
-| st-compiler | ~88% |
-| st-engine (vm.rs) | ~91% |
-| st-engine (engine.rs) | ~85% |
-| st-lsp | ~78% |
-| st-cli | ~65% |
-| st-dap | ~82% |
-| st-monitor | ~80% |
+The Modbus RTU and serial integration tests gracefully skip when
+`socat` is missing on PATH, but in environments that promised to have
+socat (CI, the coverage script) we want them to fail loudly instead.
+Setting `ST_REQUIRE_SOCAT=1` flips the gate from "skip" to "panic with
+a clear install hint". Both the coverage script and the CI `Test` job
+set it.
 
-The `coverage_gaps.rs` files in `st-syntax` and `st-semantics` were added
-specifically to close coverage holes on edge cases and error paths.
+### Current Coverage (workspace TOTAL)
+
+The latest full run produces:
+
+| Metric | Value |
+|---|---:|
+| Region coverage | 70.81% |
+| Function coverage | 74.39% |
+| Line coverage | **71.82%** |
+
+Per-crate (line%, sorted descending):
+
+| Crate | Line% |
+|---|---:|
+| st-grammar | 100.0% |
+| st-opcua-server | 91.8% |
+| st-semantics | 91.0% |
+| st-compiler | 88.0% |
+| st-syntax | 87.8% |
+| st-comm-api | 82.2% |
+| st-engine | 80.2% |
+| st-comm-serial | 78.5% |
+| st-ir | 76.2% |
+| st-dap | 73.9% |
+| st-deploy | 71.9% |
+| st-lsp | 70.4% |
+| st-comm-modbus | 70.1% |
+| st-monitor | 70.0% |
+| st-target-agent | 59.5% |
+| st-comm-modbus-tcp | 51.1% |
+| st-runtime | 37.5% |
+| st-cli | 36.9% |
+| st-comm-sim | 36.5% |
+
+The `coverage_gaps.rs` files in `st-syntax` and `st-semantics` were
+added specifically to close coverage holes on edge cases and error
+paths.
+
+## Headless VS Code suites
+
+The extension exposes four electron suites via `@vscode/test-electron`,
+each with its own runner so they can be exercised independently:
+
+| npm script | Suite | Gated by | What it covers |
+|---|---|---|---|
+| `npm run test` | `runTest.js` | (none) | Extension activation, monitor panel, debug toolbar, LSP hover/goto, multi-file breakpoints, force/unforce |
+| `npm run test:remote` | `runRemoteTest.js` | `ST_E2E_REMOTE=1` | Remote DAP attach, online update during debug session |
+| `npm run test:update` | `runUpdateTest.js` | `ST_E2E_UPDATE=1` | `program/update` end-to-end (initial deploy → online change → restart) plus command-palette + status-bar wiring |
+| `npm run test:attach` | `runAttachTest.js` | `ST_E2E_ATTACH=1` | Non-intrusive Live Attach: cycle counter keeps advancing, breakpoints fire on demand, Live Attach button + command wiring |
+
+CI runs all four under `xvfb-run` in the `vscode-electron` job. The
+runners spin up their own private `st-target-agent` so they don't
+collide with each other on default ports.
 
 ## Adding New Tests
 
