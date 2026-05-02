@@ -35,39 +35,33 @@ VAR
     conveyor : ConveyorController;
     stats : ProcessData;
 
-    fillers : ARRAY[0..9] OF FillController;
-
     cycle : INT := 0;
     bottle_sensor : BOOL := FALSE;
     filling : BOOL := FALSE;
     moving : BOOL := TRUE;
-    test_array: ARRAY[0..9] OF INT;
-    time_of_day: TOD;
-    modcycle: UINT;
-    i: INT;
 END_VAR
+VAR PERSISTENT RETAIN
+    target_fill_preset: INT := 50;
+END_VAR
+
     cycle := cycle + 1;
-    modcycle := cycle MOD 100;
-    time_of_day := TO_TOD(IN1 := TO_LINT(IN1 := cycle) * 1000 * 60);
 
-    test_array[0] := cycle;
-
-    FOR i := 1 TO 9 DO
-        test_array[i] := test_array[i-1] + 1;
-    END_FOR;
-
-    bottle_sensor := ((cycle MOD 20) = 0) AND conveyor.motor_running;
+    bottle_sensor := ((cycle MOD 200) = 0) AND conveyor.motor_running;
 
     IF bottle_sensor AND moving THEN
         filling := TRUE;
         moving := FALSE;
     END_IF;
 
+    IF NOT bottle_sensor AND NOT filling THEN
+        moving := TRUE;
+    END_IF;
+
     // Run conveyor
     conveyor(run_cmd := moving, speed_setpoint := ClampSpeed(speed := 50, max_speed := 100));
 
     // Fill when bottle detected
-    filler(start := bottle_sensor, target_fill := 5);
+    filler(start := bottle_sensor, target_fill := target_fill_preset);
 
     IF filler.fill_done AND filling THEN
         filling := FALSE;

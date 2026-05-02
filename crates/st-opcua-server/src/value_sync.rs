@@ -13,6 +13,7 @@ use crate::PlcDataProvider;
 use opcua_server::node_manager::memory::SimpleNodeManager;
 use opcua_server::ServerHandle;
 use opcua_types::{DataValue, DateTime, NodeId, StatusCode, Variant};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +34,11 @@ pub async fn run_value_sync(
         &addr::build_layout(&prev_catalog),
     );
     let mut sync_count: u64 = 0;
+    // Dedupe warn-spam from the per-cycle value-sync writes: log each
+    // (NodeId, StatusCode) pair at most once per catalog generation, so a
+    // permanently-broken node produces a single warning instead of one per
+    // sync interval. Cleared whenever the catalog is rebuilt.
+    let mut warned: HashSet<(NodeId, StatusCode)> = HashSet::new();
 
     tracing::info!(
         "OPC-UA: value sync task starting (interval={}ms)",
@@ -47,11 +53,12 @@ pub async fn run_value_sync(
         if catalog_changed(&prev_catalog, &catalog) {
             tracked_nodes = rebuild_address_space(&handle, &catalog, &tracked_nodes, &provider);
             prev_catalog = catalog.clone();
+            warned.clear();
         }
 
         // Sync values from PLC to OPC-UA nodes
         let variables = provider.all_variables();
-        update_node_values(&handle, &variables);
+        update_node_values(&handle, &variables, &mut warned);
 
         // Update status and cycle stats nodes
         update_status_nodes(&handle, &provider);
@@ -224,7 +231,11 @@ fn default_value_for_type(iec_type: &str) -> Variant {
     }
 }
 
-fn update_node_values(handle: &ServerHandle, variables: &[crate::VariableSnapshot]) {
+fn update_node_values(
+    handle: &ServerHandle,
+    variables: &[crate::VariableSnapshot],
+    warned: &mut HashSet<(NodeId, StatusCode)>,
+) {
     let Some(nm) = handle
         .node_managers()
         .get_of_type::<SimpleNodeManager>()
@@ -255,16 +266,46 @@ fn update_node_values(handle: &ServerHandle, variables: &[crate::VariableSnapsho
         })
         .collect();
 
+    // Fast path: batched write. If it fails, the SimpleNodeManager only
+    // returns the first failing StatusCode — we have no idea which node
+    // caused it. Fall back to per-node writes to identify the culprit.
     let items: Vec<(&NodeId, Option<&opcua_types::NumericRange>, DataValue)> = owned_node_ids
         .iter()
-        .zip(data_values)
+        .zip(data_values.iter().cloned())
         .map(|(id, dv)| (id, None, dv))
         .collect();
 
-    if let Err(e) = nm.set_values(subscriptions, items.into_iter()) {
-        // BadNodeIdUnknown is expected during catalog transitions
-        if e != StatusCode::BadNodeIdUnknown {
-            tracing::warn!("OPC-UA: value sync error — {e}");
+    if nm.set_values(subscriptions, items.into_iter()).is_ok() {
+        return;
+    }
+
+    // Slow diagnostic path: write one node at a time so the warn message
+    // can name the offending NodeId. Each (NodeId, StatusCode) pair is
+    // logged at most once until the next catalog rebuild.
+    for ((id, dv), var) in owned_node_ids
+        .iter()
+        .zip(data_values.into_iter())
+        .zip(variables.iter())
+    {
+        let item = std::iter::once((
+            id,
+            None::<&opcua_types::NumericRange>,
+            dv,
+        ));
+        if let Err(e) = nm.set_values(subscriptions, item) {
+            // BadNodeIdUnknown is expected during catalog transitions and
+            // doesn't deserve a warning even on the slow path.
+            if e == StatusCode::BadNodeIdUnknown {
+                continue;
+            }
+            if warned.insert((id.clone(), e)) {
+                tracing::warn!(
+                    "OPC-UA: value sync error on node {} (iec_type={}) — {}",
+                    id,
+                    var.iec_type,
+                    e,
+                );
+            }
         }
     }
 }

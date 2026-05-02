@@ -1,11 +1,19 @@
 # Cross-compilation linker configuration.
 #
-# These linker wrappers use nix-shell to provide the musl cross-compiler
-# toolchain on demand. This means `cargo build --target x86_64-unknown-linux-musl`
-# works without manually entering a nix-shell first.
+# The wrapper scripts use nix-shell to provide a real musl cross-compiler
+# (`pkgsCross.musl64.stdenv.cc` / `pkgsCross.aarch64-multiplatform-musl.stdenv.cc`).
+# Both the host and the devcontainer have Nix installed, so the same path
+# works everywhere.
 #
-# Prerequisites: Nix package manager installed (see .devcontainer/Dockerfile
-# or https://install.determinate.systems/nix).
+# Why a real cross-compiler and not Debian's `musl-tools`: the latter is a
+# specs-file wrapper around the host glibc gcc, and unconditionally embeds
+# `PT_INTERP = /lib/ld-musl-x86_64.so.1` in the linked binary even with
+# `-static-pie -nodefaultlibs`. The kernel then refuses to exec the binary
+# on glibc-only target machines (ENOENT on the missing interpreter), which
+# bash surfaces as "cannot execute: required file not found".
+#
+# See plan/cross_compilation_gaps.md for the longer-term flake.nix + pinning
+# plan.
 
 [target.x86_64-unknown-linux-musl]
 linker = "scripts/nix-musl-cc-x86_64.sh"

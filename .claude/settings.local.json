@@ -23,7 +23,25 @@
       "Bash(PKG_CONFIG_PATH=/nix/store/v38m4px5x7b39fsbcnxbi1l7n5k8a23k-systemd-259.3-dev/lib/pkgconfig cargo clippy -p st-comm-serial -p st-comm-modbus --all-targets -- -D warnings)",
       "Bash(PKG_CONFIG_PATH=/nix/store/v38m4px5x7b39fsbcnxbi1l7n5k8a23k-systemd-259.3-dev/lib/pkgconfig cargo test -p st-comm-modbus -p st-comm-serial -- --test-threads=1)",
       "Bash(PKG_CONFIG_PATH=/nix/store/v38m4px5x7b39fsbcnxbi1l7n5k8a23k-systemd-259.3-dev/lib/pkgconfig cargo test -p st-comm-modbus --lib -- classify_error combine)",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(./node_modules/.bin/tsc --noEmit -p .)",
+      "Bash(./node_modules/.bin/tsc -p .)",
+      "Bash(curl -s -o /dev/null -w 'health=%{http_code}\\\\n' --connect-timeout 2 http://127.0.0.1:4840/api/v1/health)",
+      "Bash(curl -s http://127.0.0.1:4840/api/v1/target-info)",
+      "Bash(ssh *)",
+      "Bash(/home/sbertelli/CLionProjects/rust-plc/target/x86_64-unknown-linux-musl/release-static/st-runtime --help)",
+      "Bash(scripts/build-static.sh)",
+      "Bash(/home/sbertelli/CLionProjects/rust-plc/tests/e2e-deploy/vm/stop-vm.sh x86_64)",
+      "Bash(awk '-F[[:space:]][[:space:]]+' ' *)",
+      "Bash(bash *)",
+      "Bash(chmod +x /home/sbertelli/CLionProjects/rust-plc/scripts/coverage.sh)",
+      "Bash(python3 *)",
+      "Bash(tests/e2e-deploy/vm/start-vm.sh x86_64)",
+      "Bash(tests/e2e-deploy/vm/wait-ssh.sh 2222 90)",
+      "Bash(ST_E2E_ATTACH=1 nix-shell -p nodejs --run \"node ./out/test/runAttachTest.js\")",
+      "Bash(ST_E2E_ATTACH=1 RUST_LOG=info nix-shell -p nodejs --run \"node ./out/test/runAttachTest.js\")",
+      "Bash(mdbook build *)"
     ]
   }
 }

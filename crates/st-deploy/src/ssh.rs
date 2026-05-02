@@ -171,8 +171,13 @@ impl SshTarget {
 
     fn ssh_args(&self) -> Vec<String> {
         let mut args = vec![
-            "-o".to_string(), "StrictHostKeyChecking=accept-new".to_string(),
+            // Host key verification is fully disabled: targets get reflashed
+            // routinely during dev, which rotates their host keys and would
+            // trip `accept-new`. Combined with `UserKnownHostsFile=/dev/null`
+            // this also skips the global known_hosts file.
+            "-o".to_string(), "StrictHostKeyChecking=no".to_string(),
             "-o".to_string(), "UserKnownHostsFile=/dev/null".to_string(),
+            "-o".to_string(), "GlobalKnownHostsFile=/dev/null".to_string(),
             "-o".to_string(), "LogLevel=ERROR".to_string(),
             "-o".to_string(), "ConnectTimeout=30".to_string(),
             "-o".to_string(), "BatchMode=yes".to_string(),
@@ -186,8 +191,9 @@ impl SshTarget {
     }
 
     fn add_ssh_options(&self, cmd: &mut Command) {
-        cmd.args(["-o", "StrictHostKeyChecking=accept-new"]);
+        cmd.args(["-o", "StrictHostKeyChecking=no"]);
         cmd.args(["-o", "UserKnownHostsFile=/dev/null"]);
+        cmd.args(["-o", "GlobalKnownHostsFile=/dev/null"]);
         cmd.args(["-o", "LogLevel=ERROR"]);
         cmd.args(["-o", "ConnectTimeout=30"]);
         cmd.args(["-o", "BatchMode=yes"]);
