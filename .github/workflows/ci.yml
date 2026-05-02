@@ -232,6 +232,11 @@ jobs:
         env:
           ST_E2E_UPDATE: "1"
         run: xvfb-run -a node ./out/test/runUpdateTest.js
+      - name: Run non-intrusive attach electron tests under xvfb
+        working-directory: editors/vscode
+        env:
+          ST_E2E_ATTACH: "1"
+        run: xvfb-run -a node ./out/test/runAttachTest.js
 
   # ── Playwright UI tests (monitor panel webview) ─────────────────────
   playwright:

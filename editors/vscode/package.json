@@ -296,7 +296,9 @@
     "test:remote:qemu": "ST_E2E_REMOTE=qemu node ./out/test/runRemoteTest.js",
     "test:update": "ST_E2E_UPDATE=1 node ./out/test/runUpdateTest.js",
     "test:update:headed": "ST_E2E_UPDATE=1 ST_HEADED=1 node ./out/test/runUpdateTest.js",
-    "test:update:qemu": "ST_E2E_UPDATE=1 ST_AGENT_PORT=4840 node ./out/test/runUpdateTest.js"
+    "test:update:qemu": "ST_E2E_UPDATE=1 ST_AGENT_PORT=4840 node ./out/test/runUpdateTest.js",
+    "test:attach": "ST_E2E_ATTACH=1 node ./out/test/runAttachTest.js",
+    "test:attach:headed": "ST_E2E_ATTACH=1 ST_HEADED=1 node ./out/test/runAttachTest.js"
   },
   "dependencies": {
     "preact": "^10.29.1",
