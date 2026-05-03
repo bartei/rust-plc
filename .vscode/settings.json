@@ -1,5 +1,5 @@
 {
-  "structured-text.serverPath": "${workspaceFolder}/target/debug/st-cli",
+  "structured-text.serverPath": "${workspaceFolder}/target/container/debug/st-cli",
   "editor.semanticHighlighting.enabled": true,
   "files.associations": {
     "*.st": "structured-text",

@@ -2663,3 +2663,186 @@ fn test_vscode_watch_mixed_fb_and_array() {
         "Should NOT include Main.counter: {var_names:?}"
     );
 }
+
+// =============================================================================
+// String functions (Tier 5) — DAP variable display
+// =============================================================================
+// `format_value(Value::String(s)) → "'<s>'"` is the IEC single-quote rendering
+// used everywhere strings surface (variables view, evaluate, watch). These
+// tests pin the contract end-to-end: a STRING populated by a string-function
+// intrinsic shows up correctly in the DAP variables response and via
+// evaluate.
+
+#[test]
+fn test_dap_string_local_displays_with_iec_quotes() {
+    // Run a program that fills three STRING locals via TO_UPPER, CONCAT,
+    // and a literal. Set a breakpoint on the last line so the prior
+    // assignments have already executed when we inspect the frame.
+    let source = "\
+PROGRAM Main
+VAR
+    upper : STRING;
+    joined : STRING;
+    s : STRING := 'hello';
+END_VAR
+    upper := TO_UPPER(IN := s);
+    joined := CONCAT(STR1 := 'foo', STR2 := 'bar');
+    s := 'done';
+END_PROGRAM
+";
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            // Breakpoint on `s := 'done';` (line 9 in 1-indexed source).
+            dap_request(3, "setBreakpoints", Some(json!({
+                "source": { "path": "test.st" },
+                "breakpoints": [{ "line": 9 }]
+            }))),
+            dap_request(4, "configurationDone", None),
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "scopes", Some(json!({ "frameId": 0 }))),
+            dap_request(7, "variables", Some(json!({ "variablesReference": 1000 }))),
+            dap_request(8, "evaluate", Some(json!({
+                "expression": "upper",
+                "frameId": 0
+            }))),
+            dap_request(9, "evaluate", Some(json!({
+                "expression": "joined",
+                "frameId": 0
+            }))),
+            dap_request(10, "evaluate", Some(json!({
+                "expression": "s",
+                "frameId": 0
+            }))),
+            dap_request(11, "disconnect", None),
+        ],
+    );
+
+    // Confirm we actually stopped at the breakpoint — otherwise the
+    // "before-line" semantics we rely on may not hold.
+    let bp_stops: Vec<_> = find_events(&messages, "stopped")
+        .into_iter()
+        .filter(|e| e["body"]["reason"].as_str() == Some("breakpoint"))
+        .collect();
+    assert!(!bp_stops.is_empty(), "expected breakpoint stop, events: {messages:?}");
+
+    // Variables response: each STRING local should be displayed with IEC
+    // single quotes via format_value.
+    let vars_resp = find_response(&messages, 7).expect("variables response");
+    assert!(vars_resp["success"].as_bool().unwrap_or(false));
+    let vars = vars_resp["body"]["variables"].as_array().unwrap();
+
+    let lookup = |name: &str| -> Option<String> {
+        vars.iter().find_map(|v| {
+            if v["name"].as_str() == Some(name) {
+                v["value"].as_str().map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+    };
+
+    assert_eq!(
+        lookup("upper").as_deref(),
+        Some("'HELLO'"),
+        "TO_UPPER('hello') should display as 'HELLO' with IEC quotes; vars = {vars:?}"
+    );
+    assert_eq!(
+        lookup("joined").as_deref(),
+        Some("'foobar'"),
+        "CONCAT('foo','bar') should display as 'foobar' with IEC quotes; vars = {vars:?}"
+    );
+    assert_eq!(
+        lookup("s").as_deref(),
+        Some("'hello'"),
+        "s should still hold its initial 'hello' (breakpoint stops before assignment); vars = {vars:?}"
+    );
+
+    // STRING type should be reported on each variable.
+    let upper_type = vars
+        .iter()
+        .find(|v| v["name"].as_str() == Some("upper"))
+        .and_then(|v| v["type"].as_str())
+        .unwrap_or("");
+    assert!(
+        upper_type.contains("STRING"),
+        "expected STRING type tag on `upper`, got {upper_type:?}"
+    );
+
+    // Evaluate path: same renderer, single-quoted.
+    for (seq, expected) in [(8, "'HELLO'"), (9, "'foobar'"), (10, "'hello'")] {
+        let r = find_response(&messages, seq).unwrap_or_else(|| panic!("evaluate response {seq}"));
+        assert!(r["success"].as_bool().unwrap_or(false), "evaluate {seq} failed: {r:?}");
+        assert_eq!(
+            r["body"]["result"].as_str(),
+            Some(expected),
+            "evaluate {seq}: expected {expected}, got {:?}",
+            r["body"]["result"]
+        );
+    }
+}
+
+#[test]
+fn test_dap_string_global_displays_with_iec_quotes() {
+    // Same contract but for VAR_GLOBAL — globals show under the Globals
+    // scope and use the same format_value path.
+    let source = "\
+VAR_GLOBAL
+    g_upper : STRING;
+END_VAR
+PROGRAM Main
+VAR
+    s : STRING := 'world';
+END_VAR
+    g_upper := TO_UPPER(IN := s);
+    s := 'done';
+END_PROGRAM
+";
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({}))),
+            // Stop on `s := 'done'` so the assignment to g_upper already ran.
+            dap_request(3, "setBreakpoints", Some(json!({
+                "source": { "path": "test.st" },
+                "breakpoints": [{ "line": 9 }]
+            }))),
+            dap_request(4, "configurationDone", None),
+            dap_request(5, "continue", Some(json!({ "threadId": 1 }))),
+            dap_request(6, "scopes", Some(json!({ "frameId": 0 }))),
+            // Locals = 1000, Globals = 1001 (handle_scopes assigns them sequentially).
+            dap_request(7, "variables", Some(json!({ "variablesReference": 1001 }))),
+            dap_request(8, "evaluate", Some(json!({
+                "expression": "g_upper",
+                "frameId": 0
+            }))),
+            dap_request(9, "disconnect", None),
+        ],
+    );
+
+    let vars_resp = find_response(&messages, 7).expect("variables response");
+    assert!(vars_resp["success"].as_bool().unwrap_or(false));
+    let vars = vars_resp["body"]["variables"].as_array().unwrap();
+    let g_upper = vars
+        .iter()
+        .find(|v| v["name"].as_str() == Some("g_upper"))
+        .unwrap_or_else(|| panic!("g_upper not in Globals: {vars:?}"));
+    assert_eq!(
+        g_upper["value"].as_str(),
+        Some("'WORLD'"),
+        "TO_UPPER('world') global should display as 'WORLD' with IEC quotes",
+    );
+    let ty = g_upper["type"].as_str().unwrap_or("");
+    assert!(ty.contains("STRING"), "g_upper type should be STRING, got {ty:?}");
+
+    // Evaluate path matches.
+    let eval = find_response(&messages, 8).expect("evaluate response");
+    assert_eq!(
+        eval["body"]["result"].as_str(),
+        Some("'WORLD'"),
+        "evaluate(g_upper) should match the variables view"
+    );
+}

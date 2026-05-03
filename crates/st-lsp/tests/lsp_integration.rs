@@ -2935,6 +2935,135 @@ fn test_document_highlight_returns_results_for_variable() {
     client.shutdown();
 }
 
+// =============================================================================
+// String intrinsic surface (Tier 5)
+// =============================================================================
+// signatureHelp / hover for stdlib string functions like MID, REPLACE,
+// CONCAT runs through the same symbol-table path as user-defined
+// functions. These tests pin the IDE-facing contract.
+
+#[test]
+fn test_signature_help_for_mid_reports_three_string_int_int_params() {
+    let mut client = TestClient::start();
+    init(&mut client);
+
+    let uri = file_uri("sig_mid.st");
+    // Line 5 (0-indexed) holds the MID call. Cursor goes onto the `M` of MID
+    // — `signature_help` resolves the word at the cursor, not the call args.
+    let source = "PROGRAM Main\n\
+                  VAR\n\
+                  \x20\x20\x20\x20s : STRING := 'abcdef';\n\
+                  \x20\x20\x20\x20r : STRING;\n\
+                  END_VAR\n\
+                  \x20\x20\x20\x20r := MID(STR := s, LEN := 3, POS := 2);\n\
+                  END_PROGRAM\n";
+    open_doc(&mut client, &uri, source);
+
+    // Char 11 lands on the 'I' of "MID(" on line 5 ("    r := MID(...)").
+    let resp = client.request(
+        "textDocument/signatureHelp",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 5, "character": 11 }
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(!result.is_null(), "expected signatureHelp result, got null: {resp:?}");
+    let sigs = result["signatures"].as_array().expect("signatures array");
+    assert_eq!(sigs.len(), 1, "expected exactly one signature for MID, got {sigs:?}");
+
+    let label = sigs[0]["label"].as_str().unwrap_or("");
+    // Stdlib server formats as `NAME(p1: TY1, p2: TY2, ...) : RET`.
+    assert!(label.starts_with("MID("), "expected label to start with MID(, got {label:?}");
+    assert!(label.ends_with(": STRING"), "expected MID return type STRING, got {label:?}");
+    for fragment in ["STR: STRING", "LEN: INT", "POS: INT"] {
+        assert!(label.contains(fragment), "expected `{fragment}` in MID label, got {label:?}");
+    }
+
+    let params = sigs[0]["parameters"].as_array().expect("parameters array");
+    assert_eq!(params.len(), 3, "MID has 3 params, got {params:?}");
+    let plabels: Vec<&str> = params
+        .iter()
+        .map(|p| p["label"].as_str().unwrap_or(""))
+        .collect();
+    assert!(plabels.iter().any(|l| l.contains("STR") && l.contains("STRING")));
+    assert!(plabels.iter().any(|l| l.contains("LEN") && l.contains("INT")));
+    assert!(plabels.iter().any(|l| l.contains("POS") && l.contains("INT")));
+
+    client.shutdown();
+}
+
+#[test]
+fn test_signature_help_for_replace_reports_four_params() {
+    // REPLACE is the only 4-arg string intrinsic — pin that the IDE shows
+    // all four parameters so the dispatch path stays observable.
+    let mut client = TestClient::start();
+    init(&mut client);
+
+    let uri = file_uri("sig_replace.st");
+    let source = "PROGRAM Main\n\
+                  VAR r : STRING; END_VAR\n\
+                  \x20\x20\x20\x20r := REPLACE(STR1 := 'abcdef', STR2 := 'XY', LEN := 2, POS := 3);\n\
+                  END_PROGRAM\n";
+    open_doc(&mut client, &uri, source);
+
+    // Cursor on 'R' of REPLACE (line 2, char 14).
+    let resp = client.request(
+        "textDocument/signatureHelp",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 2, "character": 14 }
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(!result.is_null(), "expected signatureHelp result, got null");
+    let sigs = result["signatures"].as_array().expect("signatures");
+    let label = sigs[0]["label"].as_str().unwrap_or("");
+    let params = sigs[0]["parameters"].as_array().expect("parameters");
+    assert_eq!(params.len(), 4, "REPLACE has 4 params, got {params:?}");
+    for fragment in ["STR1: STRING", "STR2: STRING", "LEN: INT", "POS: INT"] {
+        assert!(label.contains(fragment), "expected `{fragment}` in REPLACE label, got {label:?}");
+    }
+
+    client.shutdown();
+}
+
+#[test]
+fn test_hover_for_int_to_string_shows_function_signature() {
+    // Hover on a stdlib string function should produce a Function symbol
+    // with the right return type. This exercises the same path users see
+    // when hovering on `INT_TO_STRING(...)`.
+    let mut client = TestClient::start();
+    init(&mut client);
+
+    let uri = file_uri("hover_int_to_string.st");
+    let source = "PROGRAM Main\n\
+                  VAR txt : STRING; END_VAR\n\
+                  \x20\x20\x20\x20txt := INT_TO_STRING(IN := 42);\n\
+                  END_PROGRAM\n";
+    open_doc(&mut client, &uri, source);
+
+    // Cursor on `_` of `INT_TO_STRING` (line 2, char 22).
+    let resp = client.request(
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 2, "character": 22 }
+        }),
+    );
+
+    let result = &resp["result"];
+    assert!(!result.is_null(), "expected hover result for INT_TO_STRING");
+    let value = result["contents"]["value"].as_str().unwrap_or("");
+    assert!(value.contains("INT_TO_STRING"), "hover should name the function: {value:?}");
+    assert!(value.contains("FUNCTION("), "hover should show FUNCTION signature: {value:?}");
+    assert!(value.contains(": STRING"), "hover should show STRING return type: {value:?}");
+
+    client.shutdown();
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Initialize + initialized handshake. Centralises the boilerplate so the

@@ -275,5 +275,6 @@ pub fn builtin_stdlib() -> Vec<&'static str> {
         include_str!("../../../stdlib/math.st"),
         include_str!("../../../stdlib/timers.st"),
         include_str!("../../../stdlib/conversions.st"),
+        include_str!("../../../stdlib/strings.st"),
     ]
 }

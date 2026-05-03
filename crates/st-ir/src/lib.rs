@@ -347,6 +347,66 @@ pub enum Instruction {
     /// Day of week from DATE (ms since epoch): 0=Sunday..6=Saturday.
     DayOfWeek(Reg, Reg),
 
+    // ── String manipulation (IEC 61131-3 / CODESYS) ──────────────────
+    // All positions are 1-indexed and operate on bytes (STRING is byte-oriented per IEC).
+    // Out-of-range positions/lengths are clamped to the valid sub-range; empty
+    // results are returned for fully-out-of-range arguments.
+    /// dst = LEN(src) — string byte length as INT.
+    StringLen(Reg, Reg),
+    /// dst = CONCAT(left, right) — binary string concatenation.
+    StringConcat(Reg, Reg, Reg),
+    /// dst = LEFT(str, size) — first `size` bytes of `str`.
+    StringLeft(Reg, Reg, Reg),
+    /// dst = RIGHT(str, size) — last `size` bytes of `str`.
+    StringRight(Reg, Reg, Reg),
+    /// dst = MID(str, len, pos) — `len` bytes starting at 1-based `pos`.
+    StringMid(Reg, Reg, Reg, Reg),
+    /// dst = FIND(haystack, needle) — 1-based first match, 0 if absent.
+    StringFind(Reg, Reg, Reg),
+    /// dst = INSERT(str1, str2, pos) — insert `str2` into `str1` after `pos` bytes.
+    StringInsert(Reg, Reg, Reg, Reg),
+    /// dst = DELETE(str, len, pos) — delete `len` bytes starting at 1-based `pos`.
+    StringDelete(Reg, Reg, Reg, Reg),
+    /// dst = REPLACE(str1, str2, len, pos) — replace `len` bytes at `pos` with `str2`.
+    StringReplace {
+        dst: Reg,
+        str1: Reg,
+        str2: Reg,
+        len: Reg,
+        pos: Reg,
+    },
+    /// dst = TRIM(src) — strip leading + trailing ASCII whitespace.
+    StringTrim(Reg, Reg),
+    /// dst = LTRIM(src) — strip leading ASCII whitespace.
+    StringLTrim(Reg, Reg),
+    /// dst = RTRIM(src) — strip trailing ASCII whitespace.
+    StringRTrim(Reg, Reg),
+    /// dst = TO_UPPER(src) — uppercase ASCII letters.
+    StringToUpper(Reg, Reg),
+    /// dst = TO_LOWER(src) — lowercase ASCII letters.
+    StringToLower(Reg, Reg),
+    /// dst = INT_TO_STRING / DINT_TO_STRING / SINT_TO_STRING / LINT_TO_STRING.
+    /// Reads the source as i64 and formats in base-10.
+    IntToString(Reg, Reg),
+    /// dst = UINT_TO_STRING / UDINT_TO_STRING / USINT_TO_STRING / ULINT_TO_STRING.
+    UIntToString(Reg, Reg),
+    /// dst = REAL_TO_STRING / LREAL_TO_STRING — formatted with Rust default float repr.
+    RealToString(Reg, Reg),
+    /// dst = BOOL_TO_STRING — "TRUE" or "FALSE".
+    BoolToString(Reg, Reg),
+    /// dst = STRING_TO_INT / *_DINT / *_LINT / *_SINT — parses base-10 i64; 0 on failure.
+    StringToInt(Reg, Reg),
+    /// dst = STRING_TO_UINT / *_UDINT / *_USINT / *_ULINT — parses base-10 u64; 0 on failure.
+    StringToUInt(Reg, Reg),
+    /// dst = STRING_TO_REAL / *_LREAL — parses f64; 0.0 on failure.
+    StringToReal(Reg, Reg),
+    /// dst = STRING_TO_BOOL — TRUE if "TRUE" (any case) or "1"; FALSE otherwise.
+    StringToBool(Reg, Reg),
+    /// dst = TO_STRING / ANY_TO_STRING — runtime-typed dispatch:
+    /// Int → base-10, UInt → base-10, Real → "{:?}", Bool → "TRUE"/"FALSE",
+    /// String → passthrough, Time → raw ms (specialized TIME_TO_STRING comes later).
+    ToString(Reg, Reg),
+
     // ── Control flow ─────────────────────────────────────────────────
     /// Unconditional jump.
     Jump(Label),

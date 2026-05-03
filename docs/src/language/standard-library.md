@@ -11,6 +11,7 @@ The library includes:
 | [Timers](#timers) | `stdlib/timers.st` | TON, TOF, TP |
 | [Math & Selection](#math--selection) | `stdlib/math.st` | MAX, MIN, LIMIT, ABS, SEL |
 | [Type Conversions](#type-conversions) | Compiler intrinsics | 60+ *_TO_* functions including TIME conversions and TO_*/ANY_TO_* generics |
+| [String Functions](#string-functions) | `stdlib/strings.st` + intrinsics | LEN, LEFT, RIGHT, MID, CONCAT, INSERT, DELETE, REPLACE, FIND, TRIM, case + numeric ↔ STRING |
 | [Trig & Math Intrinsics](#trigonometric--math-intrinsics) | Compiler intrinsics | SQRT, SIN, COS, TAN, ASIN, ACOS, ATAN, LN, LOG, EXP |
 | [System Time](#system-time) | Compiler intrinsic | SYSTEM_TIME() |
 
@@ -567,7 +568,88 @@ END_VAR
 END_PROGRAM
 ```
 
-> **Not yet implemented:** `TIME_TO_STRING`, `STRING_TO_TIME`, `SPLIT_DATE`, `SPLIT_TOD`, `SPLIT_DT`, `CONCAT_DATE` (from components), `CONCAT_TOD`, `CONCAT_DT`. These require string formatting and multi-output function infrastructure.
+> **Not yet implemented:** `TIME_TO_STRING`, `STRING_TO_TIME`, `SPLIT_DATE`, `SPLIT_TOD`, `SPLIT_DT`, `CONCAT_DATE` (from components), `CONCAT_TOD`, `CONCAT_DT`. These require string formatting and multi-output function infrastructure (the string-formatting foundation now exists -- see [String Functions](#string-functions) -- the date/time-specific format conversions are next).
+
+---
+
+## String Functions
+
+Source: `stdlib/strings.st` (documentation only -- implementations are VM intrinsic instructions).
+
+`STRING` is byte-oriented per IEC 61131-3 (no multi-byte / Unicode handling). All position arguments are **1-indexed**, and out-of-range positions or lengths are **clamped** to the valid sub-range -- they produce empty / unchanged results rather than raising errors. `WSTRING` is not yet wired through the value model and is out of scope for this tier.
+
+### Manipulation (IEC 61131-3 core)
+
+| Function | Signature | Result |
+|----------|-----------|--------|
+| `LEN` | `LEN(IN: STRING) : INT` | Length in bytes |
+| `LEFT` | `LEFT(STR: STRING, SIZE: INT) : STRING` | Leftmost `SIZE` bytes |
+| `RIGHT` | `RIGHT(STR: STRING, SIZE: INT) : STRING` | Rightmost `SIZE` bytes |
+| `MID` | `MID(STR: STRING, LEN: INT, POS: INT) : STRING` | `LEN` bytes starting at 1-based `POS` |
+| `CONCAT` | `CONCAT(STR1, STR2: STRING) : STRING` | Binary concatenation |
+| `INSERT` | `INSERT(STR1, STR2: STRING, POS: INT) : STRING` | Insert `STR2` into `STR1` after `POS` bytes |
+| `DELETE` | `DELETE(STR: STRING, LEN, POS: INT) : STRING` | Delete `LEN` bytes starting at `POS` |
+| `REPLACE` | `REPLACE(STR1, STR2: STRING, LEN, POS: INT) : STRING` | Replace `LEN` bytes at `POS` of `STR1` with `STR2` |
+| `FIND` | `FIND(STR1, STR2: STRING) : INT` | 1-based first match; `0` if not found |
+
+### Case conversion
+
+| Function | Notes |
+|----------|-------|
+| `TO_UPPER` / `UPPER_CASE` | ASCII-only |
+| `TO_LOWER` / `LOWER_CASE` | ASCII-only |
+
+### Trim (CODESYS extension)
+
+| Function | Notes |
+|----------|-------|
+| `TRIM` | Strip leading + trailing whitespace |
+| `LTRIM` | Strip leading whitespace |
+| `RTRIM` | Strip trailing whitespace |
+
+### Numeric / boolean ↔ STRING
+
+`*_TO_STRING` family:
+
+| Function | Behavior |
+|----------|----------|
+| `INT_TO_STRING`, `SINT_TO_STRING`, `DINT_TO_STRING`, `LINT_TO_STRING` | Base-10 signed |
+| `UINT_TO_STRING`, `USINT_TO_STRING`, `UDINT_TO_STRING`, `ULINT_TO_STRING` | Base-10 unsigned |
+| `REAL_TO_STRING`, `LREAL_TO_STRING` | Decimal repr (`1.0` formats as `"1.0"`, not `"1"`) |
+| `BOOL_TO_STRING` | Returns `"TRUE"` or `"FALSE"` |
+| `TO_STRING` / `ANY_TO_STRING` | Overloaded -- runtime-typed dispatch |
+
+`STRING_TO_*` family (whitespace is trimmed; on parse failure the result is the type's zero value):
+
+| Function | Behavior |
+|----------|----------|
+| `STRING_TO_INT`, `STRING_TO_SINT`, `STRING_TO_DINT`, `STRING_TO_LINT` | Parse signed integer |
+| `STRING_TO_UINT`, `STRING_TO_USINT`, `STRING_TO_UDINT`, `STRING_TO_ULINT` | Parse unsigned integer |
+| `STRING_TO_REAL`, `STRING_TO_LREAL` | Parse `f64` |
+| `STRING_TO_BOOL` | `TRUE` if input is `"TRUE"` (any case) or `"1"`; `FALSE` otherwise |
+
+### Examples
+
+```iec
+PROGRAM Main
+VAR
+    s : STRING := 'rust-plc';
+    n : INT;
+    upper : STRING;
+    formatted : STRING;
+END_VAR
+    n         := LEN(IN := s);                                 // 8
+    upper     := TO_UPPER(IN := s);                            // 'RUST-PLC'
+    formatted := CONCAT(STR1 := 'count=', STR2 := INT_TO_STRING(IN := 42));
+                                                               // 'count=42'
+END_PROGRAM
+```
+
+See [`playground/18_strings.st`](https://github.com/anthropics/rust-plc/blob/master/playground/18_strings.st) for a comprehensive demo covering every string function -- it doubles as the `playground_18_strings_e2e` end-to-end test in `crates/st-engine/tests/stdlib_tests.rs`.
+
+### Performance characteristics
+
+Every string operation allocates a fresh `String` for its result -- there is no in-place mutation, copy-on-write, or arena reuse. That makes individual ops `O(n)` in string length and adds a heap allocation per call. For typical PLC workloads (short strings, a handful of ops per cycle) this is well below the scan-cycle budget, but tight inner loops over many string ops will be measurably slower than equivalent integer arithmetic. A future tier may revisit this with a small-string optimisation or a per-cycle string arena -- see the deferred-optimisations list in `plan/implementation.md`.
 
 ---
 

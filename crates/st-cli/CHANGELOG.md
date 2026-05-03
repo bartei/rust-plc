@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **String manipulation & formatting standard library (Tier 5).** 23 IEC 61131-3 / CODESYS-compatible string intrinsics:
+  - Core: `LEN`, `LEFT`, `RIGHT`, `MID`, `CONCAT`, `INSERT`, `DELETE`, `REPLACE` (4-arg), `FIND`
+  - Case: `TO_UPPER` / `UPPER_CASE`, `TO_LOWER` / `LOWER_CASE`
+  - Trim: `TRIM`, `LTRIM`, `RTRIM`
+  - Numeric ↔ STRING: `*_TO_STRING` (signed/unsigned/REAL/BOOL), `STRING_TO_*`, generic `TO_STRING` / `ANY_TO_STRING`
+  - Semantics: 1-indexed positions per IEC; out-of-range arguments clamp instead of erroring; `REAL_TO_STRING` preserves the decimal point (`1.0` → `"1.0"`).
+- New stdlib doc file `stdlib/strings.st` and a "String Functions" section in the language reference.
+- New playground `playground/18_strings.st` covering every Tier 5 function with expected results inline; doubles as the `playground_18_strings_e2e` test (70+ assertions).
+- Acceptance tests: 89 unit tests in `string_tests.rs`, 5 LSP unit tests + 3 LSP integration tests (`signatureHelp`, `hover`), 2 DAP integration tests (STRING locals/globals render with IEC single quotes in the variables view and via `evaluate`).
+
+### Changed
+
+- VS Code extension `serverPath` defaults (root + playground `.vscode/settings.json`) now point at `target/container/debug/st-cli` so devcontainer LSP/DAP sessions don't pick up host-built binaries with mismatched glibc. Host workflows still resolve via the extension's auto-search fallback to `target/debug/st-cli`.
+
+### Known limitations
+
+- Each string instruction allocates a fresh `String` (O(n) per op, one heap allocation per call). Fine for typical PLC scan budgets but a candidate for SSO / arena optimisation if a profiled scan shows string ops dominating cycle time.
+
 ## [0.3.4](https://github.com/bartei/rust-plc/compare/st-cli-v0.3.3...st-cli-v0.3.4) - 2026-05-02
 
 ### Added

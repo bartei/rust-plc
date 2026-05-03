@@ -885,3 +885,113 @@ END_FUNCTION_BLOCK
         "Expected function token for FB declaration name"
     );
 }
+
+// =============================================================================
+// String intrinsics — completion + signature surface (Tier 5)
+// =============================================================================
+// Document::new() loads the embedded stdlib, so the string intrinsics
+// registered in st_semantics::analyze::register_intrinsics() are present in
+// the global scope. These tests verify they show up as ordinary functions
+// in completions, with the right snippet and detail strings.
+
+/// Helper: produce completions in a minimal program where the cursor is in
+/// expression position so functions are a valid suggestion.
+fn completions_in_expr_position(prefix: &str) -> Vec<tower_lsp::lsp_types::CompletionItem> {
+    // Pad the source so position(line=4, char=cursor_col) lands inside the
+    // assignment expression on the body line.
+    let body_line = format!("    x := {prefix}");
+    let cursor_col = body_line.len() as u32;
+    let source = format!(
+        "PROGRAM Main\nVAR\n    x : INT := 0;\nEND_VAR\n{body_line}\nEND_PROGRAM\n"
+    );
+    let doc = Document::new(source, None);
+    completion::completions(&doc, Position::new(4, cursor_col), None)
+}
+
+#[test]
+fn completion_includes_string_intrinsics() {
+    // Empty prefix on the body line returns the full set; check each marquee
+    // string function appears with the expected SymbolKind::Function detail.
+    let items = completions_in_expr_position("");
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    for name in [
+        "LEN", "LEFT", "RIGHT", "MID", "CONCAT", "INSERT", "DELETE", "REPLACE",
+        "FIND", "TRIM", "TO_UPPER", "TO_LOWER",
+        "INT_TO_STRING", "REAL_TO_STRING", "BOOL_TO_STRING",
+        "STRING_TO_INT", "STRING_TO_REAL", "STRING_TO_BOOL",
+        "TO_STRING", "ANY_TO_STRING",
+    ] {
+        assert!(
+            labels.contains(&name),
+            "expected stdlib intrinsic {name} in completion list; got {} items",
+            labels.len()
+        );
+    }
+}
+
+#[test]
+fn completion_len_has_function_detail_and_snippet() {
+    // Filter completions to LEN by typing the prefix.
+    let items = completions_in_expr_position("LE");
+    let len = items
+        .iter()
+        .find(|i| i.label == "LEN")
+        .expect("LEN should appear in prefix-filtered completions");
+    let detail = len.detail.as_deref().unwrap_or("");
+    assert!(
+        detail.starts_with("FUNCTION(") && detail.ends_with(": INT"),
+        "LEN detail should be FUNCTION(IN: STRING) : INT, got {detail:?}"
+    );
+    assert!(detail.contains("IN") && detail.contains("STRING"),
+        "LEN detail should mention IN: STRING, got {detail:?}");
+    let snippet = len.insert_text.as_deref().unwrap_or("");
+    assert!(
+        snippet.contains("LEN(") && snippet.contains("IN := "),
+        "LEN snippet should call with named arg, got {snippet:?}"
+    );
+}
+
+#[test]
+fn completion_mid_has_three_param_snippet() {
+    let items = completions_in_expr_position("MI");
+    let mid = items
+        .iter()
+        .find(|i| i.label == "MID")
+        .expect("MID should appear in prefix-filtered completions");
+    let snippet = mid.insert_text.as_deref().unwrap_or("");
+    // MID(STR := …, LEN := …, POS := …)
+    assert!(snippet.contains("STR := "), "MID snippet missing STR: {snippet:?}");
+    assert!(snippet.contains("LEN := "), "MID snippet missing LEN: {snippet:?}");
+    assert!(snippet.contains("POS := "), "MID snippet missing POS: {snippet:?}");
+}
+
+#[test]
+fn completion_replace_has_four_param_snippet() {
+    // REPLACE is the only 4-arg string intrinsic and exercises the new
+    // 4-input dispatch path; the snippet should still expose all 4 params.
+    let items = completions_in_expr_position("REP");
+    let rep = items
+        .iter()
+        .find(|i| i.label == "REPLACE")
+        .expect("REPLACE should appear in prefix-filtered completions");
+    let snippet = rep.insert_text.as_deref().unwrap_or("");
+    for arg in ["STR1 := ", "STR2 := ", "LEN := ", "POS := "] {
+        assert!(snippet.contains(arg), "REPLACE snippet missing {arg}: {snippet:?}");
+    }
+}
+
+#[test]
+fn completion_int_to_string_has_string_return_type() {
+    // INT_TO_STRING is registered with `any → STRING`; the completion detail
+    // must reflect STRING return type so the editor shows the right kind.
+    let items = completions_in_expr_position("INT_TO_S");
+    let intt = items
+        .iter()
+        .find(|i| i.label == "INT_TO_STRING")
+        .expect("INT_TO_STRING should appear in prefix-filtered completions");
+    let detail = intt.detail.as_deref().unwrap_or("");
+    assert!(
+        detail.ends_with(": STRING"),
+        "INT_TO_STRING detail should end with `: STRING`, got {detail:?}"
+    );
+}

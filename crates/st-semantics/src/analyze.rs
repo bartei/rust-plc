@@ -336,6 +336,121 @@ impl Analyzer {
         reg2("DIVTIME", &time_ty, &int_ty, &time_ty);
         }
 
+        // ── String manipulation intrinsics (IEC 61131-3 / CODESYS) ──────
+        {
+        let string_ty = Ty::String { wide: false, max_len: None };
+        let int_ty = Ty::Elementary(ElementaryType::Int);
+        let bool_ty = Ty::Elementary(ElementaryType::Bool);
+        let real_ty = Ty::Elementary(ElementaryType::Real);
+        let any_ty = Ty::Unknown;
+
+        let define_fn = |this: &mut Self, name: &str, params: Vec<(&str, &Ty)>, ret_ty: &Ty| {
+            this.symbols.define(
+                global,
+                Symbol {
+                    name: name.to_string(),
+                    ty: ret_ty.clone(),
+                    kind: SymbolKind::Function {
+                        return_type: ret_ty.clone(),
+                        params: params
+                            .into_iter()
+                            .map(|(n, t)| ParamDef {
+                                name: n.to_string(),
+                                ty: t.clone(),
+                                var_kind: VarKind::VarInput,
+                            })
+                            .collect(),
+                    },
+                    range: TextRange::new(0, 0),
+                    used: true,
+                    assigned: true,
+                },
+            );
+        };
+
+        // LEN(IN: STRING) : INT
+        define_fn(self, "LEN", vec![("IN", &string_ty)], &int_ty);
+
+        // LEFT / RIGHT (STR: STRING, SIZE: INT) : STRING
+        define_fn(self, "LEFT", vec![("STR", &string_ty), ("SIZE", &int_ty)], &string_ty);
+        define_fn(self, "RIGHT", vec![("STR", &string_ty), ("SIZE", &int_ty)], &string_ty);
+
+        // MID(STR: STRING, LEN: INT, POS: INT) : STRING
+        define_fn(
+            self,
+            "MID",
+            vec![("STR", &string_ty), ("LEN", &int_ty), ("POS", &int_ty)],
+            &string_ty,
+        );
+
+        // CONCAT(STR1: STRING, STR2: STRING) : STRING
+        define_fn(self, "CONCAT", vec![("STR1", &string_ty), ("STR2", &string_ty)], &string_ty);
+
+        // INSERT(STR1: STRING, STR2: STRING, POS: INT) : STRING
+        define_fn(
+            self,
+            "INSERT",
+            vec![("STR1", &string_ty), ("STR2", &string_ty), ("POS", &int_ty)],
+            &string_ty,
+        );
+
+        // DELETE(STR: STRING, LEN: INT, POS: INT) : STRING
+        define_fn(
+            self,
+            "DELETE",
+            vec![("STR", &string_ty), ("LEN", &int_ty), ("POS", &int_ty)],
+            &string_ty,
+        );
+
+        // REPLACE(STR1: STRING, STR2: STRING, LEN: INT, POS: INT) : STRING
+        define_fn(
+            self,
+            "REPLACE",
+            vec![
+                ("STR1", &string_ty),
+                ("STR2", &string_ty),
+                ("LEN", &int_ty),
+                ("POS", &int_ty),
+            ],
+            &string_ty,
+        );
+
+        // FIND(STR1: STRING, STR2: STRING) : INT
+        define_fn(self, "FIND", vec![("STR1", &string_ty), ("STR2", &string_ty)], &int_ty);
+
+        // Case + trim (single-arg STRING → STRING)
+        for name in ["TO_UPPER", "UPPER_CASE", "TO_LOWER", "LOWER_CASE", "TRIM", "LTRIM", "RTRIM"] {
+            define_fn(self, name, vec![("IN", &string_ty)], &string_ty);
+        }
+
+        // Numeric → STRING (any input → STRING; VM dispatches dynamically)
+        for name in [
+            "INT_TO_STRING", "SINT_TO_STRING", "DINT_TO_STRING", "LINT_TO_STRING",
+            "UINT_TO_STRING", "USINT_TO_STRING", "UDINT_TO_STRING", "ULINT_TO_STRING",
+            "REAL_TO_STRING", "LREAL_TO_STRING",
+            "BOOL_TO_STRING",
+        ] {
+            define_fn(self, name, vec![("IN", &any_ty)], &string_ty);
+        }
+
+        // STRING → numeric / bool
+        for name in [
+            "STRING_TO_INT", "STRING_TO_SINT", "STRING_TO_DINT", "STRING_TO_LINT",
+            "STRING_TO_UINT", "STRING_TO_USINT", "STRING_TO_UDINT", "STRING_TO_ULINT",
+        ] {
+            define_fn(self, name, vec![("IN", &string_ty)], &int_ty);
+        }
+        for name in ["STRING_TO_REAL", "STRING_TO_LREAL"] {
+            define_fn(self, name, vec![("IN", &string_ty)], &real_ty);
+        }
+        define_fn(self, "STRING_TO_BOOL", vec![("IN", &string_ty)], &bool_ty);
+
+        // TO_STRING / ANY_TO_STRING (overloaded — accept anything)
+        for name in ["TO_STRING", "ANY_TO_STRING"] {
+            define_fn(self, name, vec![("IN", &any_ty)], &string_ty);
+        }
+        }
+
         // REF() intrinsic — takes any variable, returns a reference
         self.symbols.define(
             global,

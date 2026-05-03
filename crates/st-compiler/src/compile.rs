@@ -1432,6 +1432,29 @@ impl<'a> FunctionCompiler<'a> {
             "DT_TO_DATE" => Some(Instruction::DtExtractDate),
             "DT_TO_TOD" => Some(Instruction::DtExtractTod),
             "DAY_OF_WEEK" => Some(Instruction::DayOfWeek),
+            // String — single-arg
+            "LEN" => Some(Instruction::StringLen),
+            "TRIM" => Some(Instruction::StringTrim),
+            "LTRIM" => Some(Instruction::StringLTrim),
+            "RTRIM" => Some(Instruction::StringRTrim),
+            "TO_UPPER" | "UPPER_CASE" => Some(Instruction::StringToUpper),
+            "TO_LOWER" | "LOWER_CASE" => Some(Instruction::StringToLower),
+            // *_TO_STRING (signed integer width — VM reads i64)
+            "INT_TO_STRING" | "SINT_TO_STRING" | "DINT_TO_STRING" | "LINT_TO_STRING"
+                => Some(Instruction::IntToString),
+            // *_TO_STRING (unsigned integer width — VM reads u64)
+            "UINT_TO_STRING" | "USINT_TO_STRING" | "UDINT_TO_STRING" | "ULINT_TO_STRING"
+                => Some(Instruction::UIntToString),
+            "REAL_TO_STRING" | "LREAL_TO_STRING" => Some(Instruction::RealToString),
+            "BOOL_TO_STRING" => Some(Instruction::BoolToString),
+            // STRING → numeric / bool
+            "STRING_TO_INT" | "STRING_TO_SINT" | "STRING_TO_DINT" | "STRING_TO_LINT"
+                => Some(Instruction::StringToInt),
+            "STRING_TO_UINT" | "STRING_TO_USINT" | "STRING_TO_UDINT" | "STRING_TO_ULINT"
+                => Some(Instruction::StringToUInt),
+            "STRING_TO_REAL" | "STRING_TO_LREAL" => Some(Instruction::StringToReal),
+            "STRING_TO_BOOL" => Some(Instruction::StringToBool),
+            "TO_STRING" | "ANY_TO_STRING" => Some(Instruction::ToString),
             _ => None,
         };
         if let Some(make_instr) = intrinsic {
@@ -1502,6 +1525,49 @@ impl<'a> FunctionCompiler<'a> {
             return dst;
         }
 
+        // Two-argument string intrinsics: CONCAT, FIND, LEFT, RIGHT.
+        let str_intrinsic2: Option<fn(Reg, Reg, Reg) -> Instruction> =
+            match name.to_uppercase().as_str() {
+                "CONCAT" => Some(Instruction::StringConcat),
+                "FIND" => Some(Instruction::StringFind),
+                "LEFT" => Some(Instruction::StringLeft),
+                "RIGHT" => Some(Instruction::StringRight),
+                _ => None,
+            };
+        if let Some(make_instr) = str_intrinsic2 {
+            let arg1 = self.compile_call_arg(fc, 0);
+            let arg2 = self.compile_call_arg(fc, 1);
+            self.emit(make_instr(dst, arg1, arg2));
+            return dst;
+        }
+
+        // Three-argument string intrinsics: MID(STR, LEN, POS), INSERT(STR1, STR2, POS),
+        // DELETE(STR, LEN, POS). All map to (dst, src1, src2, src3) instructions.
+        type TernaryStrFn = fn(Reg, Reg, Reg, Reg) -> Instruction;
+        let str_intrinsic3: Option<TernaryStrFn> = match name.to_uppercase().as_str() {
+            "MID" => Some(Instruction::StringMid),
+            "INSERT" => Some(Instruction::StringInsert),
+            "DELETE" => Some(Instruction::StringDelete),
+            _ => None,
+        };
+        if let Some(make_instr) = str_intrinsic3 {
+            let a1 = self.compile_call_arg(fc, 0);
+            let a2 = self.compile_call_arg(fc, 1);
+            let a3 = self.compile_call_arg(fc, 2);
+            self.emit(make_instr(dst, a1, a2, a3));
+            return dst;
+        }
+
+        // Four-argument string intrinsic: REPLACE(STR1, STR2, LEN, POS).
+        if name.eq_ignore_ascii_case("REPLACE") {
+            let str1 = self.compile_call_arg(fc, 0);
+            let str2 = self.compile_call_arg(fc, 1);
+            let len = self.compile_call_arg(fc, 2);
+            let pos = self.compile_call_arg(fc, 3);
+            self.emit(Instruction::StringReplace { dst, str1, str2, len, pos });
+            return dst;
+        }
+
         // Check if it's an FB instance call (local variable whose type is a known FB)
         if let Some(slot) = self.find_local(&name) {
             // Look up the FB TYPE name for this local slot
@@ -1545,6 +1611,22 @@ impl<'a> FunctionCompiler<'a> {
                 (i as u16, reg)
             })
             .collect()
+    }
+
+    /// Compile the i-th argument of a function call (positional or named, name ignored).
+    /// If the argument is missing, emits a `LoadConst(Int(0))` to a fresh register so
+    /// downstream code always has a valid register to read.
+    fn compile_call_arg(&mut self, fc: &FunctionCallExpr, index: usize) -> Reg {
+        if let Some(arg) = fc.arguments.get(index) {
+            match arg {
+                Argument::Positional(expr) => self.compile_expression(expr),
+                Argument::Named { value, .. } => self.compile_expression(value),
+            }
+        } else {
+            let r = self.alloc_reg();
+            self.emit(Instruction::LoadConst(r, Value::Int(0)));
+            r
+        }
     }
 
     fn literal_to_value(&self, lit: &Literal) -> Value {

@@ -3,6 +3,15 @@
 use crate::debug::{self, DebugState, FrameInfo, VariableInfo};
 use st_ir::*;
 
+/// Borrow a `Value` as a `&str`. Non-string values produce an empty slice
+/// rather than panicking — matches the lenient style of `Value::as_int()` etc.
+fn reg_str(v: &Value) -> &str {
+    match v {
+        Value::String(s) => s.as_str(),
+        _ => "",
+    }
+}
+
 /// Runtime error during VM execution.
 #[derive(Debug, thiserror::Error)]
 pub enum VmError {
@@ -1415,6 +1424,170 @@ impl Vm {
                     let days = ms.div_euclid(86_400_000);
                     let dow = (days + 4).rem_euclid(7); // 0=Sun, 1=Mon, ..., 6=Sat
                     self.reg_set(dst, Value::Int(dow));
+                }
+
+                // String manipulation (IEC 61131-3)
+                // STRING is byte-oriented per IEC; positions are 1-indexed; out-of-range
+                // arguments are clamped to produce empty / unchanged results rather than panicking.
+                Instruction::StringLen(dst, src) => {
+                    let len = reg_str(self.reg_get(src)).len() as i64;
+                    self.reg_set(dst, Value::Int(len));
+                }
+                Instruction::StringConcat(dst, l, r) => {
+                    let mut out = reg_str(self.reg_get(l)).to_string();
+                    out.push_str(reg_str(self.reg_get(r)));
+                    self.reg_set(dst, Value::String(out));
+                }
+                Instruction::StringLeft(dst, str_r, size_r) => {
+                    let s = reg_str(self.reg_get(str_r));
+                    let n = self.reg_get(size_r).as_int();
+                    let take = n.max(0).min(s.len() as i64) as usize;
+                    self.reg_set(dst, Value::String(s[..take].to_string()));
+                }
+                Instruction::StringRight(dst, str_r, size_r) => {
+                    let s = reg_str(self.reg_get(str_r));
+                    let n = self.reg_get(size_r).as_int();
+                    let take = n.max(0).min(s.len() as i64) as usize;
+                    let start = s.len() - take;
+                    self.reg_set(dst, Value::String(s[start..].to_string()));
+                }
+                Instruction::StringMid(dst, str_r, len_r, pos_r) => {
+                    let s = reg_str(self.reg_get(str_r));
+                    let len = self.reg_get(len_r).as_int();
+                    let pos = self.reg_get(pos_r).as_int();
+                    let out = if pos < 1 || len <= 0 || pos as usize > s.len() {
+                        String::new()
+                    } else {
+                        let start = (pos - 1) as usize;
+                        let end = (start + len as usize).min(s.len());
+                        s[start..end].to_string()
+                    };
+                    self.reg_set(dst, Value::String(out));
+                }
+                Instruction::StringFind(dst, hay_r, needle_r) => {
+                    let hay = reg_str(self.reg_get(hay_r));
+                    let needle = reg_str(self.reg_get(needle_r));
+                    let pos = if needle.is_empty() {
+                        0i64
+                    } else {
+                        match hay.find(needle) {
+                            Some(idx) => (idx as i64) + 1,
+                            None => 0,
+                        }
+                    };
+                    self.reg_set(dst, Value::Int(pos));
+                }
+                Instruction::StringInsert(dst, s1_r, s2_r, pos_r) => {
+                    let s1 = reg_str(self.reg_get(s1_r));
+                    let s2 = reg_str(self.reg_get(s2_r));
+                    let pos = self.reg_get(pos_r).as_int();
+                    let cut = pos.max(0).min(s1.len() as i64) as usize;
+                    let mut out = String::with_capacity(s1.len() + s2.len());
+                    out.push_str(&s1[..cut]);
+                    out.push_str(s2);
+                    out.push_str(&s1[cut..]);
+                    self.reg_set(dst, Value::String(out));
+                }
+                Instruction::StringDelete(dst, str_r, len_r, pos_r) => {
+                    let s = reg_str(self.reg_get(str_r));
+                    let len = self.reg_get(len_r).as_int();
+                    let pos = self.reg_get(pos_r).as_int();
+                    let out = if pos < 1 || len <= 0 || pos as usize > s.len() {
+                        s.to_string()
+                    } else {
+                        let start = (pos - 1) as usize;
+                        let end = (start + len as usize).min(s.len());
+                        let mut out = String::with_capacity(s.len() - (end - start));
+                        out.push_str(&s[..start]);
+                        out.push_str(&s[end..]);
+                        out
+                    };
+                    self.reg_set(dst, Value::String(out));
+                }
+                Instruction::StringReplace { dst, str1, str2, len, pos } => {
+                    let s1 = reg_str(self.reg_get(str1));
+                    let s2 = reg_str(self.reg_get(str2));
+                    let len_v = self.reg_get(len).as_int();
+                    let pos_v = self.reg_get(pos).as_int();
+                    // Clamp pos: pos<1 → insert at start; pos>len(s1) → append.
+                    let cut = if pos_v < 1 { 0 } else { ((pos_v - 1) as usize).min(s1.len()) };
+                    let drop_len = len_v.max(0) as usize;
+                    let drop_end = (cut + drop_len).min(s1.len());
+                    let mut out = String::with_capacity(s1.len() + s2.len());
+                    out.push_str(&s1[..cut]);
+                    out.push_str(s2);
+                    out.push_str(&s1[drop_end..]);
+                    self.reg_set(dst, Value::String(out));
+                }
+                Instruction::StringTrim(dst, src) => {
+                    let s = reg_str(self.reg_get(src)).trim().to_string();
+                    self.reg_set(dst, Value::String(s));
+                }
+                Instruction::StringLTrim(dst, src) => {
+                    let s = reg_str(self.reg_get(src)).trim_start().to_string();
+                    self.reg_set(dst, Value::String(s));
+                }
+                Instruction::StringRTrim(dst, src) => {
+                    let s = reg_str(self.reg_get(src)).trim_end().to_string();
+                    self.reg_set(dst, Value::String(s));
+                }
+                Instruction::StringToUpper(dst, src) => {
+                    let s = reg_str(self.reg_get(src)).to_ascii_uppercase();
+                    self.reg_set(dst, Value::String(s));
+                }
+                Instruction::StringToLower(dst, src) => {
+                    let s = reg_str(self.reg_get(src)).to_ascii_lowercase();
+                    self.reg_set(dst, Value::String(s));
+                }
+                Instruction::IntToString(dst, src) => {
+                    let v = self.reg_get(src).as_int();
+                    self.reg_set(dst, Value::String(v.to_string()));
+                }
+                Instruction::UIntToString(dst, src) => {
+                    let v = self.reg_get(src).as_uint();
+                    self.reg_set(dst, Value::String(v.to_string()));
+                }
+                Instruction::RealToString(dst, src) => {
+                    let v = self.reg_get(src).as_real();
+                    // Use Debug format so 1.0 → "1.0" (Display would print "1");
+                    // CODESYS prints REAL with a decimal point.
+                    self.reg_set(dst, Value::String(format!("{v:?}")));
+                }
+                Instruction::BoolToString(dst, src) => {
+                    let s = if self.reg_get(src).as_bool() { "TRUE" } else { "FALSE" };
+                    self.reg_set(dst, Value::String(s.to_string()));
+                }
+                Instruction::StringToInt(dst, src) => {
+                    let s = reg_str(self.reg_get(src)).trim();
+                    let v: i64 = s.parse().unwrap_or(0);
+                    self.reg_set(dst, Value::Int(v));
+                }
+                Instruction::StringToUInt(dst, src) => {
+                    let s = reg_str(self.reg_get(src)).trim();
+                    let v: u64 = s.parse().unwrap_or(0);
+                    self.reg_set(dst, Value::UInt(v));
+                }
+                Instruction::StringToReal(dst, src) => {
+                    let s = reg_str(self.reg_get(src)).trim();
+                    let v: f64 = s.parse().unwrap_or(0.0);
+                    self.reg_set(dst, Value::Real(v));
+                }
+                Instruction::StringToBool(dst, src) => {
+                    let s = reg_str(self.reg_get(src)).trim();
+                    let b = s.eq_ignore_ascii_case("TRUE") || s == "1";
+                    self.reg_set(dst, Value::Bool(b));
+                }
+                Instruction::ToString(dst, src) => {
+                    let s = match self.reg_get(src) {
+                        Value::String(s) => s.clone(),
+                        Value::Int(i) => i.to_string(),
+                        Value::UInt(u) => u.to_string(),
+                        Value::Real(r) => format!("{r:?}"),
+                        Value::Bool(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+                        Value::Time(ms) => ms.to_string(),
+                        _ => String::new(),
+                    };
+                    self.reg_set(dst, Value::String(s));
                 }
 
                 // Control flow

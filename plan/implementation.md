@@ -504,6 +504,94 @@ All date/time types share `Value::Time(i64)` in milliseconds (no separate Value/
 
 ---
 
+## String Manipulation & Formatting Functions (IEC 61131-3 / CODESYS-compatible)
+
+Tier 5 lays down the string-function foundation that L486-487 (`TIME_TO_STRING`,
+`DATE_TO_STRING`, etc.) depends on. Reference: CODESYS Standard library —
+"String Functions" (`Strings.library`) plus the IEC 61131-3 standard library.
+
+### Reference list — CODESYS string functions
+
+These are the functions tracked here. Operations are 1-indexed (IEC convention)
+and operate on byte-oriented `STRING` (no UTF-8 multi-byte handling — `STRING`
+is a byte string per IEC). `WSTRING` is out of scope for Tier 5 and tracked
+separately if needed.
+
+#### Tier 5a — Core IEC 61131-3 manipulation (COMPLETED)
+
+- [x] `LEN(IN: STRING) : INT` — length in bytes
+- [x] `LEFT(STR: STRING, SIZE: INT) : STRING` — leftmost SIZE bytes
+- [x] `RIGHT(STR: STRING, SIZE: INT) : STRING` — rightmost SIZE bytes
+- [x] `MID(STR: STRING, LEN: INT, POS: INT) : STRING` — substring of LEN bytes starting at 1-based POS
+- [x] `CONCAT(STR1: STRING, STR2: STRING) : STRING` — binary concatenation (variadic CONCAT deferred)
+- [x] `INSERT(STR1: STRING, STR2: STRING, POS: INT) : STRING` — insert STR2 into STR1 after POS
+- [x] `DELETE(STR: STRING, LEN: INT, POS: INT) : STRING` — delete LEN bytes starting at POS
+- [x] `REPLACE(STR1: STRING, STR2: STRING, LEN: INT, POS: INT) : STRING` — replace LEN bytes at POS with STR2 (4-arg)
+- [x] `FIND(STR1: STRING, STR2: STRING) : INT` — 1-based first match position; 0 if not found
+
+#### Tier 5b — Case conversion (COMPLETED, CODESYS extension)
+
+- [x] `TO_UPPER(IN: STRING) : STRING` (alias `UPPER_CASE`)
+- [x] `TO_LOWER(IN: STRING) : STRING` (alias `LOWER_CASE`)
+
+#### Tier 5c — Trimming (COMPLETED, CODESYS extension)
+
+- [x] `TRIM(IN: STRING) : STRING` — strip leading + trailing ASCII whitespace
+- [x] `LTRIM(IN: STRING) : STRING` — strip leading whitespace
+- [x] `RTRIM(IN: STRING) : STRING` — strip trailing whitespace
+
+#### Tier 5d — Numeric ↔ STRING (COMPLETED, foundation for Tier 4 STRING-formatting items)
+
+- [x] `INT_TO_STRING`, `DINT_TO_STRING`, `LINT_TO_STRING`, `SINT_TO_STRING`
+- [x] `UINT_TO_STRING`, `USINT_TO_STRING`, `UDINT_TO_STRING`, `ULINT_TO_STRING`
+- [x] `REAL_TO_STRING`, `LREAL_TO_STRING` (`1.0` formats as `"1.0"`)
+- [x] `BOOL_TO_STRING` (`"TRUE"` / `"FALSE"`)
+- [x] `TO_STRING` / `ANY_TO_STRING` — runtime-typed overload
+- [x] `STRING_TO_INT`, `STRING_TO_DINT`, `STRING_TO_LINT`, `STRING_TO_SINT`
+- [x] `STRING_TO_UINT`, `STRING_TO_USINT`, `STRING_TO_UDINT`, `STRING_TO_ULINT`
+- [x] `STRING_TO_REAL`, `STRING_TO_LREAL`
+- [x] `STRING_TO_BOOL` (`"TRUE"` (any case) or `"1"` → TRUE; everything else → FALSE)
+
+#### Tier 5e — Implementation (COMPLETED)
+
+- [x] IR: `Instruction::StringLen(Reg, Reg)`
+- [x] IR: `Instruction::StringConcat(Reg, Reg, Reg)`
+- [x] IR: `Instruction::StringLeft(Reg, Reg, Reg)`, `StringRight(Reg, Reg, Reg)`
+- [x] IR: `Instruction::StringMid(Reg, Reg, Reg, Reg)` — 3-input
+- [x] IR: `Instruction::StringFind(Reg, Reg, Reg)`
+- [x] IR: `Instruction::StringInsert(Reg, Reg, Reg, Reg)` — 3-input
+- [x] IR: `Instruction::StringDelete(Reg, Reg, Reg, Reg)` — 3-input
+- [x] IR: `Instruction::StringReplace { dst, str1, str2, len, pos }` — 4-input
+- [x] IR: `Instruction::StringTrim/LTrim/RTrim(Reg, Reg)`
+- [x] IR: `Instruction::StringToUpper/Lower(Reg, Reg)`
+- [x] IR: `Instruction::IntToString`, `UIntToString`, `RealToString`, `BoolToString`
+- [x] IR: `Instruction::StringToInt`, `StringToUInt`, `StringToReal`, `StringToBool`
+- [x] IR: `Instruction::ToString(Reg, Reg)` — generic runtime-typed `TO_STRING` / `ANY_TO_STRING`
+- [x] VM: every instruction implemented with IEC 1-indexed semantics + saturating clamps (`crates/st-engine/src/vm.rs`)
+- [x] Semantics: all functions registered in `register_intrinsics()` using a generic n-arg helper (`crates/st-semantics/src/analyze.rs`)
+- [x] Compiler: single/two/three/four-arg intrinsic dispatch in `compile.rs`; new `compile_call_arg` helper
+- [x] Stdlib: `stdlib/strings.st` documentation file registered in `multi_file::builtin_stdlib()`
+- [x] Docs: "String Functions" section added to `docs/src/language/standard-library.md`
+
+#### Tier 5f — Testing & playground (COMPLETED)
+
+- [x] Acceptance tests: `crates/st-engine/tests/string_tests.rs` — **89 tests** covering every function, edge cases (empty, position 0, position past end, oversized, negative arguments), round-trips, composition.
+- [x] Playground: `playground/18_strings.st` covering every Tier 5 function with expected results in comments.
+- [x] E2E: `playground_18_strings_e2e` in `stdlib_tests.rs` — 70+ assertions on every global produced by the playground program.
+- [x] LSP unit tests (`crates/st-lsp/tests/unit_tests.rs`): 5 tests pinning that string intrinsics surface in completion with correct `FUNCTION(...) : RET` detail and named-arg snippets — covers `LEN`, `MID` (3-arg), `REPLACE` (4-arg), `INT_TO_STRING` return-type.
+- [x] LSP integration tests (`crates/st-lsp/tests/lsp_integration.rs`): 3 tests via the LSP wire protocol — `signatureHelp` for `MID` (3 params), `signatureHelp` for `REPLACE` (4 params), `hover` for `INT_TO_STRING`.
+- [x] DAP integration tests (`crates/st-dap/tests/dap_integration.rs`): 2 tests via the DAP wire protocol — STRING locals and globals populated by string intrinsics display with IEC single-quote rendering (`'HELLO'`, `'foobar'`) in both the variables view and the `evaluate` path; STRING type tag asserted.
+
+#### Deferred (out of Tier 5)
+
+- [ ] Variadic `CONCAT` (CODESYS extension accepting >2 args) — needs varargs intrinsic
+- [ ] `FORMAT_STRING` (printf-like) — separate design effort
+- [ ] `WSTRING` variants (`WLEFT`, `WCONCAT`, etc.) — only after WSTRING is wired through the value model
+- [ ] `TIME_TO_STRING` / `DATE_TO_STRING` / `STRING_TO_TIME` / `STRING_TO_DATE` (Tier 4 line 486-487) — now unblocked; needs IEC date/time format-string support
+- [ ] **Performance:** every Tier 5 instruction allocates a fresh `String` for its result (per-op heap allocation, O(n) in length). Acceptable for typical PLC workloads but adds up in tight loops. Candidate optimisations: `SmolStr` / small-string optimisation in `Value::String`, per-scan-cycle string arena, or in-place mutation for `INSERT`/`DELETE`/`REPLACE` when the source register is dead. Revisit if a benchmark shows string ops eating >5 % of a representative scan cycle.
+
+---
+
 ## Cross-Cutting Concerns
 
 - [x] Testing: 714+ tests across 10+ crates

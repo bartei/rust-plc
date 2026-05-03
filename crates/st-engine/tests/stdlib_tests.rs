@@ -1382,3 +1382,107 @@ END_PROGRAM
     let engine = run_with_stdlib(source, 20);
     assert_eq!(engine.vm().get_global("g_count"), Some(&Value::Int(4)));
 }
+
+// =============================================================================
+// Playground 18 end-to-end (string manipulation + formatting)
+// =============================================================================
+
+#[test]
+fn playground_18_strings_e2e() {
+    let source = include_str!("../../../playground/18_strings.st");
+    let engine = run_with_stdlib(source, 1);
+
+    let assert_str = |name: &str, expected: &str| match engine.vm().get_global(name) {
+        Some(Value::String(s)) => assert_eq!(s, expected, "global {name}"),
+        other => panic!("global {name}: expected STRING({expected:?}), got {other:?}"),
+    };
+    let assert_int = |name: &str, expected: i64| match engine.vm().get_global(name) {
+        Some(Value::Int(i)) => assert_eq!(*i, expected, "global {name}"),
+        other => panic!("global {name}: expected INT({expected}), got {other:?}"),
+    };
+
+    // LEN
+    assert_int("g_len_hello", 5);
+    assert_int("g_len_empty", 0);
+
+    // LEFT / RIGHT
+    assert_str("g_left_3", "abc");
+    assert_str("g_left_zero", "");
+    assert_str("g_left_huge", "abcdef");
+    assert_str("g_left_neg", "");
+    assert_str("g_right_3", "def");
+    assert_str("g_right_zero", "");
+    assert_str("g_right_huge", "abcdef");
+
+    // MID
+    assert_str("g_mid_mid", "bcd");
+    assert_str("g_mid_start", "ab");
+    assert_str("g_mid_end", "ef");
+    assert_str("g_mid_overrun", "def");
+    assert_str("g_mid_pos0", "");
+    assert_str("g_mid_negpos", "");
+    assert_str("g_mid_zerolen", "");
+
+    // CONCAT
+    assert_str("g_concat", "foobar");
+    assert_str("g_concat_empty", "foo");
+
+    // INSERT
+    assert_str("g_insert_mid", "abcdef");
+    assert_str("g_insert_zero", "XYZabcdef");
+    assert_str("g_insert_far", "abcdefXYZ");
+
+    // DELETE
+    assert_str("g_delete_mid", "abef");
+    assert_str("g_delete_pos0", "abcdef");
+    assert_str("g_delete_zero", "abcdef");
+    assert_str("g_delete_overrun", "ab");
+
+    // REPLACE
+    assert_str("g_replace_mid", "aXYef");
+    assert_str("g_replace_zero", "XYcdef");
+    assert_str("g_replace_far", "abcdefXY");
+
+    // FIND
+    assert_int("g_find_yes", 6);
+    assert_int("g_find_first", 1);
+    assert_int("g_find_no", 0);
+    assert_int("g_find_empty", 0);
+
+    // Case
+    assert_str("g_upper", "HELLO");
+    assert_str("g_lower", "world");
+    assert_str("g_upper_alias", "MIXED");
+    assert_str("g_lower_alias", "mixed");
+
+    // Trim
+    assert_str("g_trim", "spaced");
+    assert_str("g_ltrim", "spaced  ");
+    assert_str("g_rtrim", "  spaced");
+
+    // Numeric → STRING
+    assert_str("g_int_to_s", "42");
+    assert_str("g_dint_to_s", "1234567");
+    assert_str("g_neg_to_s", "-7");
+    assert_str("g_real_to_s", "3.5");
+    assert_str("g_real_int_s", "1.0");
+    assert_str("g_bool_t_to_s", "TRUE");
+    assert_str("g_bool_f_to_s", "FALSE");
+    assert_str("g_to_string_i", "99");
+    assert_str("g_to_string_b", "TRUE");
+
+    // STRING → numeric / bool
+    assert_int("g_s_to_int", 123);
+    assert_int("g_s_to_int_neg", -99);
+    match engine.vm().get_global("g_s_to_real") {
+        Some(Value::Real(r)) => assert!((r - 2.5).abs() < 1e-9, "g_s_to_real = {r}"),
+        other => panic!("g_s_to_real: expected REAL, got {other:?}"),
+    }
+    assert_int("g_s_to_bool_t", 1);
+    assert_int("g_s_to_bool_1", 1);
+    assert_int("g_s_to_bool_f", 0);
+    assert_int("g_s_to_int_bad", 0);
+
+    // Round-trip
+    assert_int("g_roundtrip_int", 17);
+}
