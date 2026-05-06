@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5](https://github.com/bartei/rust-plc/compare/st-grammar-v0.3.4...st-grammar-v0.3.5) - 2026-05-06
+
+### Added
+
+- implement IEC 61131-3 partial variable access (.%X, .%B, .%W, .%D)
+- *(phase12)* implement IEC 61131-3 OOP extensions (Classes)
+- implement REF_TO pointers with ^ dereference and NULL
+- IEC 61131-3 Structured Text compiler toolchain (phases 0-7)
+
+### Other
+
+- release
+- release v0.3.3
+- release v0.3.2
+- release v0.3.1
+- release v0.1.3
+- release v0.1.2
+- add comprehensive README.md for all 16 crates
+- release v0.1.1
+
 ## [0.3.4](https://github.com/bartei/rust-plc/compare/st-grammar-v0.3.3...st-grammar-v0.3.4) - 2026-05-02
 
 ### Added
