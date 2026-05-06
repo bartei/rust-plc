@@ -1,0 +1,7 @@
+name: E2ETestRetainTypeChange
+version: "2.0.0"
+entryPoint: Main
+engine:
+  cycle_time: 10ms
+  retain:
+    checkpoint_cycles: 50

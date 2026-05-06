@@ -340,12 +340,27 @@ pub struct FrameInfo {
 }
 
 /// A variable visible in the debugger.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct VariableInfo {
     pub name: String,
     pub value: String,
     pub ty: String,
     pub var_ref: u32,
+    /// IEC 61131-3 RETAIN qualifier — survives warm restart.
+    pub retain: bool,
+    /// IEC 61131-3 PERSISTENT qualifier — survives cold restart.
+    pub persistent: bool,
+}
+
+/// Catalog entry: schema-only description of a monitorable variable.
+/// Includes RETAIN/PERSISTENT flags so the monitor UI and DAP can
+/// render badges next to retained variables.
+#[derive(Debug, Clone, Default)]
+pub struct CatalogVariable {
+    pub name: String,
+    pub ty: String,
+    pub retain: bool,
+    pub persistent: bool,
 }
 
 /// Format a Value for display in the debugger.

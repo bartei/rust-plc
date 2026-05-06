@@ -566,6 +566,8 @@ impl Vm {
                     ty: debug::format_var_type_with_width(slot.ty, slot.int_width)
                         .to_string(),
                     var_ref: 0,
+                    retain: slot.retain,
+                    persistent: slot.persistent,
                 }
             })
             .collect()
@@ -586,6 +588,8 @@ impl Vm {
                     ty: debug::format_var_type_with_width(slot.ty, slot.int_width)
                         .to_string(),
                     var_ref: 0,
+                    retain: slot.retain,
+                    persistent: slot.persistent,
                 }
             })
             .collect()
@@ -597,18 +601,23 @@ impl Vm {
     /// actually run yet). Used by the Monitor panel to populate its
     /// autocomplete at launch time, before the first scan cycle has
     /// populated `retained_locals`.
-    pub fn monitorable_catalog(&self) -> Vec<(String, String)> {
-        let mut result: Vec<(String, String)> = self
+    ///
+    /// Each entry carries the slot's RETAIN / PERSISTENT flags so the UI
+    /// can render badges next to retained variables. FB / struct / array
+    /// children inherit the parent slot's flags (mirroring the way
+    /// `retain_store::capture_snapshot` walks them).
+    pub fn monitorable_catalog(&self) -> Vec<debug::CatalogVariable> {
+        let mut result: Vec<debug::CatalogVariable> = self
             .module
             .globals
             .slots
             .iter()
-            .map(|slot| {
-                (
-                    slot.name.clone(),
-                    debug::format_var_type_with_width(slot.ty, slot.int_width)
-                        .to_string(),
-                )
+            .map(|slot| debug::CatalogVariable {
+                name: slot.name.clone(),
+                ty: debug::format_var_type_with_width(slot.ty, slot.int_width)
+                    .to_string(),
+                retain: slot.retain,
+                persistent: slot.persistent,
             })
             .collect();
         for func in &self.module.functions {
@@ -616,8 +625,13 @@ impl Vm {
                 continue;
             }
             let prefix = &func.name;
-            // Add the PROGRAM itself as a watchable parent
-            result.push((prefix.clone(), "PROGRAM".to_string()));
+            // Add the PROGRAM itself as a watchable parent (no retain/persistent).
+            result.push(debug::CatalogVariable {
+                name: prefix.clone(),
+                ty: "PROGRAM".to_string(),
+                retain: false,
+                persistent: false,
+            });
             for slot in &func.locals.slots {
                 // Skip FB/class instance slots — they're not scalar values.
                 // Their FIELDS are enumerated via the recursion below.
@@ -626,8 +640,19 @@ impl Vm {
                         let inst_prefix = format!("{prefix}.{}", slot.name);
                         // Add the parent entry so users can watch "Main.fb"
                         let fb_func = &self.module.functions[fb_idx as usize];
-                        result.push((inst_prefix.clone(), fb_func.name.clone()));
-                        self.catalog_fb_fields(fb_idx, &inst_prefix, &mut result);
+                        result.push(debug::CatalogVariable {
+                            name: inst_prefix.clone(),
+                            ty: fb_func.name.clone(),
+                            retain: slot.retain,
+                            persistent: slot.persistent,
+                        });
+                        self.catalog_fb_fields(
+                            fb_idx,
+                            &inst_prefix,
+                            slot.retain,
+                            slot.persistent,
+                            &mut result,
+                        );
                     }
                     VarType::ClassInstance(_) => { /* skip */ }
                     VarType::Struct(td_idx) => {
@@ -635,23 +660,47 @@ impl Vm {
                         let ty_name = self.struct_type_fields(td_idx)
                             .map(|(name, _)| name.to_string())
                             .unwrap_or_else(|| "STRUCT".to_string());
-                        result.push((inst_prefix.clone(), ty_name));
-                        self.catalog_struct_fields(td_idx, &inst_prefix, &mut result);
+                        result.push(debug::CatalogVariable {
+                            name: inst_prefix.clone(),
+                            ty: ty_name,
+                            retain: slot.retain,
+                            persistent: slot.persistent,
+                        });
+                        self.catalog_struct_fields(
+                            td_idx,
+                            &inst_prefix,
+                            slot.retain,
+                            slot.persistent,
+                            &mut result,
+                        );
                     }
                     VarType::Array(td_idx) => {
                         let arr_prefix = format!("{prefix}.{}", slot.name);
                         let ty_str = debug::format_var_type_full(
                             slot.ty, slot.int_width, &self.module.type_defs,
                         );
-                        result.push((arr_prefix.clone(), ty_str));
-                        self.catalog_array_elements(td_idx, &arr_prefix, &mut result);
+                        result.push(debug::CatalogVariable {
+                            name: arr_prefix.clone(),
+                            ty: ty_str,
+                            retain: slot.retain,
+                            persistent: slot.persistent,
+                        });
+                        self.catalog_array_elements(
+                            td_idx,
+                            &arr_prefix,
+                            slot.retain,
+                            slot.persistent,
+                            &mut result,
+                        );
                     }
                     _ => {
-                        result.push((
-                            format!("{prefix}.{}", slot.name),
-                            debug::format_var_type_with_width(slot.ty, slot.int_width)
+                        result.push(debug::CatalogVariable {
+                            name: format!("{prefix}.{}", slot.name),
+                            ty: debug::format_var_type_with_width(slot.ty, slot.int_width)
                                 .to_string(),
-                        ));
+                            retain: slot.retain,
+                            persistent: slot.persistent,
+                        });
                     }
                 }
             }
@@ -664,14 +713,21 @@ impl Vm {
         &self,
         type_def_idx: u16,
         prefix: &str,
-        result: &mut Vec<(String, String)>,
+        retain: bool,
+        persistent: bool,
+        result: &mut Vec<debug::CatalogVariable>,
     ) {
         if let Some((elem_type, dims, _total)) = self.array_type_info(type_def_idx) {
             let elem_ty_str = debug::format_var_type(elem_type).to_string();
             if dims.len() == 1 {
                 let (lo, hi) = dims[0];
                 for idx in lo..=hi {
-                    result.push((format!("{prefix}[{idx}]"), elem_ty_str.clone()));
+                    result.push(debug::CatalogVariable {
+                        name: format!("{prefix}[{idx}]"),
+                        ty: elem_ty_str.clone(),
+                        retain,
+                        persistent,
+                    });
                 }
             }
         }
@@ -682,15 +738,19 @@ impl Vm {
         &self,
         type_def_idx: u16,
         prefix: &str,
-        result: &mut Vec<(String, String)>,
+        retain: bool,
+        persistent: bool,
+        result: &mut Vec<debug::CatalogVariable>,
     ) {
         if let Some((_, fields)) = self.struct_type_fields(type_def_idx) {
             for field in fields {
-                result.push((
-                    format!("{prefix}.{}", field.name),
-                    debug::format_var_type_with_width(field.ty, field.int_width)
+                result.push(debug::CatalogVariable {
+                    name: format!("{prefix}.{}", field.name),
+                    ty: debug::format_var_type_with_width(field.ty, field.int_width)
                         .to_string(),
-                ));
+                    retain,
+                    persistent,
+                });
             }
         }
     }
@@ -699,12 +759,18 @@ impl Vm {
     /// `instance_key` is the key in `fb_instances` for this FB instance.
     /// `nested_caller` is the caller_identity to use when looking up nested
     /// FB instances WITHIN this FB.
+    /// `retain`/`persistent` are inherited from the parent FB instance slot
+    /// — the IEC retain semantics treat all of an FB's fields as carrying
+    /// the parent's qualifier.
+    #[allow(clippy::too_many_arguments)]
     fn snapshot_fb_fields(
         &self,
         fb_func_idx: u16,
         prefix: &str,
         instance_key: &(u32, u16),
         nested_caller: u32,
+        retain: bool,
+        persistent: bool,
         result: &mut Vec<VariableInfo>,
     ) {
         let fb_func = &self.module.functions[fb_func_idx as usize];
@@ -723,6 +789,8 @@ impl Vm {
                         &nested_prefix,
                         &nested_key,
                         deeper_caller,
+                        retain,
+                        persistent,
                         result,
                     );
                 }
@@ -739,6 +807,8 @@ impl Vm {
                             value: debug::format_value(&arr_value),
                             ty: format!("{:?}", fb_slot.ty),
                             var_ref: 0,
+                            retain,
+                            persistent,
                         });
                     }
                 }
@@ -756,6 +826,8 @@ impl Vm {
                         )
                         .to_string(),
                         var_ref: 0,
+                        retain,
+                        persistent,
                     });
                 }
             }
@@ -764,11 +836,14 @@ impl Vm {
 
     /// Recursively enumerate a FB's fields for the catalog (schema only,
     /// no runtime values). Handles nested FBs (e.g., CTU inside a controller).
+    /// `retain`/`persistent` are inherited from the parent FB instance slot.
     fn catalog_fb_fields(
         &self,
         fb_func_idx: u16,
         prefix: &str,
-        result: &mut Vec<(String, String)>,
+        retain: bool,
+        persistent: bool,
+        result: &mut Vec<debug::CatalogVariable>,
     ) {
         let fb_func = &self.module.functions[fb_func_idx as usize];
         for fb_slot in &fb_func.locals.slots {
@@ -777,16 +852,29 @@ impl Vm {
                     // Add parent entry, then recurse into nested FB
                     let nested_prefix = format!("{prefix}.{}", fb_slot.name);
                     let nested_func = &self.module.functions[nested_idx as usize];
-                    result.push((nested_prefix.clone(), nested_func.name.clone()));
-                    self.catalog_fb_fields(nested_idx, &nested_prefix, result);
+                    result.push(debug::CatalogVariable {
+                        name: nested_prefix.clone(),
+                        ty: nested_func.name.clone(),
+                        retain,
+                        persistent,
+                    });
+                    self.catalog_fb_fields(
+                        nested_idx,
+                        &nested_prefix,
+                        retain,
+                        persistent,
+                        result,
+                    );
                 }
                 VarType::ClassInstance(_) => { /* skip */ }
                 _ => {
-                    result.push((
-                        format!("{prefix}.{}", fb_slot.name),
-                        debug::format_var_type_with_width(fb_slot.ty, fb_slot.int_width)
+                    result.push(debug::CatalogVariable {
+                        name: format!("{prefix}.{}", fb_slot.name),
+                        ty: debug::format_var_type_with_width(fb_slot.ty, fb_slot.int_width)
                             .to_string(),
-                    ));
+                        retain,
+                        persistent,
+                    });
                 }
             }
         }
@@ -823,6 +911,8 @@ impl Vm {
                             value: String::new(), // populated by DAP/extension
                             ty: fb_func.name.clone(),
                             var_ref: 0,
+                            retain: slot.retain,
+                            persistent: slot.persistent,
                         });
                         let instance_key = (caller_id, i as u16);
                         let nested_caller = ((i as u32) << 16) | (fb_idx as u32);
@@ -831,6 +921,8 @@ impl Vm {
                             &inst_prefix,
                             &instance_key,
                             nested_caller,
+                            slot.retain,
+                            slot.persistent,
                             &mut result,
                         );
                     }
@@ -845,12 +937,16 @@ impl Vm {
                             value: String::new(),
                             ty: ty_name,
                             var_ref: 0,
+                            retain: slot.retain,
+                            persistent: slot.persistent,
                         });
                         let instance_key = (caller_id, i as u16);
                         self.snapshot_struct_fields(
                             td_idx,
                             &inst_prefix,
                             &instance_key,
+                            slot.retain,
+                            slot.persistent,
                             &mut result,
                         );
                     }
@@ -864,12 +960,16 @@ impl Vm {
                                 slot.ty, slot.int_width, &self.module.type_defs,
                             ),
                             var_ref: 0,
+                            retain: slot.retain,
+                            persistent: slot.persistent,
                         });
                         let instance_key = (caller_id, i as u16);
                         self.snapshot_array_elements(
                             td_idx,
                             &arr_prefix,
                             &instance_key,
+                            slot.retain,
+                            slot.persistent,
                             &mut result,
                         );
                     }
@@ -884,6 +984,8 @@ impl Vm {
                             ty: debug::format_var_type_with_width(slot.ty, slot.int_width)
                                 .to_string(),
                             var_ref: 0,
+                            retain: slot.retain,
+                            persistent: slot.persistent,
                         });
                     }
                 }
@@ -898,6 +1000,8 @@ impl Vm {
         type_def_idx: u16,
         prefix: &str,
         instance_key: &(u32, u16),
+        retain: bool,
+        persistent: bool,
         result: &mut Vec<VariableInfo>,
     ) {
         if let Some((elem_type, dims, _total)) = self.array_type_info(type_def_idx) {
@@ -916,6 +1020,8 @@ impl Vm {
                         value: debug::format_value(&value),
                         ty: elem_ty_str.clone(),
                         var_ref: 0,
+                        retain,
+                        persistent,
                     });
                 }
             }
@@ -928,6 +1034,8 @@ impl Vm {
         type_def_idx: u16,
         prefix: &str,
         instance_key: &(u32, u16),
+        retain: bool,
+        persistent: bool,
         result: &mut Vec<VariableInfo>,
     ) {
         if let Some((_, fields)) = self.struct_type_fields(type_def_idx) {
@@ -943,6 +1051,8 @@ impl Vm {
                     ty: debug::format_var_type_with_width(field.ty, field.int_width)
                         .to_string(),
                     var_ref: 0,
+                    retain,
+                    persistent,
                 });
             }
         }
@@ -1002,6 +1112,8 @@ impl Vm {
             ty: debug::format_var_type_with_width(field_slot.ty, field_slot.int_width)
                 .to_string(),
             var_ref: 0,
+            retain: slot.retain,
+            persistent: slot.persistent,
         })
     }
 
@@ -1044,6 +1156,8 @@ impl Vm {
                                     ty: debug::format_var_type_with_width(fb_slot.ty, fb_slot.int_width)
                                         .to_string(),
                                     var_ref: 0,
+                                    retain: slot.retain,
+                                    persistent: slot.persistent,
                                 });
                             }
                         } else {
@@ -1057,6 +1171,8 @@ impl Vm {
                                 ty: debug::format_var_type_with_width(fb_slot.ty, fb_slot.int_width)
                                     .to_string(),
                                 var_ref: 0,
+                                retain: slot.retain,
+                                persistent: slot.persistent,
                             });
                         }
                     }
@@ -1078,6 +1194,8 @@ impl Vm {
                                 ty: debug::format_var_type_with_width(field.ty, field.int_width)
                                     .to_string(),
                                 var_ref: 0,
+                                retain: slot.retain,
+                                persistent: slot.persistent,
                             });
                         }
                     }
@@ -1094,6 +1212,8 @@ impl Vm {
                         ty: debug::format_var_type_with_width(slot.ty, slot.int_width)
                             .to_string(),
                         var_ref: 0,
+                        retain: slot.retain,
+                        persistent: slot.persistent,
                     });
                 }
             }

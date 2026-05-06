@@ -502,6 +502,8 @@ pub fn build_watch_tree(
                     var_type: v.var_type.clone(),
                     value: v.value.clone(),
                     forced: forced.contains(&v.name.to_uppercase()),
+                    retain: v.retain,
+                    persistent: v.persistent,
                     children: Vec::new(),
                 });
             } else {
@@ -512,12 +514,16 @@ pub fn build_watch_tree(
                     var_type: String::new(),
                     value: String::new(),
                     forced: false,
+                    retain: false,
+                    persistent: false,
                     children: Vec::new(),
                 });
             }
         } else {
             // Compound — build children tree
             let parent_type = parent.map(|v| v.var_type.as_str()).unwrap_or("");
+            let parent_retain = parent.map(|v| v.retain).unwrap_or(false);
+            let parent_persistent = parent.map(|v| v.persistent).unwrap_or(false);
             let kind = if parent_type.starts_with("ARRAY") {
                 "array"
             } else if parent_type == "PROGRAM" {
@@ -533,6 +539,8 @@ pub fn build_watch_tree(
                 var_type: parent_type.to_string(),
                 value: String::new(),
                 forced: false,
+                retain: parent_retain,
+                persistent: parent_persistent,
                 children,
             });
         }
@@ -554,6 +562,8 @@ fn build_children_from_flat(
         var_type: String,
         value: String,
         forced: bool,
+        retain: bool,
+        persistent: bool,
         children: BTreeMap<String, Node>,
     }
 
@@ -578,6 +588,7 @@ fn build_children_from_flat(
             continue;
         }
 
+        #[allow(clippy::too_many_arguments)]
         fn insert_at(
             map: &mut BTreeMap<String, Node>,
             parts: &[&str],
@@ -585,6 +596,8 @@ fn build_children_from_flat(
             var_type: &str,
             value: &str,
             is_forced: bool,
+            retain: bool,
+            persistent: bool,
         ) {
             if parts.is_empty() {
                 return;
@@ -595,6 +608,8 @@ fn build_children_from_flat(
                 var_type: String::new(),
                 value: String::new(),
                 forced: false,
+                retain: false,
+                persistent: false,
                 children: BTreeMap::new(),
             });
             if parts.len() == 1 {
@@ -602,13 +617,38 @@ fn build_children_from_flat(
                 node.var_type = var_type.to_string();
                 node.value = value.to_string();
                 node.forced = is_forced;
+                node.retain = retain;
+                node.persistent = persistent;
             } else {
-                insert_at(&mut node.children, &parts[1..], full_path, var_type, value, is_forced);
+                // Intermediate compound node — propagate parent's retain bits
+                // so the badge appears on every level (e.g. on Main.fb, the FB
+                // instance row, not just on Main.fb.counter, the leaf field).
+                if retain { node.retain = true; }
+                if persistent { node.persistent = true; }
+                insert_at(
+                    &mut node.children,
+                    &parts[1..],
+                    full_path,
+                    var_type,
+                    value,
+                    is_forced,
+                    retain,
+                    persistent,
+                );
             }
         }
 
         let is_forced = forced.contains(&v.name.to_uppercase());
-        insert_at(&mut root, &parts, &v.name, &v.var_type, &v.value, is_forced);
+        insert_at(
+            &mut root,
+            &parts,
+            &v.name,
+            &v.var_type,
+            &v.value,
+            is_forced,
+            v.retain,
+            v.persistent,
+        );
     }
 
     fn to_nodes(map: &BTreeMap<String, Node>, parent_full_path: &str) -> Vec<WatchNode> {
@@ -637,6 +677,8 @@ fn build_children_from_flat(
                     var_type: node.var_type.clone(),
                     value: node.value.clone(),
                     forced: node.forced,
+                    retain: node.retain,
+                    persistent: node.persistent,
                     children,
                 }
             })

@@ -1,6 +1,6 @@
 # IEC 61131-3 Compiler + LSP + Online Debugger — Design Document
 
-> **Progress tracker:** [implementation.md](implementation.md) — checklist and status.
+> **Progress tracker:** [implementation_core.md](implementation_core.md) — checklist and status.
 > **See also:** [design_comm.md](design_comm.md) — communication layer design.
 > **See also:** [implementation_native.md](implementation_native.md) — LLVM native compilation + hardware targets.
 > **See also:** [design_deploy.md](design_deploy.md) — remote deployment & online management.
@@ -519,3 +519,212 @@ Full VSCode dev environment with auto-build, extension install, playground.
 
 ### Error Quality
 Line:column source locations, severity levels, diagnostic codes.
+
+---
+
+## Phase 16 RETAIN / PERSISTENT — Test architecture
+
+The retain pipeline is end-to-end, so the test surface is layered to
+match the data flow. Each layer pins behaviour against real
+collaborators (no mocks) and is checklisted in
+[implementation_core.md](implementation_core.md).
+
+| Layer | What it locks | Where |
+|-------|---------------|-------|
+| Engine unit/integration | Capture/restore semantics across globals, locals, struct fields, FB instance fields | `st-engine/tests/retain_tests.rs` |
+| HTTP/WS acceptance | Catalog flag plumbing, force/save/load/restore through the agent's real axum router | `st-target-agent/tests/retain_e2e.rs` |
+| DAP wire | `presentationHint.attributes` shape on `Variable` rows | `st-dap/tests/dap_integration.rs::test_retain_persistent_presentation_hint` |
+| Systemd-style E2E (gated) | Deploy, force, kill+restart agent, verify on-disk snapshot survives | `st-target-agent/tests/e2e_qemu.rs::e2e_x86_64_retain_across_restart` |
+| Visual UI (Playwright) | Badge label / tooltip / colour propagation in the real Preact bundle | `editors/vscode/test/ui/retain-badge.spec.js` |
+
+**Children of retained FB / struct slots inherit the parent's qualifier.**
+This is the IEC convention; capture (`retain_store::capture_snapshot`)
+walks instance fields under any retained slot, so the DAP and monitor
+surfaces propagate the badge to every child for visual consistency.
+
+**`RuntimeManager::new_with_retain_dir(...)`** exists primarily so tests
+can redirect the snapshot directory away from `/var/lib/st-plc/retain`
+and run unprivileged. It is also used by the agent server when the
+operator overrides `storage.retain_dir` in `agent.yaml`.
+
+### Deferred retain test paths
+
+Two `retain_store.rs` branches are not reachable from any system-level
+entry point and would require unit-level construction or unstable OS
+manipulation to exercise. They remain deferred:
+
+- **`restore_snapshot(_, _, warm=false)` (cold restart):** the agent
+  always calls the warm variant on engine start. Cold restart is
+  modelled as "redeploy a different program", which today flows through
+  `online_change` / `Engine::new` — both still warm. A real cold-restore
+  invocation would need an explicit "factory reset" or "load from
+  PERSISTENT-only snapshot" entry point that doesn't exist yet. When
+  that surface lands, an E2E test against it becomes the natural place
+  to lock the cold path; until then, unit-level coverage is the only
+  option, which we've explicitly excluded for this round.
+- **`save_to_file` filesystem-error branches** (write/rename failure on
+  read-only FS or out-of-space): exercising these requires either
+  filling a tmpfs to capacity or chmod 000 on a directory the test
+  process owns. Both are too OS-fragile for CI and the failure modes
+  are well-understood `std::io::Error` propagations with low
+  real-world risk. Re-evaluate only if a production incident points to
+  silent retain-save failure.
+
+---
+
+## Test Coverage Strategy
+
+Coverage is tracked per-file in the `Test Coverage Improvements`
+checklist of [implementation_core.md](implementation_core.md). The
+strategy that produced the checklist:
+
+### Tier 1 — High-ROI targeted tests (Done, 2026-04-23)
+
+Cheap, mechanical wins. Subprocess instrumentation in `lsp_integration`
+unblocked `st-lsp/src/server.rs` (0 % → 58.6 %). Adding
+`st-comm-modbus` and `st-comm-serial` to the `show-env` workflow
+reclaimed ~1.4 k lines of comm-stack coverage that had been silently
+excluded. Two file-local hot spots (`watchdog.rs`, `document.rs`)
+absorbed targeted unit tests because their domains (timer maths,
+offset/position arithmetic) are pure-function-shaped and don't benefit
+from going through the agent.
+
+### Tier 2 — Acceptance/E2E coverage (Done)
+
+The four files in this tier are integration boundaries (HTTP API,
+WebSocket, DAP wire, retain pipeline). Their bugs surface at the user
+edge, so the tests live there too: real axum router, real WebSocket
+client, real TCP DAP proxy, real Preact bundle in a real browser. No
+mocks. The user gives up some speed (process spin-up, multipart
+construction, JSON framing) in exchange for the ability to catch
+regressions that only manifest end-to-end.
+
+### Tier 3 — External-dependency gated
+
+Modbus-TCP and SSH/installer paths need real network or VM
+collaborators. The QEMU harness in `tests/e2e-deploy/vm/` is the
+intended host; tests are gated by `ST_E2E_QEMU=1` so default `cargo
+test` stays fast.
+
+### Tier 4 — Infrastructure refactor
+
+Before more tests can usefully target `st-cli/src/main.rs`'s 907
+uncovered lines, the binary needs to be split into a thin shim over a
+library entrypoint. That change is a precondition, not a coverage
+problem.
+
+### Wait-and-see
+
+Two files (`st-engine/src/vm.rs`, `st-target-agent/src/runtime_manager.rs`)
+were parked under wait-and-see at the 2026-04-23 baseline. The 2026-05-05
+re-measurement found:
+
+- **`vm.rs`** is now 36.4 % (was 78.4 %). The drop is structural
+  rather than regressive: the file roughly doubled in executable-line
+  count when the Tier 5 string opcodes and Tier 1-4 time/date opcodes
+  landed. Each new opcode adds a `match Instruction::*` arm which
+  llvm-cov counts as an independent line/region. Every opcode IS
+  exercised somewhere by `stdlib_tests` / `string_tests` (170+ tests,
+  all passing), so the percentage drop overstates the real coverage
+  loss. Adding more dedicated VM unit tests for rare opcodes is
+  diminishing returns. Re-evaluate only when a real regression slips
+  through.
+- **`runtime_manager.rs`** is now 24.0 % (was 70.3 %). The new cold
+  spot is `handle_debug_commands` — the paused-state DAP dispatcher
+  for StepIn / StepOver / StepOut / Evaluate / ClearBreakpoints / the
+  new-attach-while-paused swap branch / the 30-minute idle timeout.
+  This path is reachable from the real DAP proxy (no mocks needed)
+  and is on a hot user-facing surface (live debugging), so it gets
+  follow-up E2E tests rather than wait-and-see treatment.
+
+### Limits of the no-mocking rule
+
+Some branches genuinely cannot be reached from a real client without
+unbounded test runtime or hardware manipulation. When this happens we
+either:
+
+1. Document the path here as deferred, with the precise reason
+   ("requires `RecvTimeoutError::Timeout` after 30 minutes",
+   "requires read-only `/var/lib/st-plc/retain`"), or
+2. Add the missing system-level entry point (e.g.
+   `RuntimeManager::new_with_retain_dir`) so tests can drive the
+   real code without resorting to mocks.
+
+The deferred list is part of the coverage tracker, not a TODO — it's
+where we acknowledge the cost/value trade-off and stop.
+
+### `runtime_manager::handle_debug_commands` — paused-state coverage map
+
+The dispatcher's branches map to user-driven actions as follows. All
+reachable arms are exercised by acceptance tests in
+`dap_proxy_integration.rs`; the unreachable ones are documented with
+the constraint that prevents E2E coverage.
+
+| Branch | Reachable via | Test |
+|--------|---------------|------|
+| `DebugCommand::Continue` | DAP `continue` | `test_dap_attach_pause_resume_reattach_lifecycle`, `test_dap_attach_clear_breakpoints_while_paused` |
+| `DebugCommand::StepIn` | DAP `stepIn` | `test_dap_attach_step_in_while_paused` |
+| `DebugCommand::StepOver` | DAP `next` | `test_dap_attach_step_over_while_paused` |
+| `DebugCommand::StepOut` | DAP `stepOut` | `test_dap_attach_step_out_while_paused` |
+| `DebugCommand::GetVariables` | DAP `variables(scope_ref)` | `test_dap_attach_variables_for_fb_fields` |
+| `DebugCommand::GetStackTrace` | DAP `stackTrace` | `test_dap_attach_stacktrace_inside_fb_body` |
+| `DebugCommand::Evaluate` | DAP `evaluate` | `test_dap_attach_evaluate_while_paused` |
+| `DebugCommand::SetBreakpoints` | DAP `setBreakpoints` | `test_dap_attach_breakpoint_in_helper_file` |
+| `DebugCommand::ClearBreakpoints` | DAP `setBreakpoints` with empty array | `test_dap_attach_clear_breakpoints_while_paused` |
+| `DebugCommand::Pause` (re-pause) | n/a | trivial no-op, not separately tested |
+| `DebugCommand::Disconnect` | DAP `disconnect` | `test_dap_attach_to_running_engine`, `test_dap_attach_pause_resume_reattach_lifecycle` |
+| `RuntimeCommand::ForceVariable` (paused) | **deferred** — dispatcher races with `recv_timeout`, see "known runtime limitation" below |
+| `RuntimeCommand::ForceVariable` (around session) | force before pause, verify across pause+disconnect | `test_dap_attach_force_around_debug_session` |
+| `RuntimeCommand::UnforceVariable` (around session) | unforce after resume | covered indirectly by force-around test |
+| `RuntimeCommand::Stop` | POST `/api/v1/program/stop` while paused | `test_dap_attach_http_stop_while_paused` |
+| `RuntimeCommand::Shutdown` | (agent shutdown) | covered indirectly by `Drop` paths |
+| `RuntimeCommand::DebugDetach` | (proxy-internal) | n/a — see "swap" note below |
+| `RuntimeCommand::DebugAttach` (swap) | second TCP client | rejected at proxy layer, see "second-connection" test |
+| `RuntimeCommand::OnlineChange` while paused | POST `/api/v1/program/update` while paused | rejected (returns "Cannot apply online change while debug session is paused") — covered indirectly |
+| `RecvTimeoutError::Timeout` (30 min) | **deferred** — would require >30 min CI runtime |
+| `RecvTimeoutError::Disconnected` | TCP drop without Disconnect | `test_dap_attach_tcp_drop_releases_engine` |
+
+**Swap branch (deferred at the proxy level).** The
+`RuntimeCommand::DebugAttach` arm of `handle_debug_commands` swaps a
+new debug session for the currently paused one. Today's `dap_proxy`
+implementation rejects a second TCP connection at the proxy layer
+(single-session lock), so the swap branch never runs in production.
+`test_dap_attach_second_connection_rejected_while_first_paused` pins
+the proxy-layer behaviour we DO have. To exercise the underlying swap
+arm, the proxy would need a multi-client mode (planned with the OPC-UA
+session work) or the runtime would need an in-process attach API.
+Until then this is a documented dead-but-defensive code path.
+
+**30-minute idle timeout (deferred).** Reaching
+`RecvTimeoutError::Timeout` requires a 30-minute paused session with
+no commands. CI cost > value: a regression here would only fire when
+a developer forgot a debug session, and the failure mode (engine
+keeps cycling normally after the timeout) is conservative. Re-evaluate
+only if the timeout itself becomes adjustable via config and we want to
+test the config end-to-end.
+
+**`RuntimeCommand::ForceVariable` while paused — known runtime
+limitation.** The dispatcher's `try_recv` does handle ForceVariable
+and sends the oneshot reply, but the surrounding `loop` iterates only
+*after* `session.cmd_rx.recv_timeout(timeout)` returns. If a debug
+session is paused with no DAP traffic, an HTTP `/api/v1/variables/force`
+arriving during the pause queues into `runtime_cmd_rx` but nobody runs
+`try_recv` until the next DAP command arrives (or the 30-min timeout
+fires). The HTTP handler is awaiting a oneshot reply, so it stalls —
+and any test that drives both sides synchronously inside the same
+spawn_blocking thread will deadlock.
+
+In production this is a latency bug, not a correctness bug: as soon as
+the user sends *any* DAP command (typically Continue or a follow-up
+inspection), the queued force is processed and the HTTP reply lands.
+The fix on the runtime side is to use `tokio::select!` (or a matching
+`crossbeam::select!`) to wait on both channels simultaneously, but
+that's a refactor of the dispatcher, not test work. Until that lands:
+
+- The `RuntimeCommand::ForceVariable` arm of `handle_debug_commands`
+  remains documented but unexercised by the no-mocking E2E suite.
+- Force functionality during a debug session is covered by
+  `test_dap_attach_force_around_debug_session` (force *before* pause,
+  verify pause+disconnect doesn't drop the override).
+- Re-add a paused-state force test once the dispatcher uses `select!`
+  so HTTP no longer races with `recv_timeout`.

@@ -38,22 +38,35 @@ pub struct CycleStatsSnapshot {
 // ── Monitor types (HTTP variable monitoring) ────────────────────────
 
 /// A variable in the monitorable catalog (schema only, no values).
-#[derive(Debug, Clone, Serialize)]
+/// Carries the IEC 61131-3 RETAIN / PERSISTENT qualifiers so the monitor
+/// UI can render badges next to retained variables.
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct CatalogEntry {
     pub name: String,
     #[serde(rename = "type")]
     pub ty: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub retain: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub persistent: bool,
 }
 
 /// A watched variable's current value.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct VariableValue {
     pub name: String,
     pub value: String,
     #[serde(rename = "type")]
     pub ty: String,
     pub forced: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub retain: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub persistent: bool,
 }
+
+#[inline]
+fn is_false(b: &bool) -> bool { !*b }
 
 /// Body for POST /api/v1/variables/force.
 #[derive(Debug, Deserialize)]
@@ -167,8 +180,20 @@ pub struct RuntimeManager {
 }
 
 impl RuntimeManager {
-    /// Create a new RuntimeManager and spawn the runtime thread.
+    /// Create a new RuntimeManager with the default retain directory
+    /// (`/var/lib/st-plc/retain`).
     pub fn new(config: RuntimeConfig) -> Self {
+        Self::new_with_retain_dir(
+            config,
+            std::path::PathBuf::from("/var/lib/st-plc/retain"),
+        )
+    }
+
+    /// Create a new RuntimeManager and spawn the runtime thread, using
+    /// `retain_dir` as the parent directory for `.retain` snapshot files.
+    /// Tests use this to override the default `/var/lib/st-plc/retain`
+    /// path so they can run without root privileges.
+    pub fn new_with_retain_dir(config: RuntimeConfig, retain_dir: std::path::PathBuf) -> Self {
         let state = Arc::new(RwLock::new(RuntimeState::default()));
         let (cycle_notify, _) = tokio::sync::broadcast::channel(64);
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(16);
@@ -177,7 +202,7 @@ impl RuntimeManager {
         let thread_notify = cycle_notify.clone();
         std::thread::Builder::new()
             .name("plc-runtime".to_string())
-            .spawn(move || runtime_thread(thread_state, thread_notify, cmd_rx))
+            .spawn(move || runtime_thread(thread_state, thread_notify, cmd_rx, retain_dir))
             .expect("Failed to spawn runtime thread");
 
         RuntimeManager {
@@ -380,6 +405,7 @@ fn runtime_thread(
     state: Arc<RwLock<RuntimeState>>,
     cycle_notify: tokio::sync::broadcast::Sender<()>,
     mut cmd_rx: tokio::sync::mpsc::Receiver<RuntimeCommand>,
+    retain_dir: std::path::PathBuf,
 ) {
     while let Some(cmd) = cmd_rx.blocking_recv() {
         match cmd {
@@ -403,8 +429,9 @@ fn runtime_thread(
                     s.started_at = Some(chrono::Utc::now().to_rfc3339());
                 }
 
-                // Build engine config with retain persistence
-                let retain_dir = std::path::PathBuf::from("/var/lib/st-plc/retain");
+                // Build engine config with retain persistence. The retain
+                // directory comes from the agent's storage config (or a
+                // test override) — see `RuntimeManager::new_with_retain_dir`.
                 let retain_path = retain_dir.join(format!("{program_name}.retain"));
                 let engine_config = st_engine::EngineConfig {
                     max_cycles: 0, // unlimited
@@ -428,7 +455,12 @@ fn runtime_thread(
                         .vm()
                         .monitorable_catalog()
                         .into_iter()
-                        .map(|(name, ty)| CatalogEntry { name, ty })
+                        .map(|c| CatalogEntry {
+                            name: c.name,
+                            ty: c.ty,
+                            retain: c.retain,
+                            persistent: c.persistent,
+                        })
                         .collect();
                     tracing::info!(
                         "Engine catalog populated: {} monitorable variables",
@@ -633,7 +665,12 @@ fn run_cycle_loop(
                             .vm()
                             .monitorable_catalog()
                             .into_iter()
-                            .map(|(name, ty)| CatalogEntry { name, ty })
+                            .map(|c| CatalogEntry {
+                                name: c.name,
+                                ty: c.ty,
+                                retain: c.retain,
+                                persistent: c.persistent,
+                            })
                             .collect();
                         let mut s = state.write().unwrap();
                         s.variable_catalog = catalog;
@@ -972,6 +1009,8 @@ fn snapshot_all_variables(
                 value: v.value,
                 ty: v.ty,
                 forced: is_forced,
+                retain: v.retain,
+                persistent: v.persistent,
             }
         })
         .collect();

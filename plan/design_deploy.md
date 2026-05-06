@@ -1,6 +1,6 @@
 # Remote Deployment & Online Management — Design Document
 
-> **Parent plan:** [implementation.md](implementation.md) — core platform progress tracker (Phases 0-12).
+> **Parent plan:** [implementation_core.md](implementation_core.md) — core platform progress tracker (Phases 0-12).
 > **Todo list:** [implementation_deploy.md](implementation_deploy.md) — progress tracking and actionable items.
 > **See also:**
 > - [design_comm.md](design_comm.md) — communication layer design (Phase 13)

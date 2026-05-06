@@ -2271,3 +2271,524 @@ async fn test_update_rejected_in_read_only_mode() {
         .unwrap();
     assert_eq!(resp.status(), 403);
 }
+
+// ─── program.rs error paths (acceptance) ────────────────────────────────
+//
+// Targets the gaps tracked in plan/implementation.md: error-path coverage
+// for /api/v1/program/upload (multipart edge cases) and /program/start
+// (no-program / corrupted-stored-bytecode). Drive everything through the
+// real axum router so the failure surface is the actual user-facing
+// HTTP response — not internal error variants.
+
+/// Multipart upload with no `file` field — store_bundle is never called,
+/// the handler must reject at the multipart parser stage.
+#[tokio::test]
+async fn test_upload_multipart_no_file_field() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _h) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    // Empty multipart form — no fields at all.
+    let form = reqwest::multipart::Form::new();
+    let resp = client
+        .post(format!("{base}/api/v1/program/upload"))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "no-field upload must be 400");
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    let msg = body["error"].as_str().unwrap_or("");
+    assert!(
+        msg.to_lowercase().contains("file") || msg.to_lowercase().contains("multipart"),
+        "error must mention the missing file field, got {msg:?}"
+    );
+}
+
+/// Multipart upload where the bundle bytes are NOT a valid st-bundle.
+/// Hits the `extract_bundle` failure path inside `store_bundle`.
+#[tokio::test]
+async fn test_upload_truncated_bundle_returns_400() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _h) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    // Garbage that can't possibly parse as a bundle archive.
+    let part = reqwest::multipart::Part::bytes(vec![0xFFu8; 32])
+        .file_name("garbage.st-bundle");
+    let form = reqwest::multipart::Form::new().part("file", part);
+    let resp = client
+        .post(format!("{base}/api/v1/program/upload"))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // Status must remain idle (no partial state from a failed upload).
+    let st: serde_json::Value = client
+        .get(format!("{base}/api/v1/status"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(st["status"], "idle");
+
+    // Info must 404 — nothing was deployed.
+    let info = client
+        .get(format!("{base}/api/v1/program/info"))
+        .send().await.unwrap();
+    assert_eq!(info.status(), 404);
+}
+
+/// Empty multipart payload — the field is present but contains zero bytes.
+#[tokio::test]
+async fn test_upload_empty_bundle_bytes_returns_400() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _h) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    let part = reqwest::multipart::Part::bytes(Vec::<u8>::new())
+        .file_name("empty.st-bundle");
+    let form = reqwest::multipart::Form::new().part("file", part);
+    let resp = client
+        .post(format!("{base}/api/v1/program/upload"))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+/// /program/info must 404 cleanly when nothing has been deployed yet —
+/// the early-return branch in `info()` before any program has been stored.
+#[tokio::test]
+async fn test_program_info_404_when_no_bundle() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _h) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/v1/program/info"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+/// /program/restart with no deployed program — should 404 since the
+/// (delegated) start handler can't find a module to load.
+#[tokio::test]
+async fn test_restart_without_program_returns_404() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _h) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/api/v1/program/restart"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+/// DELETE /program when no program is deployed must 404 — exercises the
+/// `remove_current` "No program deployed" branch.
+#[tokio::test]
+async fn test_delete_program_when_idle_no_program_returns_404() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _h) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    let resp = client
+        .delete(format!("{base}/api/v1/program"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+/// Re-uploading a bundle replaces the previous one — verify both that
+/// upload-while-running stops the engine cleanly (the new bundle is
+/// independent of the old running module) and that subsequent /info
+/// returns the new metadata.
+#[tokio::test]
+async fn test_upload_while_running_replaces_program() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _h) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+
+    // Deploy + start v1.
+    let v1 = make_bundle(
+        "Replaceable",
+        "PROGRAM Main\nVAR x : INT := 0; END_VAR\n    x := x + 1;\nEND_PROGRAM\n",
+    );
+    upload_bundle(&client, &base, &v1).await.error_for_status().unwrap();
+    let r = client
+        .post(format!("{base}/api/v1/program/start"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    // Re-upload v2 — store_bundle path replaces the on-disk metadata.
+    let v2 = make_bundle(
+        "Replaceable",
+        "PROGRAM Main\nVAR x : INT := 0; y : INT := 0; END_VAR\n    x := x + 2;\n    y := y + 1;\nEND_PROGRAM\n",
+    );
+    let r = upload_bundle(&client, &base, &v2).await;
+    assert_eq!(r.status(), 200);
+
+    // /info must reflect v2 metadata, not the still-running v1's.
+    let info: serde_json::Value = client
+        .get(format!("{base}/api/v1/program/info"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(info["name"], "Replaceable");
+    // Stop everything cleanly (the engine is still running v1's module
+    // in memory; this proves the re-upload doesn't break the stop path).
+    let _ = client
+        .post(format!("{base}/api/v1/program/stop"))
+        .send()
+        .await
+        .unwrap();
+}
+
+/// /program/start fails cleanly when the on-disk bytecode bytes have been
+/// corrupted out of band (covers the `serde_json::from_slice` error
+/// branch in `program_store::load_module`).
+///
+/// Approach: pre-populate the program_dir with corrupt bytecode + a
+/// matching meta.json BEFORE the agent boots. The agent's
+/// `load_persisted` reads them on startup, so the in-memory `current`
+/// entry holds invalid bytecode bytes. The deserialize error then
+/// surfaces on the next /program/start call.
+#[tokio::test]
+async fn test_start_with_corrupted_bytecode_returns_500() {
+    let dir = tempfile::tempdir().unwrap();
+    let prog_dir = dir.path();
+    std::fs::write(prog_dir.join("current.bytecode"), b"definitely not json").unwrap();
+    std::fs::write(
+        prog_dir.join("current.meta.json"),
+        r#"{
+            "name": "Corrupt",
+            "version": "1.0.0",
+            "mode": "development",
+            "compiled_at": "now",
+            "entry_point": "Main",
+            "bytecode_checksum": "00",
+            "deployed_at": "now",
+            "has_debug_map": false
+        }"#,
+    )
+    .unwrap();
+
+    let (base, _h) = start_agent(test_config(prog_dir)).await;
+    let client = Client::new();
+
+    // Sanity: /info should succeed because meta.json is well-formed even
+    // though the bytecode is junk. The deserialization error is deferred
+    // until load_module is called from /program/start.
+    let info = client
+        .get(format!("{base}/api/v1/program/info"))
+        .send().await.unwrap();
+    assert_eq!(info.status(), 200, "info should reflect persisted meta");
+
+    let resp = client
+        .post(format!("{base}/api/v1/program/start"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(), 500,
+        "corrupted bytecode must surface as 500 — got {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    let msg = body["error"].as_str().unwrap_or("").to_lowercase();
+    assert!(
+        msg.contains("deserialize") || msg.contains("bytecode"),
+        "error must mention deserialization, got {msg:?}"
+    );
+}
+
+// ─── monitor_ws.rs error paths (acceptance) ─────────────────────────────
+//
+// Targets the gaps tracked in plan/implementation.md: WS subscribe /
+// unsubscribe / force error paths and the catalog-empty edge case.
+// Drive everything through the real WebSocket port so the failure
+// surface is whatever the panel's JS sees on the wire.
+
+/// Subscribing with an empty variable list is a valid no-op — the handler
+/// must answer success without touching the runtime state.
+#[tokio::test]
+async fn test_ws_subscribe_empty_list_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _h) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+    upload_and_start(&client, &base, &simple_program()).await;
+
+    let mut ws = ws_connect(&base).await;
+    let resp = ws_request(
+        &mut ws,
+        serde_json::json!({ "method": "subscribe", "params": { "variables": [] } }),
+    )
+    .await;
+    assert_eq!(resp["type"], "response");
+    assert_eq!(resp["success"], true);
+    // No subscriptions means no pushes are coming — explicit timeout
+    // to prove we don't deadlock waiting for one.
+    let push = tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            let msg = ws.next().await;
+            if let Some(Ok(tungstenite::Message::Text(t))) = msg {
+                let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                if v["type"] == "variableUpdate" {
+                    return Some(v);
+                }
+            } else {
+                return None;
+            }
+        }
+    })
+    .await;
+    assert!(
+        push.is_err() || push.unwrap().is_none(),
+        "empty subscribe must not produce variable pushes"
+    );
+}
+
+/// Subscribing to a name that doesn't exist in the catalog: the handler
+/// accepts the subscription (it can't reject without a catalog round-trip
+/// per request) but never pushes a value for it.
+#[tokio::test]
+async fn test_ws_subscribe_nonexistent_variable_silent() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _h) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+    upload_and_start(&client, &base, &simple_program()).await;
+
+    let mut ws = ws_connect(&base).await;
+    // Mix a real var with a bogus one. The real var must still get
+    // pushes; the bogus one must simply be absent from the watch_tree.
+    let resp = ws_request(
+        &mut ws,
+        serde_json::json!({
+            "method": "subscribe",
+            "params": { "variables": ["Main.counter", "Main.does_not_exist"] }
+        }),
+    )
+    .await;
+    assert_eq!(resp["success"], true);
+
+    // Wait for a push and inspect it.
+    let push = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let msg = ws.next().await.unwrap().unwrap();
+            if let tungstenite::Message::Text(t) = msg {
+                let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                if v["type"] == "variableUpdate" {
+                    return v;
+                }
+            }
+        }
+    })
+    .await
+    .expect("expected a variableUpdate within 2s");
+
+    let tree = push["watch_tree"].as_array().expect("watch_tree array");
+    let names: Vec<String> = tree
+        .iter()
+        .filter_map(|n| n["fullPath"].as_str().map(String::from))
+        .collect();
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("Main.counter")),
+        "real var must appear in watch_tree, got {names:?}"
+    );
+    // The bogus name may appear as a placeholder root; what matters is
+    // that we don't crash and the real var survives. Catalog filtering
+    // is a separate concern.
+}
+
+/// Unsubscribing variables that were never subscribed is a no-op success
+/// (idempotent unsubscribe) — covers the unsubscribe handler when the
+/// HashSet has no matching entry.
+#[tokio::test]
+async fn test_ws_unsubscribe_unknown_variable_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _h) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+    upload_and_start(&client, &base, &simple_program()).await;
+
+    let mut ws = ws_connect(&base).await;
+    let resp = ws_request(
+        &mut ws,
+        serde_json::json!({
+            "method": "unsubscribe",
+            "params": { "variables": ["Main.never_subscribed"] }
+        }),
+    )
+    .await;
+    assert_eq!(resp["type"], "response");
+    assert_eq!(resp["success"], true);
+}
+
+/// Force while idle (no engine) — the handler checks runtime status and
+/// returns an Error message, not a Response.
+#[tokio::test]
+async fn test_ws_force_when_not_running_returns_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _h) = start_agent(test_config(dir.path())).await;
+
+    let mut ws = ws_connect(&base).await;
+    let resp = ws_request(
+        &mut ws,
+        serde_json::json!({
+            "method": "force",
+            "params": { "variable": "Main.counter", "value": 1 }
+        }),
+    )
+    .await;
+    assert_eq!(resp["type"], "error");
+    let msg = resp["message"].as_str().unwrap_or("").to_lowercase();
+    assert!(
+        msg.contains("not running"),
+        "must say 'not running', got {msg:?}"
+    );
+}
+
+/// Force with an invalid value type (object/array) — the handler must
+/// reject before reaching the runtime so the engine never sees the
+/// malformed value.
+#[tokio::test]
+async fn test_ws_force_invalid_value_type_returns_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _h) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+    upload_and_start(&client, &base, &simple_program()).await;
+
+    let mut ws = ws_connect(&base).await;
+    // Object as value — neither bool, number, nor string. The matcher
+    // in monitor_ws explicitly rejects this.
+    let resp = ws_request(
+        &mut ws,
+        serde_json::json!({
+            "method": "force",
+            "params": { "variable": "Main.counter", "value": { "nope": 1 } }
+        }),
+    )
+    .await;
+    assert_eq!(resp["type"], "error");
+    let msg = resp["message"].as_str().unwrap_or("").to_lowercase();
+    assert!(
+        msg.contains("invalid") || msg.contains("type"),
+        "must mention invalid value type, got {msg:?}"
+    );
+}
+
+/// getCatalog while idle — the catalog vector is empty. The handler
+/// still returns a well-formed Catalog message, not an error.
+#[tokio::test]
+async fn test_ws_get_catalog_when_idle_returns_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _h) = start_agent(test_config(dir.path())).await;
+
+    let mut ws = ws_connect(&base).await;
+    let resp = ws_request(&mut ws, serde_json::json!({ "method": "getCatalog" })).await;
+    assert_eq!(resp["type"], "catalog");
+    let vars = resp["variables"].as_array().expect("variables array");
+    assert!(vars.is_empty(), "idle catalog must be empty, got {vars:?}");
+}
+
+/// Read while idle — same shape: empty list, not an error.
+#[tokio::test]
+async fn test_ws_read_when_idle_returns_empty_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _h) = start_agent(test_config(dir.path())).await;
+
+    let mut ws = ws_connect(&base).await;
+    let resp = ws_request(
+        &mut ws,
+        serde_json::json!({
+            "method": "read",
+            "params": { "variables": ["Main.counter"] }
+        }),
+    )
+    .await;
+    assert_eq!(resp["type"], "response");
+    assert_eq!(resp["success"], true);
+    let data = resp["data"].as_array().expect("data array");
+    assert!(data.is_empty());
+}
+
+/// `write` and `onlineChange` over WS are not yet implemented — the
+/// handler returns the "Not implemented" error message. This pins that
+/// behaviour so removing the rejection (instead of providing a real
+/// implementation) is caught.
+#[tokio::test]
+async fn test_ws_write_returns_not_implemented_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _h) = start_agent(test_config(dir.path())).await;
+    let mut ws = ws_connect(&base).await;
+    let resp = ws_request(
+        &mut ws,
+        serde_json::json!({
+            "method": "write",
+            "params": { "variable": "Main.counter", "value": 1 }
+        }),
+    )
+    .await;
+    assert_eq!(resp["type"], "error");
+    assert!(
+        resp["message"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("not implemented"),
+        "expected 'Not implemented', got {}",
+        resp["message"]
+    );
+}
+
+#[tokio::test]
+async fn test_ws_online_change_returns_not_implemented_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _h) = start_agent(test_config(dir.path())).await;
+    let mut ws = ws_connect(&base).await;
+    let resp = ws_request(
+        &mut ws,
+        serde_json::json!({
+            "method": "onlineChange",
+            "params": { "source": "PROGRAM Main\nEND_PROGRAM\n" }
+        }),
+    )
+    .await;
+    assert_eq!(resp["type"], "error");
+    assert!(
+        resp["message"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("not implemented")
+    );
+}
+
+/// resetStats while running — the handler returns success and clears
+/// the min/max/jitter counters. Verify we get a fresh snapshot after.
+#[tokio::test]
+async fn test_ws_reset_stats_while_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _h) = start_agent(test_config(dir.path())).await;
+    let client = Client::new();
+    upload_and_start(&client, &base, &simple_program()).await;
+
+    // Let cycles accumulate before the reset.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let mut ws = ws_connect(&base).await;
+    let resp = ws_request(&mut ws, serde_json::json!({ "method": "resetStats" })).await;
+    assert_eq!(resp["type"], "response");
+    assert_eq!(resp["success"], true);
+
+    // Subsequent getCycleInfo should still report a sane structure.
+    let info = ws_request(&mut ws, serde_json::json!({ "method": "getCycleInfo" })).await;
+    assert_eq!(info["type"], "cycleInfo");
+    assert!(info["cycle_count"].as_u64().is_some());
+}

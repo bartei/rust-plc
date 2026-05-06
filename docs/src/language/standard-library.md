@@ -649,7 +649,7 @@ See [`playground/18_strings.st`](https://github.com/anthropics/rust-plc/blob/mas
 
 ### Performance characteristics
 
-Every string operation allocates a fresh `String` for its result -- there is no in-place mutation, copy-on-write, or arena reuse. That makes individual ops `O(n)` in string length and adds a heap allocation per call. For typical PLC workloads (short strings, a handful of ops per cycle) this is well below the scan-cycle budget, but tight inner loops over many string ops will be measurably slower than equivalent integer arithmetic. A future tier may revisit this with a small-string optimisation or a per-cycle string arena -- see the deferred-optimisations list in `plan/implementation.md`.
+Every string operation allocates a fresh `String` for its result -- there is no in-place mutation, copy-on-write, or arena reuse. That makes individual ops `O(n)` in string length and adds a heap allocation per call. For typical PLC workloads (short strings, a handful of ops per cycle) this is well below the scan-cycle budget, but tight inner loops over many string ops will be measurably slower than equivalent integer arithmetic. A future tier may revisit this with a small-string optimisation or a per-cycle string arena -- see the deferred-optimisations list in `plan/implementation_core.md`.
 
 ---
 

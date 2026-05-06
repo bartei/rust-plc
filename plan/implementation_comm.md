@@ -1,7 +1,7 @@
 # Communication Layer — Progress Tracker
 
 > **Design document:** [design_comm.md](design_comm.md) — architecture, examples, rationale.
-> **Parent plan:** [implementation.md](implementation.md) — core platform progress tracker.
+> **Parent plan:** [implementation_core.md](implementation_core.md) — core platform progress tracker.
 
 ---
 

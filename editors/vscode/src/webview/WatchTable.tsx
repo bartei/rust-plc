@@ -116,6 +116,7 @@ function WatchNodeRow({
               {arrow}
             </span>{" "}
             {node.name}
+            <RetainBadge node={node} />
           </td>
           <td class="value">{node.value || ""}</td>
           <td class="type">
@@ -162,6 +163,7 @@ function WatchNodeRow({
         {indent}
         {isRoot ? "" : "\u00a0\u00a0 "}
         {node.name}
+        <RetainBadge node={node} />
       </td>
       <td class="value">{node.value || ""}</td>
       <td class="type">
@@ -203,5 +205,45 @@ function WatchNodeRow({
         )}
       </td>
     </tr>
+  );
+}
+
+// ── Retain / Persistent badge ───────────────────────────────────────
+
+interface RetainBadgeProps {
+  node: WatchNode;
+}
+
+/**
+ * Small inline badge for IEC RETAIN / PERSISTENT variables.
+ * Renders nothing for ordinary variables.
+ *  - "R"  : RETAIN (survives warm restart)
+ *  - "P"  : PERSISTENT (survives cold restart)
+ *  - "RP" : RETAIN PERSISTENT
+ */
+function RetainBadge({ node }: RetainBadgeProps) {
+  const r = !!node.retain;
+  const p = !!node.persistent;
+  if (!r && !p) {
+    return null;
+  }
+  const label = r && p ? "RP" : r ? "R" : "P";
+  const title = r && p
+    ? "RETAIN PERSISTENT — survives warm and cold restart"
+    : r
+      ? "RETAIN — survives warm restart"
+      : "PERSISTENT — survives cold restart";
+  return (
+    <>
+      {" "}
+      <span
+        class="retain-badge"
+        data-retain={r ? "1" : "0"}
+        data-persistent={p ? "1" : "0"}
+        title={title}
+      >
+        {label}
+      </span>
+    </>
   );
 }

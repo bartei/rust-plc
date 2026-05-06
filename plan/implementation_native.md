@@ -1,6 +1,6 @@
 # Native Compilation & Hardware Targets — Implementation Plan
 
-> **Parent plan:** [implementation.md](implementation.md) — core platform, Phases 0-12.
+> **Parent plan:** [implementation_core.md](implementation_core.md) — core platform, Phases 0-12.
 > **See also:** [implementation_comm.md](implementation_comm.md) — communication layer (Phase 13).
 > **See also:** [implementation_deploy.md](implementation_deploy.md) — remote deployment (Phase 15).
 

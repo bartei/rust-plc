@@ -15,7 +15,7 @@
 
 ## Phases 0-11: Core Platform (COMPLETED)
 
-1050+ tests, zero clippy warnings.
+1464+ tests, zero clippy warnings.
 
 - [x] Phase 0: Project scaffolding, workspace, CI, VSCode extension scaffold
 - [x] Phase 1: Tree-sitter ST grammar (case-insensitive, incremental)
@@ -298,24 +298,41 @@ Infrastructure: `@vscode/test-electron` (real Electron instance) + Playwright (w
 
 ## Phase 16: RETAIN / PERSISTENT Variable Persistence (COMPLETED)
 
-16 tests.
+> Architecture & deferred-test rationale: see
+> [design_core.md "Phase 16 RETAIN / PERSISTENT — Test architecture"](design_core.md#phase-16-retain--persistent--test-architecture).
 
-- [x] IR: `persistent: bool` field on `VarSlot` (serde-default for backward compat)
-- [x] Compiler: set both `retain` and `persistent` from `VarQualifier` for globals and locals
-- [x] `RetainStore` module: capture, restore, save (atomic JSON), load
+### Pipeline
+
+- [x] IR: `persistent: bool` on `VarSlot` (serde-default for backward compat)
+- [x] Compiler: set `retain` + `persistent` from `VarQualifier` for globals and locals
+- [x] `RetainStore`: capture, restore, atomic save, load
 - [x] Engine: restore on startup, periodic checkpoint, save on shutdown + before online change
-- [x] CLI: resolve `.st-retain/<program>.retain` next to plc-project.yaml
-- [x] Target agent: save on stop/shutdown, default `/var/lib/st-plc/retain/`
-- [x] `plc-project.yaml`: `engine.retain.checkpoint_cycles` config
-- [x] JSON schema updated
-- [x] Struct-typed PERSISTENT RETAIN variables: `instance_fields` section in `RetainSnapshot`, capture/restore via `fb_instances`
-- [x] 16 unit/integration tests
+- [x] Struct/FB instance fields captured via `fb_instances`
+- [x] CLI: `.st-retain/<program>.retain` next to plc-project.yaml
+- [x] Target agent: save on stop/shutdown, configurable `storage.retain_dir`
+- [x] `plc-project.yaml`: `engine.retain.checkpoint_cycles` config + JSON schema
+- [x] `RuntimeManager::new_with_retain_dir(...)` for unprivileged test runs
 
-### Remaining
+### UI surfaces
 
-- [ ] DAP: show retain/persistent badge in Variables panel
-- [ ] Monitor panel: indicate retain/persistent variables visually
-- [ ] E2E test: QEMU target — deploy, run, stop service, restart, verify values preserved
+- [x] DAP `Variable.presentation_hint.attributes` carries `"retain"` / `"persistent"` on locals, globals, FB fields, struct fields, array elements
+- [x] `Vm::monitorable_catalog()` returns `Vec<CatalogVariable>` carrying both flags
+- [x] HTTP catalog, WS catalog, and pushed `watch_tree` propagate flags
+- [x] `WatchTable.tsx` renders `R` / `P` / `RP` badge with VS Code theme colours
+
+### Tests (per-layer counts; see design_core.md for what each layer locks)
+
+- [x] Engine: 16 tests in `st-engine/tests/retain_tests.rs`
+- [x] HTTP/WS acceptance: 4 tests in `st-target-agent/tests/retain_e2e.rs`
+- [x] DAP wire: `test_retain_persistent_presentation_hint`
+- [x] Systemd-style E2E: `e2e_x86_64_retain_across_restart` (gated by `ST_E2E_QEMU=1`)
+- [x] Playwright visual: 7 tests in `retain-badge.spec.js`
+- [x] Fixtures: `test-project-retain`, `test-project-retain-fb`, `test-project-retain-typechange`
+
+### Deferred (rationale in design_core.md)
+
+- [ ] `restore_snapshot(_, _, warm=false)` cold-restore path — no system-level entry point
+- [ ] `save_to_file` filesystem error branches — too OS-fragile for CI
 
 ---
 
@@ -594,7 +611,7 @@ separately if needed.
 
 ## Cross-Cutting Concerns
 
-- [x] Testing: 714+ tests across 10+ crates
+- [x] Testing: 1464+ tests across 10+ crates (workspace `cargo test --exclude st-comm-modbus`, 2026-05-05)
 - [x] CI/CD: GitHub Actions + release-plz
 - [x] Documentation: mdBook site (20+ pages)
 - [x] Tracing / logging
@@ -606,68 +623,67 @@ separately if needed.
 
 ## Test Coverage Improvements
 
-Tracked from the coverage gap analysis in `/tmp/test-reports/COVERAGE_GAPS.md`
-(baseline 65.05 % line coverage on 2026-04-23). After Phase 1, line coverage
-is now **71.78 %** (+6.73 pp).
+> Strategy & rationale: see
+> [design_core.md "Test Coverage Strategy"](design_core.md#test-coverage-strategy).
+> Baseline 65.05 % (2026-04-23). After Phase 1: 71.78 %. After Phase 2,
+> measured 2026-05-05 via `./scripts/coverage.sh --no-comm`: 60.15 %
+> (drop is denominator inflation — covered-line counts grew, total
+> executable lines grew faster).
 
-### Done (2026-04-23)
+### Tier 1 — High-ROI targeted (DONE 2026-04-23)
 
-- [x] Subprocess coverage in `lsp_integration.rs`: `find_st_cli()` via
-      `current_exe()`, `TestClient::clean_stop()` sends `shutdown` + `exit`
-      and closes `child.stdin` so tower-lsp returns from `serve()` and the
-      `.profraw` flushes before SIGKILL. Result: **`st-lsp/src/server.rs`
-      0 % → 58.6 %**, `st-lsp` crate 27 % → 67 %.
-- [x] Coverage now includes `st-comm-modbus` (50.6 %) and `st-comm-serial`
-      (60.1 %) via the `show-env` workflow (no longer excluded).
-- [x] `st-target-agent/src/watchdog.rs` — 8 new unit tests using
-      `tokio::time::pause()`: **0 % → 96.94 %**.
-- [x] `st-lsp/src/document.rs` — 13 new direct unit tests for offset↔position,
-      virtual-space mapping, update happy/error paths: **53.6 % → 75.5 %**.
+- [x] `lsp_integration.rs` subprocess coverage → `st-lsp/src/server.rs` 0 % → 58.6 %
+- [x] Comm crates included via `show-env` workflow
+- [x] `st-target-agent/src/watchdog.rs` 0 % → 96.94 %
+- [x] `st-lsp/src/document.rs` 53.6 % → 75.5 %
 
-### Phase 2 — high-ROI targeted tests (deferred)
+### Tier 2 — Acceptance/E2E coverage (DONE)
 
-- [ ] **`st-target-agent/src/api/program.rs`** (73.5 % → 90 %): error-path tests
-      for invalid programs, multipart-upload edge cases.
-- [ ] **`st-target-agent/src/api/monitor_ws.rs`** (65.8 % → 85 %): WS
-      subscribe/unsubscribe/force error paths, catalog-empty edge case.
-- [ ] **`st-engine/src/retain_store.rs`** (58.9 % → 85 %):
-      `capture_instance_fields`, warm vs. cold `restore_snapshot`, `save_to_file` /
-      `load_from_file` error branches, `is_compatible` corner cases.
-- [ ] **`st-target-agent/src/dap_attach_handler.rs`** (56.5 % → 80 %):
-      request-level unit tests using an in-memory DAP transport recorder. Cover
-      `disconnect`, `stackTrace` edge cases, `variables` for FB fields, and
-      breakpoint resolution at `virtual_offset`.
+All driven through the real axum router / WebSocket / TCP DAP proxy
+(`st-target-agent/tests/{api_integration,retain_e2e,dap_proxy_integration}.rs`).
+No mocks.
 
-### Phase 3 — external-dependency gated (need fakes/fixtures)
+- [x] `api/program.rs`: 8 acceptance tests covering multipart + bundle + lifecycle error paths
+- [x] `api/monitor_ws.rs`: 10 acceptance tests covering WS subscribe/unsubscribe/force/catalog/read/write/onlineChange/resetStats edge cases
+- [x] `retain_store.rs`: 3 acceptance tests covering FB-instance capture, `is_compatible` filter on type-change redeploy, corrupt-snapshot load
+- [x] `dap_attach_handler.rs`: 4 acceptance tests covering TCP-drop auto-detach, stackTrace inside FB, FB-field expansion, multi-file `virtual_offset` breakpoint resolution
 
-- [ ] **`st-comm-modbus-tcp/src/client.rs`** (0 %): table-driven tests against
-      a mock `TcpStream` (tokio `DuplexStream`).
-- [ ] **`st-comm-modbus-tcp/src/device_fb.rs`** (40.2 %) and `transport.rs`
-      (48.8 %): use `st-comm-sim` as a fake or add an in-process TCP fixture.
-- [ ] **`st-deploy/src/ssh.rs`** (37.8 %): small integration suite against the
-      existing QEMU x86_64 VM; harness already exists in
-      `tests/e2e-deploy/vm/`.
-- [ ] **`st-deploy/src/installer.rs`** (0 %, 230 lines, no tests at all):
-      unit-test `find_static_binary`; integration-test `install`/`uninstall`
-      against the QEMU fixture.
+### Tier 3 — External-dependency gated (TODO)
 
-### Phase 4 — infrastructure / refactor
+- [ ] `st-comm-modbus-tcp/src/client.rs` (0 %): in-process TCP fixture
+- [ ] `st-comm-modbus-tcp/src/{device_fb,transport}.rs`: use `st-comm-sim` or in-process TCP fixture
+- [ ] `st-deploy/src/ssh.rs` (37.8 %): QEMU integration suite
+- [ ] `st-deploy/src/installer.rs` (0 %): QEMU integration suite
 
-- [ ] Split `st-cli/src/main.rs` (907 uncovered lines) into a thin shim over a
-      library entrypoint `st_cli::run(argv) -> ExitCode`, then unit-test the
-      library surface.
-- [ ] Decide on `st-comm-sim/src/web.rs` (0 %, 211 lines): delete if dead
-      code, otherwise add `reqwest`-based smoke tests.
-- [ ] Binary-search the 525 uncovered lines in `st-dap/src/server.rs` (73.9 %)
-      via `cargo llvm-cov --html` and add targeted tests for `exceptionInfo`,
-      `modules`, `loadedSources`, `setExpression`, breakpoint hit-counts, and
-      log-message conditions.
+### Tier 4 — Infrastructure refactor (TODO)
 
-### Wait-and-see
+- [ ] Split `st-cli/src/main.rs` into shim + library entrypoint
+- [ ] Decide on `st-comm-sim/src/web.rs` (delete or reqwest smoke tests)
+- [ ] `st-dap/src/server.rs` 73.9 % → drill remaining uncovered request types
 
-- [ ] `st-engine/src/vm.rs` (78.4 %): 353 uncovered lines mostly in rare
-      opcodes and error paths; diminishing returns below 80 %, re-evaluate
-      after Phase 2.
-- [ ] `st-target-agent/src/runtime_manager.rs` (70.3 %): 203 uncovered lines
-      in command dispatcher branches; will improve as Phase 2 tests exercise
-      the API layer more thoroughly.
+### Wait-and-see — post-Phase-2 review (2026-05-05)
+
+- [ ] `st-engine/src/vm.rs` — 36.4 % (was 78.4 %): structural, stay deferred (rationale in design_core.md)
+- [x] `st-target-agent/src/runtime_manager.rs` — 24.0 % (was 70.3 %): cold spot in `handle_debug_commands`. Tier 2-style follow-up E2E tests added — see below.
+
+### Phase 2 follow-up: paused-state DAP E2E (DONE)
+
+> Branch-by-branch coverage map: see
+> [design_core.md "`runtime_manager::handle_debug_commands` — paused-state coverage map"](design_core.md#runtime_managerhandle_debug_commands--paused-state-coverage-map).
+> All tests in `crates/st-target-agent/tests/dap_proxy_integration.rs`,
+> driven through the real TCP DAP proxy + HTTP API, no mocks.
+
+- [x] `test_dap_attach_step_in_while_paused` — DAP `stepIn`
+- [x] `test_dap_attach_step_over_while_paused` — DAP `next`
+- [x] `test_dap_attach_step_out_while_paused` — DAP `stepOut`
+- [x] `test_dap_attach_evaluate_while_paused` — DAP `evaluate` returns live local
+- [x] `test_dap_attach_clear_breakpoints_while_paused` — empty `setBreakpoints` array
+- [x] `test_dap_attach_force_around_debug_session` — force before pause persists across pause+resume+disconnect; unforce after detach takes effect (the strict in-pause variant is deferred — see design_core.md "RuntimeCommand::ForceVariable while paused — known runtime limitation")
+- [x] `test_dap_attach_http_stop_while_paused` — HTTP stop during pause; agent reaches idle
+- [x] `test_dap_attach_second_connection_rejected_while_first_paused` — single-session lock holds during pause; releases on disconnect
+
+### Deferred (rationale in design_core.md)
+
+- [ ] `RuntimeCommand::DebugAttach` swap arm — blocked by proxy single-session lock; revisit with multi-client proxy
+- [ ] `RuntimeCommand::ForceVariable` (paused) — dispatcher races with `recv_timeout`; restore the in-pause test once the dispatcher migrates to `select!`
+- [ ] `RecvTimeoutError::Timeout` 30-min idle — CI cost > value

@@ -2846,3 +2846,112 @@ END_PROGRAM
         "evaluate(g_upper) should match the variables view"
     );
 }
+
+/// IEC 61131-3 RETAIN / PERSISTENT qualifiers must surface as
+/// `presentationHint.attributes` on the corresponding Variable rows so
+/// the VS Code Variables panel can render a badge. The dap-rs crate
+/// serializes custom attribute strings via the `String(...)` enum
+/// variant, which encodes as a plain JSON string.
+#[test]
+fn test_retain_persistent_presentation_hint() {
+    let source = "\
+VAR_GLOBAL RETAIN
+    g_retain : INT := 0;
+END_VAR
+VAR_GLOBAL PERSISTENT
+    g_persistent : INT := 0;
+END_VAR
+VAR_GLOBAL RETAIN PERSISTENT
+    g_durable : INT := 0;
+END_VAR
+VAR_GLOBAL
+    g_plain : INT := 0;
+END_VAR
+PROGRAM Main
+VAR
+    plain_local : INT := 0;
+END_VAR
+    plain_local := plain_local + 1;
+    g_retain := g_retain + 1;
+    g_persistent := g_persistent + 1;
+    g_durable := g_durable + 1;
+    g_plain := g_plain + 1;
+END_PROGRAM
+";
+    let messages = run_dap_session(
+        source,
+        &[
+            dap_request(1, "initialize", Some(json!({ "adapterID": "st" }))),
+            dap_request(2, "launch", Some(json!({ "stopOnEntry": true }))),
+            dap_request(3, "configurationDone", None),
+            dap_request(4, "scopes", Some(json!({ "frameId": 0 }))),
+            // Locals scope (1000) — should include plain_local with no badge.
+            dap_request(5, "variables", Some(json!({ "variablesReference": 1000 }))),
+            // Globals scope (1001) — should include all four globals with the
+            // appropriate presentationHint.attributes entries.
+            dap_request(6, "variables", Some(json!({ "variablesReference": 1001 }))),
+            dap_request(7, "disconnect", None),
+        ],
+    );
+
+    let locals = find_response(&messages, 5).expect("locals response");
+    let local_vars = locals["body"]["variables"].as_array().expect("locals array");
+    let plain_local = local_vars
+        .iter()
+        .find(|v| v["name"].as_str() == Some("plain_local"))
+        .expect("plain_local in locals");
+    assert!(
+        plain_local.get("presentationHint").is_none(),
+        "plain local must not carry a presentationHint, got {plain_local}"
+    );
+
+    let globals = find_response(&messages, 6).expect("globals response");
+    let global_vars = globals["body"]["variables"].as_array().expect("globals array");
+    let find_g = |name: &str| -> &Value {
+        global_vars
+            .iter()
+            .find(|v| v["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("missing {name} in {global_vars:?}"))
+    };
+    let attrs = |v: &Value| -> Vec<String> {
+        v["presentationHint"]["attributes"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
+
+    let r = find_g("g_retain");
+    let r_attrs = attrs(r);
+    assert!(
+        r_attrs.iter().any(|a| a == "retain"),
+        "g_retain must carry 'retain' attribute, got {r_attrs:?}"
+    );
+    assert!(
+        !r_attrs.iter().any(|a| a == "persistent"),
+        "g_retain must NOT carry 'persistent', got {r_attrs:?}"
+    );
+
+    let p = find_g("g_persistent");
+    let p_attrs = attrs(p);
+    assert!(
+        p_attrs.iter().any(|a| a == "persistent"),
+        "g_persistent must carry 'persistent', got {p_attrs:?}"
+    );
+    assert!(
+        !p_attrs.iter().any(|a| a == "retain"),
+        "g_persistent must NOT carry 'retain', got {p_attrs:?}"
+    );
+
+    let d = find_g("g_durable");
+    let d_attrs = attrs(d);
+    assert!(
+        d_attrs.iter().any(|a| a == "retain") && d_attrs.iter().any(|a| a == "persistent"),
+        "g_durable (RETAIN PERSISTENT) must carry both attributes, got {d_attrs:?}"
+    );
+
+    let plain_g = find_g("g_plain");
+    assert!(
+        plain_g.get("presentationHint").is_none(),
+        "plain global must not carry a presentationHint, got {plain_g}"
+    );
+}

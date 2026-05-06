@@ -90,6 +90,8 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
                         value: v.value.clone(),
                         var_type: v.ty.clone(),
                         forced: v.forced,
+                        retain: v.retain,
+                        persistent: v.persistent,
                     },
                 ))
                 .collect();
@@ -284,6 +286,8 @@ async fn handle_request(
                     .map(|c| CatalogEntry {
                         name: c.name,
                         var_type: c.ty,
+                        retain: c.retain,
+                        persistent: c.persistent,
                     })
                     .collect(),
             })
@@ -340,6 +344,8 @@ async fn handle_request(
                     value: v.value.clone(),
                     var_type: v.ty.clone(),
                     forced: v.forced,
+                    retain: v.retain,
+                    persistent: v.persistent,
                 })
                 .collect();
             tracing::debug!("Monitor WS: read matched {} of {}", vars.len(), params.variables.len());

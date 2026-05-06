@@ -158,12 +158,19 @@ pub struct WatchNode {
     /// Whether this variable is currently forced.
     #[serde(default)]
     pub forced: bool,
+    /// IEC 61131-3 RETAIN qualifier — survives warm restart. Children of
+    /// retained FBs/structs inherit the parent's flag.
+    #[serde(default)]
+    pub retain: bool,
+    /// IEC 61131-3 PERSISTENT qualifier — survives cold restart.
+    #[serde(default)]
+    pub persistent: bool,
     /// Children (for compound nodes). Empty vec for leaf nodes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<WatchNode>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VariableValue {
     pub name: String,
     pub value: String,
@@ -171,6 +178,10 @@ pub struct VariableValue {
     pub var_type: String,
     #[serde(default)]
     pub forced: bool,
+    #[serde(default)]
+    pub retain: bool,
+    #[serde(default)]
+    pub persistent: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -197,11 +208,17 @@ pub struct CatalogData {
     pub variables: Vec<CatalogEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CatalogEntry {
     pub name: String,
     #[serde(rename = "type")]
     pub var_type: String,
+    /// IEC 61131-3 RETAIN qualifier.
+    #[serde(default)]
+    pub retain: bool,
+    /// IEC 61131-3 PERSISTENT qualifier.
+    #[serde(default)]
+    pub persistent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -424,6 +424,35 @@ button.secondary:hover {
   padding: 0 4px;
 }
 
+/* -- RETAIN / PERSISTENT badge ------------------------------------ */
+
+.retain-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 4px;
+  font-size: 9px;
+  font-weight: bold;
+  font-family: var(--vscode-editor-font-family, monospace);
+  letter-spacing: 0.5px;
+  border-radius: 3px;
+  background: var(--vscode-badge-background, #4d4d4d);
+  color: var(--vscode-badge-foreground, #ffffff);
+  vertical-align: middle;
+  line-height: 14px;
+}
+
+/* RETAIN PERSISTENT — emphasize with charts.foreground (typically yellow). */
+.retain-badge[data-retain="1"][data-persistent="1"] {
+  background: var(--vscode-charts-yellow, #cca700);
+  color: var(--vscode-editor-background, #1e1e1e);
+}
+
+/* PERSISTENT only — blue tint. */
+.retain-badge[data-retain="0"][data-persistent="1"] {
+  background: var(--vscode-charts-blue, #3794ff);
+  color: var(--vscode-editor-background, #1e1e1e);
+}
+
 /* -- Status Footer ------------------------------------------------ */
 
 .status-footer {

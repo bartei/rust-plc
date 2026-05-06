@@ -22,6 +22,10 @@ export interface WatchNode {
   value: string;
   /** Whether this variable is currently forced. */
   forced: boolean;
+  /** IEC 61131-3 RETAIN qualifier — survives warm restart. */
+  retain?: boolean;
+  /** IEC 61131-3 PERSISTENT qualifier — survives cold restart. */
+  persistent?: boolean;
   /** Children for compound nodes. Empty array for leaf nodes. */
   children: WatchNode[];
 }
@@ -30,6 +34,8 @@ export interface WatchNode {
 export interface CatalogEntry {
   name: string;
   type: string;
+  retain?: boolean;
+  persistent?: boolean;
 }
 
 /** Flat variable value (legacy, kept for backward compatibility). */
@@ -38,6 +44,8 @@ export interface VariableValue {
   value: string;
   type: string;
   forced: boolean;
+  retain?: boolean;
+  persistent?: boolean;
 }
 
 /** Scan cycle statistics. */

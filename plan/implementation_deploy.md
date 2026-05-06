@@ -1,7 +1,7 @@
 # Remote Deployment & Online Management — Progress Tracker
 
 > **Design document:** [design_deploy.md](design_deploy.md) — architecture, agent API, transport, security.
-> **Parent plan:** [implementation.md](implementation.md) — core platform progress tracker.
+> **Parent plan:** [implementation_core.md](implementation_core.md) — core platform progress tracker.
 > **See also:**
 > - [implementation_comm.md](implementation_comm.md) — communication layer (Phase 13)
 > - [implementation_native.md](implementation_native.md) — native compilation (Phase 14)

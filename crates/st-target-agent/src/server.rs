@@ -59,7 +59,10 @@ pub fn build_app_state(
     log_level_handle: Option<LogLevelHandle>,
 ) -> Result<Arc<AppState>, String> {
     let program_store = ProgramStore::new(&config.storage.program_dir)?;
-    let runtime_manager = RuntimeManager::new(config.runtime.clone());
+    let runtime_manager = RuntimeManager::new_with_retain_dir(
+        config.runtime.clone(),
+        config.storage.retain_dir.clone(),
+    );
 
     let state = Arc::new(AppState {
         config,

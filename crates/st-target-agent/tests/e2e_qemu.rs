@@ -670,6 +670,172 @@ fn e2e_x86_64_full_lifecycle() {
     assert_eq!(s, 404);
 }
 
+/// IEC 61131-3 RETAIN / PERSISTENT persistence under a real systemd
+/// service: deploy a program with retained globals, force values, stop
+/// the program, restart the service (so the agent process exits and a
+/// fresh one comes up with the retain file on disk), then verify the
+/// RETAIN values are restored and the catalog/variables endpoints
+/// surface the qualifier flags.
+///
+/// This is the on-target counterpart of `retain_e2e.rs::retain_values_
+/// survive_stop_restart` — same shape, but goes through SSH to the QEMU
+/// guest so we exercise the systemd lifecycle and the production retain
+/// directory layout (`/var/lib/st-plc/retain/<program>.retain`).
+#[test]
+fn e2e_x86_64_retain_across_restart() {
+    if !qemu_enabled() { eprintln!("Skipping (set ST_E2E_QEMU=1)"); return; }
+
+    let vm = boot_vm("x86_64");
+    deploy_agent(&vm);
+
+    // Phase 1: deploy + start the retain test bundle.
+    let bundle = create_test_bundle("test-project-retain");
+    let (upload_status, upload_body) = agent_upload(&vm, &bundle);
+    assert_eq!(upload_status, 200, "Upload failed: {upload_body}");
+    assert_eq!(upload_body["program"]["name"], "E2ETestRetain");
+
+    let (start_status, _) = agent_post(&vm, "/api/v1/program/start");
+    assert_eq!(start_status, 200);
+    std::thread::sleep(Duration::from_millis(800));
+
+    // Catalog must surface retain/persistent qualifiers.
+    let (cat_status, catalog) = agent_get(&vm, "/api/v1/variables/catalog");
+    assert_eq!(cat_status, 200);
+    let entries = catalog["variables"]
+        .as_array()
+        .expect("catalog must have variables array");
+    let find_entry = |name: &str| -> serde_json::Value {
+        entries
+            .iter()
+            .find(|e| e["name"].as_str().unwrap_or("").eq_ignore_ascii_case(name))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    };
+    assert_eq!(
+        find_entry("g_retain_counter")["retain"], true,
+        "QEMU catalog must carry retain bit"
+    );
+    assert_eq!(
+        find_entry("g_durable")["persistent"], true,
+        "QEMU catalog must carry persistent bit"
+    );
+
+    // Force RETAIN values.
+    for (name, value) in [
+        ("g_retain_counter", 4242i64),
+        ("g_durable", 7777i64),
+    ] {
+        let url = vm.agent_url("/api/v1/variables/force");
+        let body = format!("{{\"name\":\"{name}\",\"value\":\"{value}\"}}");
+        let output = Command::new("curl")
+            .args([
+                "-s", "-X", "POST",
+                "-H", "Content-Type: application/json",
+                "-d", &body,
+                "-w", "\n%{http_code}",
+                &url,
+            ])
+            .output()
+            .unwrap();
+        let full = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = full.trim().rsplitn(2, '\n').collect();
+        let code: u16 = lines[0].parse().unwrap_or(0);
+        assert_eq!(code, 200, "force {name} failed");
+    }
+
+    // Let the engine apply the forces and run a checkpoint.
+    std::thread::sleep(Duration::from_millis(400));
+
+    // Unforce so the RETAIN value is the last live program write, not a
+    // perpetual override.
+    for name in ["g_retain_counter", "g_durable"] {
+        let url = vm.agent_url(&format!("/api/v1/variables/force/{name}"));
+        Command::new("curl")
+            .args(["-s", "-X", "DELETE", &url])
+            .output()
+            .unwrap();
+    }
+
+    // Phase 2: stop the program, then restart the agent service so the
+    // retain file is reloaded from disk under a fresh process.
+    let (stop_status, _) = agent_post(&vm, "/api/v1/program/stop");
+    assert_eq!(stop_status, 200);
+    std::thread::sleep(Duration::from_millis(400));
+
+    // Verify the retain file is on disk.
+    let ls = vm
+        .ssh_cmd("sudo ls -la /var/lib/st-plc/retain/ 2>&1")
+        .output()
+        .unwrap();
+    let listing = String::from_utf8_lossy(&ls.stdout);
+    assert!(
+        listing.contains("Main.retain"),
+        "retain file missing in /var/lib/st-plc/retain/: {listing}"
+    );
+
+    // Kill the agent and restart it from scratch (simulates systemd
+    // restart). The deploy_agent helper started the agent via
+    // `nohup ... &` so we just `pkill` and respawn.
+    let _ = vm
+        .ssh_cmd("sudo pkill -f st-target-agent")
+        .output()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    let _ = vm
+        .ssh_cmd("sudo bash -c 'nohup /tmp/st-target-agent --config /etc/st-agent/agent.yaml > /var/log/st-agent/stdout.log 2>&1 &'")
+        .output()
+        .unwrap();
+
+    // Wait for the agent to come back up.
+    let url = vm.agent_url("/api/v1/health");
+    let mut ready = false;
+    for _ in 0..30 {
+        let output = Command::new("curl")
+            .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "--connect-timeout", "2", &url])
+            .output()
+            .unwrap();
+        if String::from_utf8_lossy(&output.stdout).trim() == "200" {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    assert!(ready, "agent did not come back after restart");
+
+    // The bundle directory survived (it's on persistent disk), but we
+    // must start the program again — the agent boots in idle state.
+    let (start_again, _) = agent_post(&vm, "/api/v1/program/start");
+    assert_eq!(start_again, 200);
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Read the restored values. RETAIN survives warm restart (process
+    // restart), PERSISTENT-only does not.
+    let read = |watch: &str| -> i64 {
+        let (_, body) = agent_get(&vm, &format!("/api/v1/variables?watch={watch}"));
+        let arr = body["variables"]
+            .as_array()
+            .expect("variables array")
+            .clone();
+        let v = arr
+            .iter()
+            .find(|v| v["name"].as_str().unwrap_or("").eq_ignore_ascii_case(watch))
+            .unwrap_or_else(|| panic!("{watch} not in /api/v1/variables: {arr:?}"));
+        v["value"].as_str().unwrap_or("0").parse().unwrap_or(0)
+    };
+
+    assert!(
+        read("g_retain_counter") >= 4242,
+        "RETAIN: g_retain_counter must survive agent restart"
+    );
+    assert!(
+        read("g_durable") >= 7777,
+        "RETAIN PERSISTENT: g_durable must survive agent restart"
+    );
+
+    let _ = agent_post(&vm, "/api/v1/program/stop");
+}
+
 // ─── aarch64 E2E Tests ─────────────────────────────────────────────────
 
 #[test]

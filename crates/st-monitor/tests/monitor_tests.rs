@@ -136,8 +136,8 @@ async fn test_read_variables() {
     // Populate state
     handle.update_variables(
         vec![
-            VariableValue { name: "counter".into(), value: "42".into(), var_type: "INT".into(), forced: false },
-            VariableValue { name: "running".into(), value: "TRUE".into(), var_type: "BOOL".into(), forced: false },
+            VariableValue { name: "counter".into(), value: "42".into(), var_type: "INT".into(), forced: false, ..Default::default() },
+            VariableValue { name: "running".into(), value: "TRUE".into(), var_type: "BOOL".into(), forced: false, ..Default::default() },
         ],
         CycleInfoData { cycle_count: 1, last_cycle_us: 10, min_cycle_us: 10, max_cycle_us: 10, avg_cycle_us: 10, ..Default::default() },
     );
@@ -172,8 +172,8 @@ async fn test_get_catalog() {
     let (handle, addr) = start_server().await;
 
     handle.set_catalog(vec![
-        CatalogEntry { name: "Main.counter".into(), var_type: "INT".into() },
-        CatalogEntry { name: "Main.flag".into(), var_type: "BOOL".into() },
+        CatalogEntry { name: "Main.counter".into(), var_type: "INT".into(), ..Default::default() },
+        CatalogEntry { name: "Main.flag".into(), var_type: "BOOL".into(), ..Default::default() },
     ]);
 
     let mut ws = connect(&addr).await;
@@ -268,7 +268,7 @@ async fn test_multiple_clients() {
     let (handle, addr) = start_server().await;
 
     handle.update_variables(
-        vec![VariableValue { name: "shared".into(), value: "99".into(), var_type: "INT".into(), forced: false }],
+        vec![VariableValue { name: "shared".into(), value: "99".into(), var_type: "INT".into(), forced: false, ..Default::default() }],
         CycleInfoData { cycle_count: 1, ..Default::default() },
     );
 
@@ -314,8 +314,8 @@ async fn test_push_delivers_subscribed_variables() {
 
     handle.update_variables(
         vec![
-            VariableValue { name: "x".into(), value: "42".into(), var_type: "INT".into(), forced: false },
-            VariableValue { name: "y".into(), value: "99".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "x".into(), value: "42".into(), var_type: "INT".into(), forced: false, ..Default::default() },
+            VariableValue { name: "y".into(), value: "99".into(), var_type: "INT".into(), forced: false, ..Default::default() },
         ],
         CycleInfoData { cycle_count: 10, ..Default::default() },
     );
@@ -341,7 +341,7 @@ async fn test_push_stops_after_unsubscribe() {
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     handle.update_variables(
-        vec![VariableValue { name: "x".into(), value: "1".into(), var_type: "INT".into(), forced: false }],
+        vec![VariableValue { name: "x".into(), value: "1".into(), var_type: "INT".into(), forced: false, ..Default::default() }],
         CycleInfoData { cycle_count: 1, ..Default::default() },
     );
 
@@ -358,7 +358,7 @@ async fn test_push_stops_after_unsubscribe() {
     // variable data (cycle stats always flow so the monitor panel stays live).
     tokio::time::sleep(Duration::from_millis(100)).await;
     handle.update_variables(
-        vec![VariableValue { name: "x".into(), value: "2".into(), var_type: "INT".into(), forced: false }],
+        vec![VariableValue { name: "x".into(), value: "2".into(), var_type: "INT".into(), forced: false, ..Default::default() }],
         CycleInfoData { cycle_count: 2, ..Default::default() },
     );
 
@@ -385,7 +385,7 @@ async fn test_push_includes_forced_flag() {
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     handle.update_variables(
-        vec![VariableValue { name: "x".into(), value: "999".into(), var_type: "INT".into(), forced: true }],
+        vec![VariableValue { name: "x".into(), value: "999".into(), var_type: "INT".into(), forced: true, ..Default::default() }],
         CycleInfoData { cycle_count: 1, ..Default::default() },
     );
 
@@ -424,7 +424,7 @@ async fn test_has_subscribers() {
 fn test_handle_set_catalog() {
     let handle = MonitorHandle::new();
     handle.set_catalog(vec![
-        CatalogEntry { name: "a".into(), var_type: "INT".into() },
+        CatalogEntry { name: "a".into(), var_type: "INT".into(), ..Default::default() },
     ]);
     assert_eq!(handle.state().read().unwrap().catalog.len(), 1);
 }
@@ -433,7 +433,7 @@ fn test_handle_set_catalog() {
 fn test_handle_update_variables() {
     let handle = MonitorHandle::new();
     handle.update_variables(
-        vec![VariableValue { name: "x".into(), value: "42".into(), var_type: "INT".into(), forced: false }],
+        vec![VariableValue { name: "x".into(), value: "42".into(), var_type: "INT".into(), forced: false, ..Default::default() }],
         CycleInfoData { cycle_count: 1, last_cycle_us: 10, min_cycle_us: 10, max_cycle_us: 10, avg_cycle_us: 10, ..Default::default() },
     );
 
@@ -483,6 +483,7 @@ fn test_serialize_variable_update() {
         avg_cycle_us: 110,
         variables: vec![VariableValue {
             name: "x".into(), value: "10".into(), var_type: "INT".into(), forced: false,
+            ..Default::default()
         }],
         ..Default::default()
     });
@@ -499,7 +500,7 @@ fn test_serialize_variable_update() {
 #[test]
 fn test_serialize_catalog() {
     let msg = MonitorMessage::Catalog(CatalogData {
-        variables: vec![CatalogEntry { name: "a".into(), var_type: "INT".into() }],
+        variables: vec![CatalogEntry { name: "a".into(), var_type: "INT".into(), ..Default::default() }],
     });
     let json = serde_json::to_string(&msg).unwrap();
     let parsed: MonitorMessage = serde_json::from_str(&json).unwrap();
@@ -528,11 +529,11 @@ async fn test_subscribe_fb_parent_pushes_all_fields() {
 
     handle.update_variables(
         vec![
-            VariableValue { name: "Main.filler.cmd".into(), value: "TRUE".into(), var_type: "BOOL".into(), forced: false },
-            VariableValue { name: "Main.filler.state".into(), value: "2".into(), var_type: "INT".into(), forced: false },
-            VariableValue { name: "Main.filler.counter.Q".into(), value: "FALSE".into(), var_type: "BOOL".into(), forced: false },
-            VariableValue { name: "Main.filler.counter.CV".into(), value: "3".into(), var_type: "INT".into(), forced: false },
-            VariableValue { name: "Main.other".into(), value: "99".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.filler.cmd".into(), value: "TRUE".into(), var_type: "BOOL".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.filler.state".into(), value: "2".into(), var_type: "INT".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.filler.counter.Q".into(), value: "FALSE".into(), var_type: "BOOL".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.filler.counter.CV".into(), value: "3".into(), var_type: "INT".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.other".into(), value: "99".into(), var_type: "INT".into(), forced: false, ..Default::default() },
         ],
         CycleInfoData { cycle_count: 1, ..Default::default() },
     );
@@ -565,10 +566,10 @@ async fn test_subscribe_array_parent_pushes_elements() {
 
     handle.update_variables(
         vec![
-            VariableValue { name: "Main.arr[1]".into(), value: "10".into(), var_type: "INT".into(), forced: false },
-            VariableValue { name: "Main.arr[2]".into(), value: "20".into(), var_type: "INT".into(), forced: false },
-            VariableValue { name: "Main.arr[3]".into(), value: "30".into(), var_type: "INT".into(), forced: false },
-            VariableValue { name: "Main.total".into(), value: "60".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.arr[1]".into(), value: "10".into(), var_type: "INT".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.arr[2]".into(), value: "20".into(), var_type: "INT".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.arr[3]".into(), value: "30".into(), var_type: "INT".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.total".into(), value: "60".into(), var_type: "INT".into(), forced: false, ..Default::default() },
         ],
         CycleInfoData { cycle_count: 1, ..Default::default() },
     );
@@ -597,10 +598,10 @@ async fn test_subscribe_mixed_scalar_and_compound() {
 
     handle.update_variables(
         vec![
-            VariableValue { name: "Main.counter".into(), value: "42".into(), var_type: "INT".into(), forced: false },
-            VariableValue { name: "Main.fb.x".into(), value: "1".into(), var_type: "INT".into(), forced: false },
-            VariableValue { name: "Main.fb.y".into(), value: "2".into(), var_type: "INT".into(), forced: false },
-            VariableValue { name: "Main.other".into(), value: "99".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.counter".into(), value: "42".into(), var_type: "INT".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.fb.x".into(), value: "1".into(), var_type: "INT".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.fb.y".into(), value: "2".into(), var_type: "INT".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.other".into(), value: "99".into(), var_type: "INT".into(), forced: false, ..Default::default() },
         ],
         CycleInfoData { cycle_count: 1, ..Default::default() },
     );
@@ -623,9 +624,9 @@ async fn test_read_fb_parent_returns_all_fields() {
 
     handle.update_variables(
         vec![
-            VariableValue { name: "Main.filler.cmd".into(), value: "TRUE".into(), var_type: "BOOL".into(), forced: false },
-            VariableValue { name: "Main.filler.state".into(), value: "5".into(), var_type: "INT".into(), forced: false },
-            VariableValue { name: "Main.scalar".into(), value: "1".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.filler.cmd".into(), value: "TRUE".into(), var_type: "BOOL".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.filler.state".into(), value: "5".into(), var_type: "INT".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.scalar".into(), value: "1".into(), var_type: "INT".into(), forced: false, ..Default::default() },
         ],
         CycleInfoData { cycle_count: 1, ..Default::default() },
     );
@@ -657,11 +658,11 @@ async fn test_push_includes_watch_tree_for_compound_subscription() {
 
     handle.update_variables(
         vec![
-            VariableValue { name: "Main.fb".into(), value: "".into(), var_type: "Outer".into(), forced: false },
-            VariableValue { name: "Main.fb.cmd".into(), value: "TRUE".into(), var_type: "BOOL".into(), forced: false },
-            VariableValue { name: "Main.fb.state".into(), value: "5".into(), var_type: "INT".into(), forced: false },
-            VariableValue { name: "Main.fb.sub.x".into(), value: "3".into(), var_type: "INT".into(), forced: false },
-            VariableValue { name: "Main.fb.sub.y".into(), value: "6".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.fb".into(), value: "".into(), var_type: "Outer".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.fb.cmd".into(), value: "TRUE".into(), var_type: "BOOL".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.fb.state".into(), value: "5".into(), var_type: "INT".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.fb.sub.x".into(), value: "3".into(), var_type: "INT".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.fb.sub.y".into(), value: "6".into(), var_type: "INT".into(), forced: false, ..Default::default() },
         ],
         CycleInfoData { cycle_count: 1, ..Default::default() },
     );
@@ -720,10 +721,10 @@ async fn test_push_watch_tree_for_array() {
 
     handle.update_variables(
         vec![
-            VariableValue { name: "Main.arr".into(), value: "".into(), var_type: "ARRAY[0..2] OF INT".into(), forced: false },
-            VariableValue { name: "Main.arr[0]".into(), value: "10".into(), var_type: "INT".into(), forced: false },
-            VariableValue { name: "Main.arr[1]".into(), value: "20".into(), var_type: "INT".into(), forced: false },
-            VariableValue { name: "Main.arr[2]".into(), value: "30".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.arr".into(), value: "".into(), var_type: "ARRAY[0..2] OF INT".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.arr[0]".into(), value: "10".into(), var_type: "INT".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.arr[1]".into(), value: "20".into(), var_type: "INT".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.arr[2]".into(), value: "30".into(), var_type: "INT".into(), forced: false, ..Default::default() },
         ],
         CycleInfoData { cycle_count: 1, ..Default::default() },
     );
@@ -766,12 +767,12 @@ async fn test_watch_tree_intermediate_nodes_have_unique_full_paths() {
 
     handle.update_variables(
         vec![
-            VariableValue { name: "Main.fb".into(), value: "".into(), var_type: "Outer".into(), forced: false },
-            VariableValue { name: "Main.fb.counter.CU".into(), value: "TRUE".into(), var_type: "BOOL".into(), forced: false },
-            VariableValue { name: "Main.fb.counter.CV".into(), value: "3".into(), var_type: "INT".into(), forced: false },
-            VariableValue { name: "Main.fb.edge.CLK".into(), value: "FALSE".into(), var_type: "BOOL".into(), forced: false },
-            VariableValue { name: "Main.fb.edge.Q".into(), value: "TRUE".into(), var_type: "BOOL".into(), forced: false },
-            VariableValue { name: "Main.fb.state".into(), value: "5".into(), var_type: "INT".into(), forced: false },
+            VariableValue { name: "Main.fb".into(), value: "".into(), var_type: "Outer".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.fb.counter.CU".into(), value: "TRUE".into(), var_type: "BOOL".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.fb.counter.CV".into(), value: "3".into(), var_type: "INT".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.fb.edge.CLK".into(), value: "FALSE".into(), var_type: "BOOL".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.fb.edge.Q".into(), value: "TRUE".into(), var_type: "BOOL".into(), forced: false, ..Default::default() },
+            VariableValue { name: "Main.fb.state".into(), value: "5".into(), var_type: "INT".into(), forced: false, ..Default::default() },
         ],
         CycleInfoData { cycle_count: 1, ..Default::default() },
     );

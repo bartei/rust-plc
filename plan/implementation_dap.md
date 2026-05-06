@@ -2,7 +2,7 @@
 
 > **Audit & roadmap:** [dap.md](dap.md) — gap analysis vs. industry, competitive position, prioritized feature tiers.
 > **Core design:** [design_core.md](design_core.md) — architecture, VM, engine, scan cycle model.
-> **See also:** [implementation.md](implementation.md) — master project tracker.
+> **See also:** [implementation_core.md](implementation_core.md) — master project tracker.
 
 ---
 

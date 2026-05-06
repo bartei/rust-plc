@@ -348,6 +348,10 @@ struct FbVarRef {
     slot_idx: u16,
     /// The function index of the FB's definition (for locals layout).
     fb_func_idx: u16,
+    /// IEC RETAIN qualifier inherited from the parent slot.
+    retain: bool,
+    /// IEC PERSISTENT qualifier inherited from the parent slot.
+    persistent: bool,
 }
 
 /// Reference to a struct instance for hierarchical variable expansion.
@@ -359,6 +363,10 @@ struct StructVarRef {
     slot_idx: u16,
     /// The type_def index for this struct's field layout.
     type_def_idx: u16,
+    /// IEC RETAIN qualifier inherited from the parent slot.
+    retain: bool,
+    /// IEC PERSISTENT qualifier inherited from the parent slot.
+    persistent: bool,
 }
 
 /// Reference to an array variable for hierarchical variable expansion.
@@ -370,6 +378,33 @@ struct ArrayVarRef {
     slot_idx: u16,
     /// The type_def index for this array's element type and dimensions.
     type_def_idx: u16,
+    /// IEC RETAIN qualifier inherited from the parent slot.
+    retain: bool,
+    /// IEC PERSISTENT qualifier inherited from the parent slot.
+    persistent: bool,
+}
+
+/// Build a `VariablePresentationHint` carrying retain/persistent attributes
+/// when either flag is set. VS Code passes these strings through to the
+/// extension, which renders them as badges on the row. The dap-rs
+/// `Attributes::String` variant is the well-known extension mechanism for
+/// custom presentation tags. Returns `None` when neither flag is set so
+/// non-retained variables don't carry a payload.
+fn retain_presentation_hint(retain: bool, persistent: bool) -> Option<VariablePresentationHint> {
+    if !retain && !persistent {
+        return None;
+    }
+    let mut attrs: Vec<VariablePresentationHintAttributes> = Vec::with_capacity(2);
+    if retain {
+        attrs.push(VariablePresentationHintAttributes::String("retain".to_string()));
+    }
+    if persistent {
+        attrs.push(VariablePresentationHintAttributes::String("persistent".to_string()));
+    }
+    Some(VariablePresentationHint {
+        attributes: Some(attrs),
+        ..Default::default()
+    })
 }
 
 struct DapSession {
@@ -1317,6 +1352,11 @@ impl DapSession {
                 for (j, fb_slot) in fb_func.locals.slots.iter().enumerate() {
                     let vj = fb_func.locals.expanded_index(j);
 
+                    // FB instance children inherit retain/persistent from
+                    // the parent FB slot (matches retain_store::capture_snapshot).
+                    let child_retain = fb_ref.retain;
+                    let child_persistent = fb_ref.persistent;
+
                     // Nested FBs get their own variablesReference for further expansion.
                     if let st_ir::VarType::FbInstance(nested_idx) = fb_slot.ty {
                         let id = self.next_var_ref;
@@ -1329,6 +1369,8 @@ impl DapSession {
                                 caller_id: nested_caller,
                                 slot_idx: j as u16,
                                 fb_func_idx: nested_idx,
+                                retain: child_retain,
+                                persistent: child_persistent,
                             },
                         );
                         variables.push(Variable {
@@ -1336,6 +1378,7 @@ impl DapSession {
                             value: "(FB)".to_string(),
                             type_field: Some("FUNCTION_BLOCK".to_string()),
                             variables_reference: id,
+                            presentation_hint: retain_presentation_hint(child_retain, child_persistent),
                             ..Default::default()
                         });
                     } else if let st_ir::VarType::Array(_) = fb_slot.ty {
@@ -1355,6 +1398,7 @@ impl DapSession {
                                     ).to_string(),
                                 ),
                                 variables_reference: 0,
+                                presentation_hint: retain_presentation_hint(child_retain, child_persistent),
                                 ..Default::default()
                             });
                         }
@@ -1374,6 +1418,7 @@ impl DapSession {
                                 .to_string(),
                             ),
                             variables_reference: 0,
+                            presentation_hint: retain_presentation_hint(child_retain, child_persistent),
                             ..Default::default()
                         });
                     }
@@ -1405,6 +1450,7 @@ impl DapSession {
                                 .to_string(),
                             ),
                             variables_reference: 0,
+                            presentation_hint: retain_presentation_hint(sr.retain, sr.persistent),
                             ..Default::default()
                         });
                     }
@@ -1434,6 +1480,7 @@ impl DapSession {
                                 value: st_engine::debug::format_value(&value),
                                 type_field: Some(elem_ty_str.clone()),
                                 variables_reference: 0,
+                                presentation_hint: retain_presentation_hint(ar.retain, ar.persistent),
                                 ..Default::default()
                             });
                         }
@@ -1466,6 +1513,8 @@ impl DapSession {
                                     caller_id,
                                     slot_idx: i as u16,
                                     fb_func_idx: fb_idx,
+                                    retain: slot.retain,
+                                    persistent: slot.persistent,
                                 },
                             );
                             let fb_func = &vm.module().functions[fb_idx as usize];
@@ -1476,6 +1525,7 @@ impl DapSession {
                                 value: summary,
                                 type_field: Some(fb_func.name.clone()),
                                 variables_reference: fb_ref_id,
+                                presentation_hint: retain_presentation_hint(slot.retain, slot.persistent),
                                 ..Default::default()
                             });
                         } else if let st_ir::VarType::Struct(td_idx) = slot.ty {
@@ -1488,6 +1538,8 @@ impl DapSession {
                                     caller_id,
                                     slot_idx: i as u16,
                                     type_def_idx: td_idx,
+                                    retain: slot.retain,
+                                    persistent: slot.persistent,
                                 },
                             );
                             // Build a summary and type name from the struct's type_def
@@ -1502,6 +1554,7 @@ impl DapSession {
                                 value: summary,
                                 type_field: Some(type_name),
                                 variables_reference: struct_ref_id,
+                                presentation_hint: retain_presentation_hint(slot.retain, slot.persistent),
                                 ..Default::default()
                             });
                         } else if let st_ir::VarType::Array(td_idx) = slot.ty {
@@ -1514,6 +1567,8 @@ impl DapSession {
                                     caller_id,
                                     slot_idx: i as u16,
                                     type_def_idx: td_idx,
+                                    retain: slot.retain,
+                                    persistent: slot.persistent,
                                 },
                             );
                             let type_str = st_engine::debug::format_var_type_full(
@@ -1525,6 +1580,7 @@ impl DapSession {
                                 value: summary,
                                 type_field: Some(type_str),
                                 variables_reference: array_ref_id,
+                                presentation_hint: retain_presentation_hint(slot.retain, slot.persistent),
                                 ..Default::default()
                             });
                         } else if matches!(slot.ty, st_ir::VarType::ClassInstance(_)) {
@@ -1546,6 +1602,7 @@ impl DapSession {
                                     .to_string(),
                                 ),
                                 variables_reference: 0,
+                                presentation_hint: retain_presentation_hint(slot.retain, slot.persistent),
                                 ..Default::default()
                             });
                         }
@@ -1554,11 +1611,13 @@ impl DapSession {
             } else {
                 let vars = vm.global_variables();
                 for v in vars {
+                    let hint = retain_presentation_hint(v.retain, v.persistent);
                     variables.push(Variable {
                         name: v.name,
                         value: v.value,
                         type_field: Some(v.ty),
                         variables_reference: 0,
+                        presentation_hint: hint,
                         ..Default::default()
                     });
                 }
@@ -1637,6 +1696,8 @@ impl DapSession {
                                 caller_id,
                                 slot_idx,
                                 fb_func_idx: fb_idx,
+                                retain: slot.retain,
+                                persistent: slot.persistent,
                             },
                         );
                         let fb_func = &vm.module().functions[fb_idx as usize];
@@ -1653,6 +1714,8 @@ impl DapSession {
                                 caller_id,
                                 slot_idx,
                                 type_def_idx: td_idx,
+                                retain: slot.retain,
+                                persistent: slot.persistent,
                             },
                         );
                         let tn = vm.struct_type_fields(td_idx)
@@ -1671,6 +1734,8 @@ impl DapSession {
                                 caller_id,
                                 slot_idx,
                                 type_def_idx: td_idx,
+                                retain: slot.retain,
+                                persistent: slot.persistent,
                             },
                         );
                         result_str = self.array_summary_value(vm, caller_id, slot_idx, td_idx);
@@ -1835,10 +1900,12 @@ impl DapSession {
             .map(|vm| {
                 vm.monitorable_catalog()
                     .iter()
-                    .map(|(name, ty)| {
+                    .map(|c| {
                         serde_json::json!({
-                            "name": name,
-                            "type": ty,
+                            "name": c.name,
+                            "type": c.ty,
+                            "retain": c.retain,
+                            "persistent": c.persistent,
                         })
                     })
                     .collect()
@@ -1869,9 +1936,11 @@ impl DapSession {
             let catalog: Vec<st_monitor::CatalogEntry> = vm
                 .monitorable_catalog()
                 .into_iter()
-                .map(|(name, ty)| st_monitor::CatalogEntry {
-                    name,
-                    var_type: ty,
+                .map(|c| st_monitor::CatalogEntry {
+                    name: c.name,
+                    var_type: c.ty,
+                    retain: c.retain,
+                    persistent: c.persistent,
                 })
                 .collect();
             eprintln!("[DAP-MONITOR] Catalog: {} variables", catalog.len());
@@ -1941,6 +2010,8 @@ impl DapSession {
                     value: v.value,
                     var_type: v.ty,
                     forced: is_forced,
+                    retain: v.retain,
+                    persistent: v.persistent,
                 }
             })
             .collect();
