@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5](https://github.com/bartei/rust-plc/compare/st-monitor-v0.3.4...st-monitor-v0.3.5) - 2026-05-06
+
+### Added
+
+- RETAIN/PERSISTENT UI badge + Phase 2 acceptance coverage
+- array variable support, server-side watch tree, bundled webview
+- unified WebSocket-based PLC Monitor panel
+- add struct variable support + rename st-runtime/st-plc-runtime crates
+- Phase 10 — WebSocket monitor server with VSCode panels
+- IEC 61131-3 Structured Text compiler toolchain (phases 0-7)
+
+### Fixed
+
+- monitor panel cycle stats update with empty watch list
+- *(ci)* remove dead code and unused imports that fail -Dwarnings
+
+### Other
+
+- release
+- release v0.3.3
+- release v0.3.2
+- release v0.3.1
+- release v0.1.3
+- release v0.1.2
+- add comprehensive README.md for all 16 crates
+- release v0.1.1
+
 ## [0.3.4](https://github.com/bartei/rust-plc/compare/st-monitor-v0.3.3...st-monitor-v0.3.4) - 2026-05-02
 
 ### Added
