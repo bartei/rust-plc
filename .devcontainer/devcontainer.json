@@ -7,7 +7,8 @@
   "customizations": {
     "vscode": {
       "extensions": [
-        "rust-lang.rust-analyzer"
+        "rust-lang.rust-analyzer",
+        "redhat.vscode-yaml"
       ],
       "settings": {
         "structured-text.serverPath": "${workspaceFolder}/target/debug/st-cli",

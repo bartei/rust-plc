@@ -266,6 +266,17 @@ Infrastructure: `@vscode/test-electron` (real Electron instance) + Playwright (w
 - [x] `targetLiveAttach` command starts a non-intrusive debug session
 - [x] `tb:liveAttach` button wired into the Monitor toolbar message handler
 
+### YAML schema validation tests (via @vscode/test-electron) — 4 passing
+
+> Design rationale: see
+> [design_core.md "YAML schema validation"](design_core.md#yaml-schema-validation).
+> Run with `npm --prefix editors/vscode run test:schema` (xvfb required on Linux).
+
+- [x] Invalid `version` in `plc-project.yaml` produces a schema diagnostic from the bundled `plc-project.schema.json`
+- [x] Clean `plc-project.yaml` has zero schema diagnostics
+- [x] Invalid `protocol` enum in `profiles/*.yaml` is flagged by the bundled `device-profile.schema.json`
+- [x] Completion in an empty `plc-project.yaml` surfaces schema-defined top-level properties (`name`, `version`, `entryPoint`, `engine`)
+
 ### Playwright webview tests — 19 passing, 2 skipped (Docker)
 
 - [x] Watch list CRUD (add, remove, clear)

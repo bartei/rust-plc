@@ -728,3 +728,62 @@ that's a refactor of the dispatcher, not test work. Until that lands:
   verify pause+disconnect doesn't drop the override).
 - Re-add a paused-state force test once the dispatcher uses `select!`
   so HTTP no longer races with `recv_timeout`.
+
+---
+
+## YAML schema validation
+
+The repo ships two JSON Schemas:
+
+- `schemas/plc-project.schema.json` — top-level `plc-project.yaml`
+- `schemas/device-profile.schema.json` — files under any `profiles/`
+  directory
+
+Validation flows through `redhat.vscode-yaml`, which is the VS Code
+ecosystem's standard YAML language server. Two pieces wire it up:
+
+1. **`extensionDependencies: ["redhat.vscode-yaml"]`** in the
+   iec61131-st extension's `package.json` — so installing the IEC
+   extension auto-installs the YAML extension. Users do not have to
+   know about or remember the dependency.
+2. **`contributes.yamlValidation`** — declarative file-pattern → schema
+   URL mappings, read by the YAML extension on activation. Schemas
+   are bundled inside the extension package via symlinks from
+   `editors/vscode/schemas/` → workspace-root `schemas/` so there is a
+   single source of truth.
+
+The earlier workspace-level `yaml.schemas` block in
+`.vscode/settings.json` was made redundant by this contribution and
+has been removed; the contribution applies globally to anyone who
+installs the extension, not only to people who happen to open this
+workspace.
+
+### Why dual-tracked schema files
+
+The schemas live at `schemas/*.schema.json` (canonical, referenced by
+inline `# yaml-language-server: $schema=...` directives in playground
+and profile YAML files for users without the extension installed) and
+are exposed inside the extension via symlinks at
+`editors/vscode/schemas/`. The symlink approach keeps the two paths in
+lockstep without a copy-on-build script. `vsce package` follows
+symlinks by default when bundling, so the published `.vsix` carries
+real schema files inline.
+
+### What the no-mocking acceptance test covers
+
+`editors/vscode/src/test/suite/schema.test.ts` runs in a real
+Electron-hosted VS Code with `redhat.vscode-yaml` pre-installed by
+the runner. It opens real YAML files with deliberately invalid
+content, polls `vscode.languages.getDiagnostics(...)` until the
+language server publishes (the validation is async), and asserts the
+right schema constraint fired. Completion is exercised via
+`vscode.executeCompletionItemProvider` against an empty
+`plc-project.yaml`, asserting the top-level property names from the
+schema appear.
+
+The runner (`runSchemaTest.ts`) uses
+`@vscode/test-electron::resolveCliArgsFromVSCodeExecutablePath` plus
+`code --install-extension redhat.vscode-yaml` to put the YAML
+extension into the test profile **before** booting; unlike the other
+E2E suites, it does not pass `--disable-extensions`. This is the only
+way to exercise the contribution end-to-end.
