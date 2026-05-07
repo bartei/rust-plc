@@ -175,6 +175,133 @@ suite("YAML schema validation (headless VS Code)", () => {
     );
   });
 
+  test("targets section is accepted (regression for missing 'targets' property)", async function () {
+    this.timeout(SCHEMA_DIAGNOSTIC_TIMEOUT_MS + 5000);
+
+    // Earlier the schema rejected `targets:` with "Property targets is
+    // not allowed" because the deployment-targets section was never
+    // wired. This pins the fix.
+    const subdir = path.join(tmpDir, "with-targets");
+    fs.mkdirSync(subdir, { recursive: true });
+    const filePath = path.join(subdir, "plc-project.yaml");
+    fs.writeFileSync(
+      filePath,
+      [
+        "name: ProjectWithTargets",
+        "version: 1.0.0",
+        "entryPoint: Main",
+        "targets:",
+        "  - name: line1-plc",
+        "    host: 10.1.2.193",
+        "    user: plc",
+        "    auth: key",
+        "    os: linux",
+        "    arch: aarch64",
+        "    agent_port: 4840",
+        "default_target: line1-plc",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    tempFiles.push(filePath);
+
+    const doc = await vscode.workspace.openTextDocument(filePath);
+    await vscode.window.showTextDocument(doc);
+    await sleep(2000);
+
+    const schemaDiags = vscode.languages.getDiagnostics(doc.uri)
+      .filter((d) => /yaml/i.test(d.source ?? ""));
+    assert.strictEqual(
+      schemaDiags.length, 0,
+      `targets section must be accepted, got: ${
+        schemaDiags.map((d) => `[L${d.range.start.line}] ${d.message}`).join(" | ")
+      }`,
+    );
+  });
+
+  test("simulated link + simulated protocol device is accepted (regression for missing enum values)", async function () {
+    this.timeout(SCHEMA_DIAGNOSTIC_TIMEOUT_MS + 5000);
+
+    // The link.type and device.protocol enums originally omitted
+    // 'simulated', breaking every playground project that uses an
+    // in-memory link for development.
+    const subdir = path.join(tmpDir, "simulated-io");
+    fs.mkdirSync(subdir, { recursive: true });
+    const filePath = path.join(subdir, "plc-project.yaml");
+    fs.writeFileSync(
+      filePath,
+      [
+        "name: SimulatedIO",
+        "version: 1.0.0",
+        "entryPoint: Main",
+        "links:",
+        "  - name: sim_link",
+        "    type: simulated",
+        "devices:",
+        "  - name: io_rack",
+        "    link: sim_link",
+        "    protocol: simulated",
+        "    mode: cyclic",
+        "    device_profile: sim_8di_4ai_4do_2ao",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    tempFiles.push(filePath);
+
+    const doc = await vscode.workspace.openTextDocument(filePath);
+    await vscode.window.showTextDocument(doc);
+    await sleep(2000);
+
+    const schemaDiags = vscode.languages.getDiagnostics(doc.uri)
+      .filter((d) => /yaml/i.test(d.source ?? ""));
+    assert.strictEqual(
+      schemaDiags.length, 0,
+      `simulated link/protocol must validate, got: ${
+        schemaDiags.map((d) => `[L${d.range.start.line}] ${d.message}`).join(" | ")
+      }`,
+    );
+  });
+
+  test("real-world template_project/plc-project.yaml has zero schema diagnostics", async function () {
+    this.timeout(SCHEMA_DIAGNOSTIC_TIMEOUT_MS + 5000);
+
+    // The shipped template uses every documented top-level field. If
+    // the schema diverges from the actual struct definitions, this
+    // test catches it. We open the file in-place from the playground
+    // directory (which is the test workspace) so its inline
+    // `# yaml-language-server: $schema=../../schemas/...` directive
+    // still resolves correctly. Strip the directive's lines from
+    // diagnostics in case the inline schema URL points at a path the
+    // language server can't load (we want to validate against the
+    // CONTRIBUTED schema, not the inline override).
+    const repoRoot = path.resolve(__dirname, "../../../../..");
+    const templatePath = path.join(repoRoot, "playground", "template_project", "plc-project.yaml");
+    if (!fs.existsSync(templatePath)) {
+      console.log(`skipping: template not found at ${templatePath}`);
+      return;
+    }
+
+    const doc = await vscode.workspace.openTextDocument(templatePath);
+    await vscode.window.showTextDocument(doc);
+    await sleep(3000); // template is larger; give the server time to validate
+
+    const schemaDiags = vscode.languages.getDiagnostics(doc.uri)
+      // Filter out diagnostics from the inline `# yaml-language-server: $schema=`
+      // directive itself (those are about the schema URL not loading,
+      // not about the file content).
+      .filter((d) => /yaml/i.test(d.source ?? ""))
+      .filter((d) =>
+        !/Unable to load schema|cannot load schema|No content/i.test(d.message),
+      );
+    assert.strictEqual(
+      schemaDiags.length, 0,
+      `template plc-project.yaml must validate cleanly, got: ${
+        schemaDiags.map((d) => `[L${d.range.start.line + 1}] ${d.message}`).join(" | ")
+      }`,
+    );
+  });
+
   test("completion in plc-project.yaml surfaces schema-defined properties", async function () {
     this.timeout(COMPLETION_TIMEOUT_MS + 5000);
 
@@ -208,6 +335,13 @@ suite("YAML schema validation (headless VS Code)", () => {
       hit,
       `expected at least one of ${JSON.stringify(expected)} in completion ` +
         `labels for empty plc-project.yaml, got: ${JSON.stringify(labels.slice(0, 20))}`,
+    );
+    // `targets` was the field that was originally missing from the
+    // schema. Pin it explicitly so a future regression is caught here.
+    assert.ok(
+      labels.includes("targets"),
+      `'targets' must appear in completion at top level of plc-project.yaml, ` +
+        `got: ${JSON.stringify(labels.slice(0, 20))}`,
     );
   });
 });

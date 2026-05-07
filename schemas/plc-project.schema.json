@@ -90,6 +90,17 @@
       "items": {
         "$ref": "#/$defs/device"
       }
+    },
+    "targets": {
+      "type": "array",
+      "description": "Remote deployment targets — Linux devices running st-target-agent that can receive program bundles via SSH or direct API. Referenced by `--target <name>` in CLI commands and the `target` field in VS Code attach launch configurations.",
+      "items": {
+        "$ref": "#/$defs/target"
+      }
+    },
+    "default_target": {
+      "type": "string",
+      "description": "Name of the target used when `--target` is omitted from a CLI command. Must match the `name` of an entry in the `targets` array."
     }
   },
   "required": ["name"],
@@ -105,8 +116,8 @@
         },
         "type": {
           "type": "string",
-          "description": "Link type: transport protocol.",
-          "enum": ["tcp", "serial", "udp"]
+          "description": "Link type: transport protocol. 'simulated' is an in-memory link for development/testing (no network or hardware required).",
+          "enum": ["tcp", "serial", "udp", "simulated"]
         },
         "host": {
           "type": "string",
@@ -186,8 +197,8 @@
         },
         "protocol": {
           "type": "string",
-          "description": "Application-layer protocol.",
-          "enum": ["modbus-tcp", "modbus-rtu", "modbus-ascii"]
+          "description": "Application-layer protocol. 'simulated' pairs with a `type: simulated` link and bypasses real I/O (development / testing).",
+          "enum": ["modbus-tcp", "modbus-rtu", "modbus-ascii", "simulated"]
         },
         "unit_id": {
           "type": "integer",
@@ -214,6 +225,58 @@
         }
       },
       "required": ["name", "link", "protocol", "device_profile"],
+      "additionalProperties": false
+    },
+    "target": {
+      "type": "object",
+      "description": "A deployment target — a remote Linux device running st-target-agent.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Target name. Used as the value of `--target <name>` and in VS Code attach launch configs.",
+          "minLength": 1
+        },
+        "host": {
+          "type": "string",
+          "description": "Hostname or IP address of the target.",
+          "examples": ["plc.line1.local", "192.168.1.50", "10.1.2.193"]
+        },
+        "user": {
+          "type": "string",
+          "description": "SSH username on the target.",
+          "default": "plc"
+        },
+        "auth": {
+          "type": "string",
+          "description": "Authentication mode. 'key' uses the developer's SSH key/agent (default). 'agent' connects directly to the agent's HTTPS API and bypasses SSH; requires TLS + bearer-token auth on the agent.",
+          "enum": ["key", "agent"],
+          "default": "key"
+        },
+        "os": {
+          "type": "string",
+          "description": "Target operating system. Currently only 'linux' is supported.",
+          "default": "linux",
+          "examples": ["linux"]
+        },
+        "arch": {
+          "type": "string",
+          "description": "Target CPU architecture. Used to select the correct cross-compiled binary for `st-cli target install`.",
+          "default": "x86_64",
+          "examples": ["x86_64", "aarch64", "armv7"]
+        },
+        "agent_port": {
+          "type": "integer",
+          "description": "TCP port the st-target-agent HTTP API listens on. The DAP debug port is always agent_port + 1.",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 4840
+        },
+        "deploy_path": {
+          "type": "string",
+          "description": "Filesystem path on the target where program bundles are stored. Defaults to the agent's configured program_dir."
+        }
+      },
+      "required": ["name", "host"],
       "additionalProperties": false
     }
   }
