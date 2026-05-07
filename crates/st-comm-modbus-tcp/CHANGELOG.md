@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5](https://github.com/bartei/rust-plc/compare/st-comm-modbus-tcp-v0.3.4...st-comm-modbus-tcp-v0.3.5) - 2026-05-07
+
+### Added
+
+- *(st-comm-upp)* UPP pyrometer protocol + Impac IGAR 6 Smart support
+- online program/update + full headless VS Code acceptance suite
+- array fields in device profiles with fb.field[i] access
+- Modbus TCP protocol support, batched coil writes
+
+### Other
+
+- release
+- release v0.3.3
+- release v0.3.2
+- release v0.3.1
+
 ## [0.3.4](https://github.com/bartei/rust-plc/compare/st-comm-modbus-tcp-v0.3.3...st-comm-modbus-tcp-v0.3.4) - 2026-05-02
 
 ### Added
