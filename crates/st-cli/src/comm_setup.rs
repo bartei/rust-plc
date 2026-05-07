@@ -8,6 +8,7 @@ use st_comm_modbus::device_fb::ModbusRtuDeviceNativeFb;
 use st_comm_modbus_tcp::device_fb::ModbusTcpDeviceNativeFb;
 use st_comm_serial::SerialLinkNativeFb;
 use st_comm_sim::SimulatedNativeFb;
+use st_comm_upp::UppDeviceNativeFb;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -72,6 +73,7 @@ pub fn load_native_fbs_for_project(project_root: &Path) -> Result<Option<NativeC
     let mut registry = NativeFbRegistry::new();
     let mut device_states = Vec::new();
     let mut has_modbus_rtu = false;
+    let mut has_serial_protocol = false;
 
     // Shared transport map for serial link-device binding.
     // SerialLink opens the port and registers it here; the BusManager
@@ -99,10 +101,24 @@ pub fn load_native_fbs_for_project(project_root: &Path) -> Result<Option<NativeC
                 );
                 registry.register(Box::new(modbus_fb));
                 has_modbus_rtu = true;
+                has_serial_protocol = true;
             }
             "modbus-tcp" => {
                 let tcp_fb = ModbusTcpDeviceNativeFb::new(profile.clone());
                 registry.register(Box::new(tcp_fb));
+            }
+            "upp" => {
+                // UPP (Universal Pyrometer Protocol — Impac IGAR 6 et al.)
+                // shares the SerialLink + BusManager plumbing with
+                // Modbus RTU. The per-device timing parameters
+                // (timeout, cooldown, refresh_rate) come from the
+                // device's VAR_INPUT slots set in the user's ST code.
+                let upp_fb = UppDeviceNativeFb::new(
+                    profile.clone(),
+                    Arc::clone(&bus_manager),
+                );
+                registry.register(Box::new(upp_fb));
+                has_serial_protocol = true;
             }
             other => {
                 eprintln!(
@@ -113,8 +129,12 @@ pub fn load_native_fbs_for_project(project_root: &Path) -> Result<Option<NativeC
         }
     }
 
-    // Auto-register SerialLink if any Modbus RTU devices were found
-    if has_modbus_rtu {
+    // Auto-register SerialLink if any device on this project uses a
+    // serial-line protocol. SerialLink opens / configures the port at
+    // FB-init time and registers the transport in the shared map; the
+    // BusManager then drives polling for every device on that port.
+    let _ = has_modbus_rtu;
+    if has_serial_protocol {
         registry.register(Box::new(SerialLinkNativeFb::with_transport_map(
             Arc::clone(&transport_map),
         )));

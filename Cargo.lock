@@ -2381,6 +2381,7 @@ dependencies = [
  "st-comm-modbus-tcp",
  "st-comm-serial",
  "st-comm-sim",
+ "st-comm-upp",
  "st-compiler",
  "st-dap",
  "st-deploy",
@@ -2460,6 +2461,20 @@ dependencies = [
  "st-syntax",
  "tokio",
  "tokio-tungstenite 0.24.0",
+ "tracing",
+]
+
+[[package]]
+name = "st-comm-upp"
+version = "0.3.4"
+dependencies = [
+ "serialport",
+ "st-comm-api",
+ "st-comm-serial",
+ "st-compiler",
+ "st-engine",
+ "st-ir",
+ "st-syntax",
  "tracing",
 ]
 
@@ -2661,7 +2676,9 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "st-comm-api",
+ "st-comm-serial",
  "st-comm-sim",
+ "st-comm-upp",
  "st-compiler",
  "st-deploy",
  "st-engine",

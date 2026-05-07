@@ -18,6 +18,8 @@ st-monitor = { path = "../st-monitor" }
 st-deploy = { path = "../st-deploy" }
 st-comm-api = { path = "../st-comm-api" }
 st-comm-sim = { path = "../st-comm-sim" }
+st-comm-serial = { path = "../st-comm-serial" }
+st-comm-upp = { path = "../st-comm-upp" }
 st-opcua-server = { path = "../st-opcua-server", optional = true }
 
 tokio.workspace = true

@@ -29,9 +29,22 @@ pub struct DeviceProfile {
 }
 
 /// A single I/O field in a device profile.
+///
+/// A field is bound to a transport-specific addressing scheme via
+/// **at least one** of:
+///
+/// - [`ProfileField::register`] — Modbus register address + kind
+///   (used by Modbus RTU / TCP / ASCII profiles).
+/// - [`ProfileField::upp`] — UPP command mnemonic + decoder
+///   (used by Impac / LumaSense pyrometer profiles).
+///
+/// Both fields are optional in YAML; the runtime layer rejects a
+/// profile whose `protocol:` doesn't match any of the bindings the
+/// fields actually carry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileField {
-    /// Field name in the ST struct (e.g., "DI_0", "SPEED_REF").
+    /// Field name in the ST struct (e.g., "DI_0", "SPEED_REF",
+    /// "temperature").
     pub name: String,
 
     /// IEC 61131-3 data type.
@@ -41,8 +54,18 @@ pub struct ProfileField {
     /// I/O direction.
     pub direction: FieldDirection,
 
-    /// Register mapping on the physical device.
-    pub register: RegisterMapping,
+    /// Modbus register mapping. Required for Modbus profiles, omitted
+    /// for non-Modbus protocols (e.g. UPP — see [`Self::upp`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub register: Option<RegisterMapping>,
+
+    /// UPP (Universal Pyrometer Protocol) command binding. Set on
+    /// fields of pyrometer profiles. The runtime resolves the
+    /// mnemonic and decoder strings against the `Command` /
+    /// `Decoder` enums in the `st-comm-upp` crate at FB
+    /// construction time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upp: Option<UppFieldBinding>,
 
     /// Number of consecutive registers (default 1). When > 1, the field
     /// becomes an array: `ARRAY[0..count-1] OF data_type`.
@@ -52,6 +75,42 @@ pub struct ProfileField {
     /// Human-readable description.
     #[serde(default)]
     pub description: Option<String>,
+}
+
+/// Per-field UPP binding parsed from the YAML `upp:` block. The
+/// strings are validated against the `Command` and `Decoder` enums
+/// in the `st-comm-upp` crate at FB construction time — keeping the
+/// validation there means `st-comm-api` does not depend on the UPP
+/// crate (which would create a build cycle).
+///
+/// Spec: see `plan/design_igar.md` "Profile YAML" — the YAML shape is:
+///
+/// ```yaml
+/// fields:
+///   - name: temperature
+///     type: REAL
+///     direction: input
+///     upp:
+///       command: ms
+///       decoder: temp_5d_tenth
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UppFieldBinding {
+    /// 2-letter UPP command mnemonic (e.g. `"em"`, `"ms"`, `"ek"`).
+    /// Must match a variant of the `Command` enum at FB
+    /// construction time.
+    pub command: String,
+
+    /// Named decoder for the response payload (e.g.
+    /// `"temp_5d_tenth"`, `"u16_dec_milli"`, `"hex_pair_8"`).
+    /// Must match a variant of the `Decoder` enum at FB
+    /// construction time.
+    pub decoder: String,
+
+    /// Optional channel selector for `ek` (1-channel + ratio in one
+    /// answer). Accepted values are `"one_channel"` or `"ratio"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
 }
 
 fn default_field_count() -> u16 {
@@ -280,8 +339,9 @@ fields:
         let speed_ref = &profile.fields[1];
         assert_eq!(speed_ref.name, "SPEED_REF");
         assert_eq!(speed_ref.data_type, FieldDataType::Real);
-        assert_eq!(speed_ref.register.scale, Some(0.1));
-        assert_eq!(speed_ref.register.unit.as_deref(), Some("Hz"));
+        let reg = speed_ref.register.as_ref().expect("Modbus profile carries a register mapping");
+        assert_eq!(reg.scale, Some(0.1));
+        assert_eq!(reg.unit.as_deref(), Some("Hz"));
     }
 
     #[test]
@@ -309,10 +369,80 @@ fields:
     register: { address: 5, kind: input_register }
 "#;
         let profile = DeviceProfile::from_yaml(yaml).unwrap();
-        let reg = &profile.fields[0].register;
+        let reg = profile.fields[0].register.as_ref().expect("present in YAML");
         assert_eq!(reg.byte_order, ByteOrder::BigEndian);
         assert_eq!(reg.word_count, 1);
         assert_eq!(reg.scale, None);
         assert_eq!(reg.offset, None);
+    }
+
+    #[test]
+    fn upp_field_binding_parses() {
+        // A pyrometer profile uses `upp:` instead of `register:` per
+        // field. Both are optional in the YAML; the runtime layer
+        // routes profiles based on the top-level `protocol:` value.
+        let yaml = r#"
+name: ImpacIgar6Smart
+vendor: Impac
+protocol: upp
+fields:
+  - name: temperature
+    type: REAL
+    direction: input
+    upp:
+      command: ms
+      decoder: temp_5d_tenth
+  - name: ratio_temperature
+    type: REAL
+    direction: input
+    upp:
+      command: ek
+      decoder: temp_pair_5d_tenth
+      channel: ratio
+  - name: emissivity
+    type: REAL
+    direction: inout
+    upp:
+      command: em
+      decoder: u16_dec_milli
+"#;
+        let profile = DeviceProfile::from_yaml(yaml).unwrap();
+        assert_eq!(profile.protocol.as_deref(), Some("upp"));
+        assert_eq!(profile.fields.len(), 3);
+        // No register mapping on UPP fields.
+        for pf in &profile.fields {
+            assert!(pf.register.is_none(), "UPP fields must not carry register:");
+        }
+        // Each field has a UPP binding.
+        let temp = &profile.fields[0];
+        let upp = temp.upp.as_ref().unwrap();
+        assert_eq!(upp.command, "ms");
+        assert_eq!(upp.decoder, "temp_5d_tenth");
+        assert!(upp.channel.is_none());
+        // ek+ratio carries the channel selector.
+        let ek = profile.fields[1].upp.as_ref().unwrap();
+        assert_eq!(ek.command, "ek");
+        assert_eq!(ek.channel.as_deref(), Some("ratio"));
+    }
+
+    #[test]
+    fn modbus_field_round_trip_keeps_register_some() {
+        // Backwards-compat: Modbus profiles still parse cleanly,
+        // and `register` is `Some(_)`. This pins the migration story
+        // — making `register` optional MUST NOT break existing
+        // profiles in profiles/.
+        let yaml = r#"
+name: TestIO
+protocol: modbus-rtu
+fields:
+  - name: DI_0
+    type: BOOL
+    direction: input
+    register: { address: 0, kind: coil }
+"#;
+        let profile = DeviceProfile::from_yaml(yaml).unwrap();
+        assert_eq!(profile.protocol.as_deref(), Some("modbus-rtu"));
+        assert!(profile.fields[0].register.is_some());
+        assert!(profile.fields[0].upp.is_none());
     }
 }

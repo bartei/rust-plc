@@ -2,6 +2,11 @@
 
 > **Design document:** [design_comm.md](design_comm.md) — architecture, examples, rationale.
 > **Parent plan:** [implementation_core.md](implementation_core.md) — core platform progress tracker.
+> **Per-protocol crates:**
+> - Modbus RTU / TCP / ASCII — sections below
+> - Impac IGAR 6 / UPP (Universal Pyrometer Protocol) — see
+>   [design_igar.md](design_igar.md) and
+>   [implementation_igar.md](implementation_igar.md)
 
 ---
 

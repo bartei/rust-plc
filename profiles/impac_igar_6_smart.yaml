@@ -1,0 +1,172 @@
+# yaml-language-server: $schema=../schemas/device-profile.schema.json
+#
+# Impac IGAR 6 Smart digital pyrometer.
+# Vendor: Advanced Energy / LumaSense / Impac (formerly Impac Infrared GmbH)
+# Manual ref: 57010259-00A "Impac IGAR 6 Smart Pyrometer User Manual" (Nov 2021)
+# Range: 100..2550 °C (1-color / Smart) or 250..2550 °C (2-color / metal)
+# Wire: RS485 half-duplex, 8E1, baud configurable on the device (factory 19200)
+# Protocol: UPP — Universal Pyrometer Protocol (manual §7)
+#
+# Each field below names the UPP command (2-letter mnemonic) and a
+# named decoder. The runtime layer (st-comm-upp) resolves the strings
+# against typed Command + Decoder enums at FB construction time.
+
+name: ImpacIgar6Smart
+vendor: Advanced Energy
+protocol: upp
+description: "Impac IGAR 6 Smart digital pyrometer (100..2550 °C, RS485 UPP)"
+
+fields:
+  # ── Live measurements (read-only) ─────────────────────────────────
+
+  - name: temperature
+    type: REAL
+    direction: input
+    description: "Active-mode temperature reading (°C or °F per device's fh setting)"
+    upp:
+      command: ms          # manual §7 — 5 decimal digits, last is 1/10
+      decoder: temp_5d_tenth
+
+  - name: ratio_temperature
+    type: REAL
+    direction: input
+    description: "2-color (ratio) temperature, available alongside the 1-color reading via the ek pair command"
+    upp:
+      command: ek
+      decoder: temp_pair_5d_tenth
+      channel: ratio
+
+  - name: one_channel_temperature
+    type: REAL
+    direction: input
+    description: "1-color temperature from the same ek pair answer"
+    upp:
+      command: ek
+      decoder: temp_pair_5d_tenth
+      channel: one_channel
+
+  - name: peak_value
+    type: REAL
+    direction: input
+    description: "Maximum temperature in the configured tCLEAR window"
+    upp:
+      command: tm
+      decoder: temp_5d_tenth
+
+  - name: internal_temperature
+    type: REAL
+    direction: input
+    description: "Pyrometer housing temperature (000..098 °C / 032..210 °F)"
+    upp:
+      command: gt
+      decoder: temp_3d_int
+
+  - name: signal_strength
+    type: REAL
+    direction: input
+    description: "Relative signal strength (manual §4.9), 0..1500"
+    upp:
+      command: tr
+      decoder: u16_dec_4
+
+  # ── Tunable parameters (read/write) ───────────────────────────────
+
+  - name: emissivity
+    type: REAL
+    direction: inout
+    description: "Emissivity ε (1-color mode), 0.050..1.000 in steps of 1/1000"
+    upp:
+      command: em          # 0050..1000 → 0.050..1.000
+      decoder: u16_dec_milli
+
+  - name: transmittance
+    type: REAL
+    direction: inout
+    description: "Transmittance τ (compensates for an external window), 0.050..1.000"
+    upp:
+      command: et
+      decoder: u16_dec_milli
+
+  - name: emissivity_ratio_k
+    type: REAL
+    direction: inout
+    description: "Emissivity slope K = ε1/ε2 (2-color mode), 0.800..1.200"
+    upp:
+      command: ev
+      decoder: u16_dec_milli
+
+  - name: response_time
+    type: INT
+    direction: inout
+    description: "t90 selector: 0=min, 1=0.01s, 2=0.05s, 3=0.25s, 4=1s, 5=3s, 6=10s"
+    upp:
+      command: ez
+      decoder: enum_response_time
+
+  - name: clear_peak_mode
+    type: INT
+    direction: inout
+    description: "tCLEAR mode: 0=OFF, 1=0.01s, 2=0.05s, 3=0.25s, 4=1s, 5=5s, 6=25s, 7=EXTERN, 8=AUTO, 9=HOLD"
+    upp:
+      command: lz
+      decoder: enum_clear_peak
+
+  - name: operation_mode
+    type: INT
+    direction: inout
+    description: "0=metal, 1=mono (1-color), 2=ratio (2-color), 3=Smart"
+    upp:
+      command: ka
+      decoder: enum_op_mode
+
+  - name: temperature_unit_fahrenheit
+    type: BOOL
+    direction: inout
+    description: "Display + interface temperature unit. FALSE=°C, TRUE=°F"
+    upp:
+      command: fh
+      decoder: bool_digit
+
+  - name: laser_on
+    type: BOOL
+    direction: inout
+    description: "Laser-targeting light: FALSE=off, TRUE=on (Class II laser, see manual §3.2.2)"
+    upp:
+      command: la
+      decoder: bool_digit
+
+  - name: dirty_window_threshold
+    type: INT
+    direction: inout
+    description: "'Dirty Window' warning threshold, 0..99 % (0 disables)"
+    upp:
+      command: dw
+      decoder: u16_dec       # answer is 2 hex digits — same numeric type
+                             # as a 4-digit decimal; runtime widens to u16
+                             # before scaling
+
+  - name: switch_off_level
+    type: INT
+    direction: inout
+    description: "Minimum-intensity switch-off level (manual §4.11), 2..50 %"
+    upp:
+      command: aw
+      decoder: u16_dec
+
+  # ── Identity / metadata (read-only) ───────────────────────────────
+
+  - name: device_type_text
+    type: STRING
+    direction: input
+    description: "ASCII device-type string, padded to 16 chars (e.g. 'IGAR 6 Smart  ')"
+    upp:
+      command: na
+      decoder: text
+
+  - name: serial_number_hex
+    type: STRING
+    direction: input
+    description: "Hex serial number (5 digits)"
+    upp:
+      command: sn
+      decoder: text          # raw ASCII; user code parses if needed

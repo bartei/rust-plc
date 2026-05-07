@@ -17,8 +17,8 @@
     },
     "protocol": {
       "type": "string",
-      "description": "Primary protocol this profile is designed for. The profile may work with compatible protocols (e.g., modbus-tcp and modbus-rtu share register maps).",
-      "enum": ["modbus-tcp", "modbus-rtu", "modbus-ascii", "generic"]
+      "description": "Primary protocol this profile is designed for. The profile may work with compatible protocols (e.g., modbus-tcp and modbus-rtu share register maps). 'upp' is the Universal Pyrometer Protocol used by Impac/LumaSense/Advanced Energy pyrometers — fields then carry an 'upp:' block instead of 'register:'.",
+      "enum": ["modbus-tcp", "modbus-rtu", "modbus-ascii", "generic", "upp"]
     },
     "description": {
       "type": "string",
@@ -57,14 +57,69 @@
         },
         "register": {
           "$ref": "#/$defs/register",
-          "description": "Register mapping — how this field is read/written on the physical device."
+          "description": "Register mapping — how this field is read/written on the physical device. Required for Modbus profiles, omitted for non-Modbus protocols (e.g. UPP — see 'upp:')."
+        },
+        "upp": {
+          "$ref": "#/$defs/upp_binding",
+          "description": "UPP (Universal Pyrometer Protocol) binding — the 2-letter command mnemonic and the named decoder. Required for fields of profiles whose top-level 'protocol:' is 'upp'."
+        },
+        "count": {
+          "type": "integer",
+          "description": "Number of consecutive registers / array length when the field is repeated. Default 1.",
+          "minimum": 1,
+          "default": 1
         },
         "description": {
           "type": "string",
           "description": "Human-readable description of this field."
         }
       },
-      "required": ["name", "type", "direction", "register"],
+      "required": ["name", "type", "direction"],
+      "oneOf": [
+        { "required": ["register"] },
+        { "required": ["upp"] }
+      ],
+      "additionalProperties": false
+    },
+    "upp_binding": {
+      "type": "object",
+      "description": "Per-field UPP command binding. The runtime resolves the mnemonic and decoder strings against the Command and Decoder enums in the st-comm-upp crate at FB construction time.",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "2-letter UPP command mnemonic (manual §7). Append '?' to read the parameter's allowed range instead of its current value.",
+          "examples": ["em", "et", "ev", "ms", "ek", "gt", "tr", "na", "em?", "ev?"],
+          "pattern": "^[a-z][a-z]\\??$|^[a-z][1-9]\\??$"
+        },
+        "decoder": {
+          "type": "string",
+          "description": "Named decoder for the response payload.",
+          "enum": [
+            "temp_5d_tenth",
+            "temp_pair_5d_tenth",
+            "temp_3d_int",
+            "u16_dec",
+            "u16_dec_4",
+            "u16_dec_milli",
+            "enum_1",
+            "enum_response_time",
+            "enum_op_mode",
+            "enum_1_wide",
+            "enum_clear_peak",
+            "bool_digit",
+            "hex_pair_8",
+            "range_pair",
+            "ack",
+            "text"
+          ]
+        },
+        "channel": {
+          "type": "string",
+          "description": "Channel selector for the 'ek' command (1-channel + ratio in one answer). Required when decoder='temp_pair_5d_tenth'.",
+          "enum": ["one_channel", "ratio"]
+        }
+      },
+      "required": ["command", "decoder"],
       "additionalProperties": false
     },
     "register": {

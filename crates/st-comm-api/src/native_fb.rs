@@ -237,6 +237,56 @@ impl DeviceProfile {
         }
     }
 
+    /// Build a [`NativeFbLayout`] for a UPP (Universal Pyrometer
+    /// Protocol) device profile, used by the Impac IGAR 6 Smart and
+    /// related LumaSense / Advanced Energy pyrometers over RS485.
+    ///
+    /// Mirrors [`Self::to_modbus_rtu_device_layout`] in shape — same
+    /// `link` reference to a separate SerialLink, same diagnostic
+    /// block — but swaps `slave_id` for `device_id` (matches the
+    /// manual's "Device Address") and adds an explicit `cooldown`
+    /// field for UPP's mandatory ≥1.5 ms post-response gap (manual
+    /// §7 "Additional instruction for the RS485 interface", item 4).
+    ///
+    /// Layout: link, device_id, refresh_rate, timeout, cooldown,
+    /// diagnostics, profile I/O fields.
+    pub fn to_upp_device_layout(&self) -> NativeFbLayout {
+        let mut fields = vec![
+            // -- VAR_INPUT: link binding + protocol parameters --
+            NativeFbField { name: "link".into(), data_type: FieldDataType::String, var_kind: NativeFbVarKind::VarInput, dimensions: None },
+            NativeFbField { name: "device_id".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::VarInput, dimensions: None },
+            NativeFbField { name: "refresh_rate".into(), data_type: FieldDataType::Time, var_kind: NativeFbVarKind::VarInput, dimensions: None },
+            NativeFbField { name: "timeout".into(), data_type: FieldDataType::Time, var_kind: NativeFbVarKind::VarInput, dimensions: None },
+            NativeFbField { name: "cooldown".into(), data_type: FieldDataType::Time, var_kind: NativeFbVarKind::VarInput, dimensions: None },
+            // -- VAR: diagnostic fields --
+            NativeFbField { name: "connected".into(), data_type: FieldDataType::Bool, var_kind: NativeFbVarKind::Var, dimensions: None },
+            NativeFbField { name: "error_code".into(), data_type: FieldDataType::Int, var_kind: NativeFbVarKind::Var, dimensions: None },
+            NativeFbField { name: "errors_count".into(), data_type: FieldDataType::Udint, var_kind: NativeFbVarKind::Var, dimensions: None },
+            NativeFbField { name: "io_cycles".into(), data_type: FieldDataType::Udint, var_kind: NativeFbVarKind::Var, dimensions: None },
+            NativeFbField { name: "last_response_ms".into(), data_type: FieldDataType::Real, var_kind: NativeFbVarKind::Var, dimensions: None },
+        ];
+
+        // -- VAR: I/O fields from the profile (one per command-bound field) --
+        for pf in &self.fields {
+            let dims = if pf.count > 1 {
+                Some(vec![(0, pf.count as i64 - 1)])
+            } else {
+                None
+            };
+            fields.push(NativeFbField {
+                name: pf.name.clone(),
+                data_type: pf.data_type,
+                var_kind: NativeFbVarKind::Var,
+                dimensions: dims,
+            });
+        }
+
+        NativeFbLayout {
+            type_name: self.name.clone(),
+            fields,
+        }
+    }
+
     /// Build a [`NativeFbLayout`] for a Modbus TCP device profile.
     ///
     /// Unlike RTU (which takes a `link` reference to a separate SerialLink),

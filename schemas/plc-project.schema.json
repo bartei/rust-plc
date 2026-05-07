@@ -197,8 +197,8 @@
         },
         "protocol": {
           "type": "string",
-          "description": "Application-layer protocol. 'simulated' pairs with a `type: simulated` link and bypasses real I/O (development / testing).",
-          "enum": ["modbus-tcp", "modbus-rtu", "modbus-ascii", "simulated"]
+          "description": "Application-layer protocol. 'simulated' pairs with a `type: simulated` link and bypasses real I/O (development / testing). 'upp' is the Universal Pyrometer Protocol used by Impac/LumaSense pyrometers (RS485 ASCII).",
+          "enum": ["modbus-tcp", "modbus-rtu", "modbus-ascii", "simulated", "upp"]
         },
         "unit_id": {
           "type": "integer",

@@ -105,6 +105,25 @@ pub async fn start(State(state): State<Arc<AppState>>) -> Result<Json<serde_json
 }
 
 /// Build a [`NativeFbRegistry`] from YAML profiles in the given directory.
+///
+/// Dispatches on each profile's `protocol:` field, matching the
+/// pattern used by `st-cli` (see `crates/st-cli/src/comm_setup.rs`).
+/// The agent intentionally supports a smaller set than the CLI —
+/// the agent runs on production targets, so we only wire in
+/// protocols that have both a runtime FB **and** a published profile
+/// schema:
+///
+/// - `simulated` — in-memory dummy device (development / tests)
+/// - `upp` — Universal Pyrometer Protocol over RS485 (Impac IGAR 6
+///   etc.)
+///
+/// All UPP devices on the same `link` (i.e. same serial port) share a
+/// single [`BusManager`](st_comm_serial::BusManager) so writes /
+/// reads are serialised on the bus. The `SerialLink` FB is
+/// auto-registered when at least one serial-line device is present.
+///
+/// Profiles whose `protocol:` we don't support log a warning and are
+/// skipped — the program still loads, just without that device.
 fn build_native_fb_registry(
     profiles_dir: &std::path::Path,
 ) -> Option<st_comm_api::NativeFbRegistry> {
@@ -112,20 +131,60 @@ fn build_native_fb_registry(
         return None;
     }
     let entries = std::fs::read_dir(profiles_dir).ok()?;
+
+    let transport_map = st_comm_serial::new_transport_map();
+    let bus_manager = std::sync::Arc::new(st_comm_serial::BusManager::new(
+        std::sync::Arc::clone(&transport_map),
+    ));
+
     let mut registry = st_comm_api::NativeFbRegistry::new();
+    let mut has_serial_protocol = false;
+
     for entry in entries.flatten() {
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         if ext != "yaml" && ext != "yml" {
             continue;
         }
-        if let Ok(profile) = st_comm_api::DeviceProfile::from_file(&path) {
-            let name = profile.name.clone();
-            registry.register(Box::new(
-                st_comm_sim::SimulatedNativeFb::new(&name, profile),
-            ));
+        let Ok(profile) = st_comm_api::DeviceProfile::from_file(&path) else {
+            tracing::warn!("Failed to parse device profile {}", path.display());
+            continue;
+        };
+        let name = profile.name.clone();
+        let protocol = profile.protocol.as_deref().unwrap_or("simulated");
+        match protocol {
+            "simulated" => {
+                registry.register(Box::new(
+                    st_comm_sim::SimulatedNativeFb::new(&name, profile),
+                ));
+            }
+            "upp" => {
+                registry.register(Box::new(st_comm_upp::UppDeviceNativeFb::new(
+                    profile,
+                    std::sync::Arc::clone(&bus_manager),
+                )));
+                has_serial_protocol = true;
+            }
+            other => {
+                tracing::warn!(
+                    "Profile {name:?} uses unsupported protocol {other:?}, skipping"
+                );
+            }
         }
     }
+
+    // Auto-register the SerialLink FB when at least one serial-line
+    // device was loaded. SerialLink opens / configures the port at
+    // FB-init time and registers the transport in `transport_map`;
+    // the BusManager then drives polling for every device on it.
+    if has_serial_protocol {
+        registry.register(Box::new(
+            st_comm_serial::SerialLinkNativeFb::with_transport_map(
+                std::sync::Arc::clone(&transport_map),
+            ),
+        ));
+    }
+
     if registry.is_empty() { None } else { Some(registry) }
 }
 

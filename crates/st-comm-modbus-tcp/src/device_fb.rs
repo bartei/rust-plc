@@ -290,14 +290,17 @@ fn expand_registers(profile: &DeviceProfile, direction_filter: impl Fn(&FieldDir
         if !direction_filter(&pf.direction) {
             continue;
         }
+        let Some(register) = pf.register.as_ref() else {
+            continue;
+        };
         let count = pf.count.max(1) as usize;
         for j in 0..count {
             regs.push(ExpandedReg {
                 io_idx: offsets[i] + j,
-                address: pf.register.address as u16 + j as u16,
-                kind: pf.register.kind,
+                address: register.address as u16 + j as u16,
+                kind: register.kind,
                 data_type: pf.data_type,
-                register: pf.register.clone(),
+                register: register.clone(),
                 field_name: pf.name.clone(),
             });
         }

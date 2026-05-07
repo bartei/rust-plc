@@ -344,6 +344,192 @@ suite("YAML schema validation (headless VS Code)", () => {
         `got: ${JSON.stringify(labels.slice(0, 20))}`,
     );
   });
+
+  // ── UPP / pyrometer schema additions ────────────────────────────
+
+  test("device profile with protocol: upp and per-field upp: bindings validates clean", async function () {
+    this.timeout(SCHEMA_DIAGNOSTIC_TIMEOUT_MS + 5000);
+
+    // Pyrometer profiles use `upp:` blocks instead of `register:`.
+    // The schema's `oneOf` on the field must accept this shape.
+    const filePath = path.join(tmpDir, "profiles", "pyro_clean.yaml");
+    fs.writeFileSync(
+      filePath,
+      [
+        "name: ImpacIgar6Smart",
+        "vendor: Advanced Energy",
+        "protocol: upp",
+        "fields:",
+        "  - name: temperature",
+        "    type: REAL",
+        "    direction: input",
+        "    upp:",
+        "      command: ms",
+        "      decoder: temp_5d_tenth",
+        "  - name: emissivity",
+        "    type: REAL",
+        "    direction: inout",
+        "    upp:",
+        "      command: em",
+        "      decoder: u16_dec_milli",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    tempFiles.push(filePath);
+
+    const doc = await vscode.workspace.openTextDocument(filePath);
+    await vscode.window.showTextDocument(doc);
+    await sleep(2000);
+    const diags = vscode.languages.getDiagnostics(doc.uri)
+      .filter((d) => /yaml/i.test(d.source ?? ""));
+    assert.strictEqual(
+      diags.length, 0,
+      `clean UPP profile must validate, got: ${diags.map((d) => d.message).join(" | ")}`,
+    );
+  });
+
+  test("device profile with unknown UPP decoder is flagged", async function () {
+    this.timeout(SCHEMA_DIAGNOSTIC_TIMEOUT_MS + 5000);
+
+    // `decoder` must come from the schema's enum. An unknown value
+    // is the most common typo and must be rejected by the language
+    // server, not deferred to runtime.
+    const filePath = path.join(tmpDir, "profiles", "pyro_bad_decoder.yaml");
+    fs.writeFileSync(
+      filePath,
+      [
+        "name: BadProfile",
+        "protocol: upp",
+        "fields:",
+        "  - name: temperature",
+        "    type: REAL",
+        "    direction: input",
+        "    upp:",
+        "      command: ms",
+        "      decoder: definitely_not_a_decoder",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    tempFiles.push(filePath);
+
+    const doc = await vscode.workspace.openTextDocument(filePath);
+    await vscode.window.showTextDocument(doc);
+    const diags = await waitForDiagnostics(
+      doc.uri,
+      SCHEMA_DIAGNOSTIC_TIMEOUT_MS,
+      (ds) => ds.some((d) => /enum|allowed values|decoder/i.test(d.message)),
+    );
+    assert.ok(
+      diags.length > 0,
+      "expected enum-rejection diagnostic for unknown decoder",
+    );
+  });
+
+  test("device profile field with neither register nor upp is flagged", async function () {
+    this.timeout(SCHEMA_DIAGNOSTIC_TIMEOUT_MS + 5000);
+
+    // The schema's oneOf requires exactly one of `register` or `upp`.
+    // A field with NEITHER must be reported.
+    const filePath = path.join(tmpDir, "profiles", "pyro_no_binding.yaml");
+    fs.writeFileSync(
+      filePath,
+      [
+        "name: NoBinding",
+        "fields:",
+        "  - name: temperature",
+        "    type: REAL",
+        "    direction: input",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    tempFiles.push(filePath);
+
+    const doc = await vscode.workspace.openTextDocument(filePath);
+    await vscode.window.showTextDocument(doc);
+    const diags = await waitForDiagnostics(
+      doc.uri,
+      SCHEMA_DIAGNOSTIC_TIMEOUT_MS,
+      (ds) => ds.some((d) => /oneOf|register|upp|missing/i.test(d.message)),
+    );
+    assert.ok(
+      diags.length > 0,
+      "expected oneOf / missing-binding diagnostic when field has neither register: nor upp:",
+    );
+  });
+
+  test("plc-project.yaml accepts protocol: upp on a device", async function () {
+    this.timeout(SCHEMA_DIAGNOSTIC_TIMEOUT_MS + 5000);
+
+    // Regression: 'upp' was added to the device.protocol enum in
+    // plc-project.schema.json alongside the new pyrometer crate.
+    const subdir = path.join(tmpDir, "with-upp-device");
+    fs.mkdirSync(subdir, { recursive: true });
+    const filePath = path.join(subdir, "plc-project.yaml");
+    fs.writeFileSync(
+      filePath,
+      [
+        "name: WithUppDevice",
+        "version: 1.0.0",
+        "entryPoint: Main",
+        "links:",
+        "  - name: rs485_bus",
+        "    type: serial",
+        "    port: /dev/ttyUSB0",
+        "    baud: 19200",
+        "    parity: even",
+        "devices:",
+        "  - name: pyro1",
+        "    link: rs485_bus",
+        "    protocol: upp",
+        "    mode: cyclic",
+        "    device_profile: impac_igar_6_smart",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    tempFiles.push(filePath);
+
+    const doc = await vscode.workspace.openTextDocument(filePath);
+    await vscode.window.showTextDocument(doc);
+    await sleep(2000);
+    const diags = vscode.languages.getDiagnostics(doc.uri)
+      .filter((d) => /yaml/i.test(d.source ?? ""));
+    assert.strictEqual(
+      diags.length, 0,
+      `protocol: upp must validate, got: ${diags.map((d) => d.message).join(" | ")}`,
+    );
+  });
+
+  test("shipped profiles/impac_igar_6_smart.yaml has zero schema diagnostics", async function () {
+    this.timeout(SCHEMA_DIAGNOSTIC_TIMEOUT_MS + 5000);
+
+    // Read the shipped YAML straight from the repo. Catches the
+    // case where someone adds a new field whose decoder name isn't
+    // in the schema enum.
+    const repoRoot = path.resolve(__dirname, "../../../../..");
+    const profilePath = path.join(repoRoot, "profiles", "impac_igar_6_smart.yaml");
+    if (!fs.existsSync(profilePath)) {
+      console.log(`skipping: profile not found at ${profilePath}`);
+      return;
+    }
+    const doc = await vscode.workspace.openTextDocument(profilePath);
+    await vscode.window.showTextDocument(doc);
+    await sleep(3000);
+    const diags = vscode.languages.getDiagnostics(doc.uri)
+      .filter((d) => /yaml/i.test(d.source ?? ""))
+      .filter((d) =>
+        !/Unable to load schema|cannot load schema|No content/i.test(d.message),
+      );
+    assert.strictEqual(
+      diags.length, 0,
+      `shipped IGAR profile must validate cleanly, got: ${
+        diags.map((d) => `[L${d.range.start.line + 1}] ${d.message}`).join(" | ")
+      }`,
+    );
+  });
 });
 
 // ── helpers ───────────────────────────────────────────────────────────

@@ -284,7 +284,7 @@ fn update_node_values(
     // logged at most once until the next catalog rebuild.
     for ((id, dv), var) in owned_node_ids
         .iter()
-        .zip(data_values.into_iter())
+        .zip(data_values)
         .zip(variables.iter())
     {
         let item = std::iter::once((

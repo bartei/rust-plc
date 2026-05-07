@@ -329,14 +329,20 @@ fn expand_registers(
         if !direction_filter(&pf.direction) {
             continue;
         }
+        // Modbus profiles always carry a register mapping. Skip
+        // fields that don't (they belong to a non-Modbus profile
+        // that's been mis-routed through this expander).
+        let Some(register) = pf.register.as_ref() else {
+            continue;
+        };
         let count = pf.count.max(1) as usize;
         for j in 0..count {
             regs.push(ExpandedReg {
                 io_idx: offsets[i] + j,
-                address: pf.register.address as u16 + j as u16,
-                kind: pf.register.kind,
+                address: register.address as u16 + j as u16,
+                kind: register.kind,
                 data_type: pf.data_type,
-                register: pf.register.clone(),
+                register: register.clone(),
                 field_name: pf.name.clone(),
             });
         }

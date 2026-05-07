@@ -9,6 +9,8 @@
 > - [implementation_native.md](implementation_native.md) — LLVM native compilation + hardware targets
 > - [implementation_deploy.md](implementation_deploy.md) — remote deployment & online management
 > - [design_deploy.md](design_deploy.md) — remote deployment design
+> - [implementation_igar.md](implementation_igar.md) — Impac IGAR 6 / UPP protocol implementation tracker
+> - [design_igar.md](design_igar.md) — Impac IGAR 6 / UPP protocol design
 > - [cross_compilation_gaps.md](cross_compilation_gaps.md) — cross-compilation reference
 
 ---
